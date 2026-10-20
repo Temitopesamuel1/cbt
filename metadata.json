@@ -1,0 +1,7 @@
+{
+  "name": "Prime CBT Practice",
+  "description": "A responsive JAMB-style CBT examination platform for Nigerian secondary school students and teachers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

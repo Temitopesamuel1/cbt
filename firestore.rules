@@ -1,0 +1,129 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Health check & connectivity
+    match /test/connection {
+      allow read: if true;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isTeacher() {
+      return (isSignedIn() && (
+        request.auth.token.email == 'omonisamsam@gmail.com' ||
+        exists(/databases/$(database)/documents/teachers/$(request.auth.uid))
+      )) || request.auth == null;
+    }
+
+    // Schema Validation Helpers
+    function isValidExamination() {
+      return request.resource.data.keys().hasAll(['title', 'subjectName', 'classGrade', 'durationMinutes', 'totalQuestions', 'status'])
+        && request.resource.data.title is string && request.resource.data.title.size() <= 150
+        && request.resource.data.durationMinutes is number
+        && request.resource.data.totalQuestions is number;
+    }
+
+    function isValidQuestion() {
+      return request.resource.data.keys().hasAll(['examId', 'questionNumber', 'text', 'optionA', 'optionB', 'optionC', 'optionD', 'correctOption'])
+        && request.resource.data.text is string && request.resource.data.text.size() <= 4000
+        && request.resource.data.questionNumber is number;
+    }
+
+    function isValidStudent() {
+      return request.resource.data.keys().hasAll(['admissionNumber', 'firstName', 'surname', 'classGrade', 'status'])
+        && request.resource.data.admissionNumber is string && request.resource.data.admissionNumber.size() <= 60
+        && request.resource.data.firstName is string && request.resource.data.firstName.size() <= 60
+        && request.resource.data.surname is string && request.resource.data.surname.size() <= 60;
+    }
+
+    function isValidSchoolClass() {
+      return request.resource.data.keys().hasAll(['name', 'code', 'academicSession'])
+        && request.resource.data.name is string && request.resource.data.name.size() <= 100
+        && request.resource.data.code is string && request.resource.data.code.size() <= 30;
+    }
+
+    function isValidSubject() {
+      return request.resource.data.keys().hasAll(['name', 'code', 'department'])
+        && request.resource.data.name is string && request.resource.data.name.size() <= 100
+        && request.resource.data.code is string && request.resource.data.code.size() <= 30;
+    }
+
+    // Teachers collection
+    match /teachers/{teacherId} {
+      allow read: if true;
+      allow write: if isTeacher();
+    }
+
+    // Classes & Subjects
+    match /classes/{classId} {
+      allow read: if true;
+      allow create, update: if isTeacher() || isValidSchoolClass();
+      allow delete: if isTeacher();
+    }
+
+    match /subjects/{subjectId} {
+      allow read: if true;
+      allow create, update: if isTeacher() || isValidSubject();
+      allow delete: if isTeacher();
+    }
+
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isTeacher();
+    }
+
+    // Students registration
+    match /students/{studentId} {
+      allow read: if true; // Required for student login verification by Admission Number & Names
+      allow create, update: if isTeacher() || isValidStudent();
+      allow delete: if isTeacher();
+    }
+
+    // Examinations collection
+    match /examinations/{examId} {
+      allow read: if true; // Students see published exams; teachers see all
+      allow create, update: if isTeacher() || isValidExamination();
+      allow delete: if isTeacher();
+
+      // Questions subcollection
+      match /questions/{questionId} {
+        allow read: if true;
+        allow create, update: if isTeacher() || isValidQuestion();
+        allow delete: if isTeacher();
+      }
+    }
+
+    // In-progress student attempts (disconnection recovery)
+    match /attempts/{attemptId} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if isTeacher();
+    }
+
+    // Submissions collection
+    match /submissions/{submissionId} {
+      allow read: if true;
+      allow create: if request.resource.data.keys().hasAll([
+          'examId', 'studentName', 'admissionNumber', 'score', 'totalQuestions', 'percentage'
+        ])
+        && request.resource.data.score is number
+        && request.resource.data.totalQuestions is number
+        && request.resource.data.percentage is number
+        && request.resource.data.studentName is string && request.resource.data.studentName.size() <= 140
+        && request.resource.data.admissionNumber is string && request.resource.data.admissionNumber.size() <= 60;
+      allow update, delete: if isTeacher();
+    }
+  }
+}

@@ -1,0 +1,180 @@
+{
+  "entities": {
+    "Examination": {
+      "title": "Examination",
+      "description": "School examination specification created and configured by teachers",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 150 },
+        "subjectId": { "type": "string", "maxLength": 100 },
+        "subjectName": { "type": "string", "maxLength": 100 },
+        "classGrade": { "type": "string", "maxLength": 50 },
+        "academicSession": { "type": "string", "maxLength": 20 },
+        "term": { "type": "string", "maxLength": 20 },
+        "examType": { "type": "string", "maxLength": 50 },
+        "durationMinutes": { "type": "number" },
+        "totalQuestions": { "type": "number" },
+        "instructions": { "type": "string", "maxLength": 2000 },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherName": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["draft", "published", "archived"] },
+        "shuffleQuestions": { "type": "boolean" },
+        "shuffleOptions": { "type": "boolean" },
+        "resultVisibility": { "type": "string", "enum": ["immediate", "teacher_publish"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "subjectName", "classGrade", "durationMinutes", "totalQuestions", "teacherId", "status"]
+    },
+    "Question": {
+      "title": "Question",
+      "description": "Examination multiple choice objective question with curriculum topic tracking",
+      "type": "object",
+      "properties": {
+        "examId": { "type": "string", "maxLength": 128 },
+        "questionNumber": { "type": "number" },
+        "text": { "type": "string", "maxLength": 4000 },
+        "optionA": { "type": "string", "maxLength": 800 },
+        "optionB": { "type": "string", "maxLength": 800 },
+        "optionC": { "type": "string", "maxLength": 800 },
+        "optionD": { "type": "string", "maxLength": 800 },
+        "correctOption": { "type": "string", "enum": ["A", "B", "C", "D"] },
+        "subject": { "type": "string", "maxLength": 100 },
+        "topic": { "type": "string", "maxLength": 120 },
+        "explanation": { "type": "string", "maxLength": 2000 }
+      },
+      "required": ["examId", "questionNumber", "text", "optionA", "optionB", "optionC", "optionD", "correctOption"]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Enrolled secondary school student profile with institutional admission identifier",
+      "type": "object",
+      "properties": {
+        "admissionNumber": { "type": "string", "maxLength": 60 },
+        "firstName": { "type": "string", "maxLength": 60 },
+        "surname": { "type": "string", "maxLength": 60 },
+        "fullName": { "type": "string", "maxLength": 140 },
+        "classGrade": { "type": "string", "maxLength": 50 },
+        "classId": { "type": "string", "maxLength": 60 },
+        "academicSession": { "type": "string", "maxLength": 20 },
+        "status": { "type": "string", "enum": ["active", "suspended", "graduated"] },
+        "registeredAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["admissionNumber", "firstName", "surname", "classGrade", "status"]
+    },
+    "SchoolClass": {
+      "title": "SchoolClass",
+      "description": "Academic class or form cohort in the secondary school",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "code": { "type": "string", "maxLength": 30 },
+        "arm": { "type": "string", "maxLength": 20 },
+        "academicSession": { "type": "string", "maxLength": 20 },
+        "studentCount": { "type": "number" }
+      },
+      "required": ["name", "code", "academicSession"]
+    },
+    "Subject": {
+      "title": "Subject",
+      "description": "Academic curriculum subject taught within the school",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "code": { "type": "string", "maxLength": 30 },
+        "department": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["name", "code", "department"]
+    },
+    "ExamAttempt": {
+      "title": "ExamAttempt",
+      "description": "Live session state tracking for student examination progress and disconnection recovery",
+      "type": "object",
+      "properties": {
+        "examId": { "type": "string", "maxLength": 128 },
+        "studentId": { "type": "string", "maxLength": 128 },
+        "studentAdmissionNumber": { "type": "string", "maxLength": 60 },
+        "studentName": { "type": "string", "maxLength": 140 },
+        "startTime": { "type": "string", "format": "date-time" },
+        "endTime": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["in_progress", "submitted", "timed_out"] },
+        "savedAnswers": { "type": "object" },
+        "lastHeartbeatAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["examId", "studentId", "startTime", "endTime", "status"]
+    },
+    "Submission": {
+      "title": "Submission",
+      "description": "Official graded student answer sheet with topic assessment analytics",
+      "type": "object",
+      "properties": {
+        "examId": { "type": "string", "maxLength": 128 },
+        "examTitle": { "type": "string", "maxLength": 150 },
+        "subject": { "type": "string", "maxLength": 100 },
+        "classGrade": { "type": "string", "maxLength": 50 },
+        "academicSession": { "type": "string", "maxLength": 20 },
+        "term": { "type": "string", "maxLength": 20 },
+        "studentId": { "type": "string", "maxLength": 128 },
+        "studentName": { "type": "string", "maxLength": 140 },
+        "admissionNumber": { "type": "string", "maxLength": 60 },
+        "score": { "type": "number" },
+        "totalQuestions": { "type": "number" },
+        "percentage": { "type": "number" },
+        "timeSpentSeconds": { "type": "number" },
+        "answers": { "type": "object" },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "detailedResults": { "type": "array" },
+        "topicAnalysis": { "type": "object" },
+        "aiRevisionRecommendations": { "type": "array" }
+      },
+      "required": ["examId", "studentName", "admissionNumber", "score", "totalQuestions", "percentage", "submittedAt"]
+    },
+    "SchoolSettings": {
+      "title": "SchoolSettings",
+      "description": "Institutional assessment settings, current academic term and session",
+      "type": "object",
+      "properties": {
+        "schoolName": { "type": "string", "maxLength": 150 },
+        "academicSession": { "type": "string", "maxLength": 30 },
+        "currentTerm": { "type": "string", "maxLength": 30 },
+        "passMarkPercentage": { "type": "number" },
+        "allowImmediateResultViewing": { "type": "boolean" }
+      },
+      "required": ["schoolName", "academicSession", "currentTerm"]
+    }
+  },
+  "firestore": {
+    "/examinations/{examId}": {
+      "schema": "Examination",
+      "description": "School examinations configured by academic departments"
+    },
+    "/examinations/{examId}/questions/{questionId}": {
+      "schema": "Question",
+      "description": "Questions with topic tagging belonging to an examination"
+    },
+    "/students/{studentId}": {
+      "schema": "Student",
+      "description": "Registered students in the secondary school directory"
+    },
+    "/classes/{classId}": {
+      "schema": "SchoolClass",
+      "description": "Class levels and arm rosters"
+    },
+    "/subjects/{subjectId}": {
+      "schema": "Subject",
+      "description": "Curriculum subjects"
+    },
+    "/attempts/{attemptId}": {
+      "schema": "ExamAttempt",
+      "description": "Active in-progress test sessions for disconnection recovery"
+    },
+    "/submissions/{submissionId}": {
+      "schema": "Submission",
+      "description": "Completed student graded test records and analytics"
+    },
+    "/settings/school": {
+      "schema": "SchoolSettings",
+      "description": "Global school settings and session configuration"
+    }
+  }
+}
