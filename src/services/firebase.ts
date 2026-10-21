@@ -30,7 +30,9 @@ import {
   Subject,
   SchoolSettings,
   ExamAttempt,
-  generateStudentAccessCode
+  generateStudentAccessCode,
+  StaffMember,
+  generateStaffUniqueId
 } from '../types/cbt';
 import {
   DEFAULT_SCHOOL_CLASSES,
@@ -38,7 +40,8 @@ import {
   DEFAULT_SCHOOL_SETTINGS,
   DEFAULT_STUDENTS,
   DEFAULT_EXAMINATIONS,
-  DEFAULT_QUESTIONS_MAP
+  DEFAULT_QUESTIONS_MAP,
+  DEFAULT_STAFF
 } from '../data/initialSchoolData';
 
 const app = initializeApp(firebaseConfig);
@@ -106,19 +109,98 @@ export async function testConnection(): Promise<boolean> {
   }
 }
 
-// Teacher Authentication
-export async function signInTeacherWithGoogle(): Promise<User> {
+// Faculty & Staff Management
+export async function fetchStaffMembers(): Promise<StaffMember[]> {
+  const path = 'teachers';
   try {
-    const result = await signInWithPopup(auth, googleProvider);
-    return result.user;
+    const snapshot = await getDocs(collection(db, path));
+    if (snapshot.empty) {
+      return DEFAULT_STAFF;
+    }
+    const staff: StaffMember[] = [];
+    snapshot.forEach(docSnap => {
+      staff.push({ id: docSnap.id, ...docSnap.data() } as StaffMember);
+    });
+    return staff;
   } catch (error) {
-    console.error('Teacher sign-in failed:', error);
-    throw error;
+    console.warn('Fallback to default staff roster:', error);
+    return DEFAULT_STAFF;
   }
 }
 
+export async function saveStaffMember(staff: StaffMember): Promise<void> {
+  const path = `teachers/${staff.id}`;
+  if (!staff.uniqueId || staff.uniqueId.trim() === '') {
+    staff.uniqueId = generateStaffUniqueId();
+  }
+  try {
+    await setDoc(doc(db, 'teachers', staff.id), staff, { merge: true });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function deleteStaffMember(staffId: string): Promise<void> {
+  const path = `teachers/${staffId}`;
+  try {
+    await deleteDoc(doc(db, 'teachers', staffId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+// Teacher Authentication via Unique Staff ID (e.g. TCH-1001)
+export async function authenticateStaffByUniqueId(rawUniqueId: string): Promise<StaffMember | null> {
+  const cleanId = rawUniqueId.trim().toUpperCase();
+  if (!cleanId) return null;
+
+  const path = 'teachers';
+  try {
+    // 1. Primary lookup by uniqueId
+    const qCode = query(collection(db, path), where('uniqueId', '==', cleanId));
+    const snapCode = await getDocs(qCode);
+    if (!snapCode.empty) {
+      for (const docSnap of snapCode.docs) {
+        const data = docSnap.data() as StaffMember;
+        if (data.status === 'active') {
+          return { ...data, id: docSnap.id };
+        }
+      }
+    }
+
+    // 2. Secondary lookup by email if teacher types staff email
+    const qEmail = query(collection(db, path), where('email', '==', rawUniqueId.trim().toLowerCase()));
+    const snapEmail = await getDocs(qEmail);
+    if (!snapEmail.empty) {
+      for (const docSnap of snapEmail.docs) {
+        const data = docSnap.data() as StaffMember;
+        if (data.status === 'active') {
+          return { ...data, id: docSnap.id };
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Teacher authentication query fallback:', error);
+  }
+
+  // Fallback check against default staff roster
+  const localMatch = DEFAULT_STAFF.find(
+    s => (s.uniqueId && s.uniqueId.toUpperCase() === cleanId) ||
+         s.email.toLowerCase() === rawUniqueId.trim().toLowerCase()
+  );
+  if (localMatch && localMatch.status === 'active') {
+    return localMatch;
+  }
+
+  return null;
+}
+
 export async function logoutTeacher(): Promise<void> {
-  await fbSignOut(auth);
+  try {
+    await fbSignOut(auth);
+  } catch (e) {
+    // Ignore sign out error
+  }
 }
 
 // Classes & Subjects Management
@@ -335,7 +417,7 @@ export async function fetchStudents(classGrade?: string): Promise<Student[]> {
       const data = docSnap.data() as Student;
       // Ensure accessCode is present
       const accessCode = data.accessCode || `PRM-${docSnap.id.slice(-4).toUpperCase()}`;
-      students.push({ id: docSnap.id, ...data, accessCode });
+      students.push({ ...data, id: docSnap.id, accessCode });
     });
     return students;
   } catch (error) {
@@ -466,12 +548,24 @@ export async function ensureInitialSchoolData(): Promise<void> {
       for (const std of DEFAULT_STUDENTS) {
         await saveStudent(std).catch(() => {});
       }
-      // 4. Seed exams & questions
+      // 4. Seed faculty staff
+      for (const staff of DEFAULT_STAFF) {
+        await saveStaffMember(staff).catch(() => {});
+      }
+      // 5. Seed exams & questions
       for (const exam of DEFAULT_EXAMINATIONS) {
         await saveExamination(exam).catch(() => {});
         const qs = DEFAULT_QUESTIONS_MAP[exam.id] || [];
         for (const q of qs) {
           await saveQuestion(exam.id, q).catch(() => {});
+        }
+      }
+    } else {
+      // Check teachers collection specifically
+      const staffSnap = await getDocs(collection(db, 'teachers'));
+      if (staffSnap.empty) {
+        for (const staff of DEFAULT_STAFF) {
+          await saveStaffMember(staff).catch(() => {});
         }
       }
     }

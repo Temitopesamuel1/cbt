@@ -1,5 +1,17 @@
-import React, { useState, useEffect } from 'react';
-import { BookOpen, Clock, Calendar, CheckCircle2, AlertTriangle, Play, FileText, BarChart3, Award } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  BookOpen,
+  Clock,
+  Calendar,
+  CheckCircle2,
+  AlertTriangle,
+  Play,
+  FileText,
+  BarChart3,
+  Award,
+  Filter,
+  Check
+} from 'lucide-react';
 import { Student, Examination, Submission } from '../../types/cbt';
 import { fetchExaminations, fetchSubmissions } from '../../services/firebase';
 
@@ -8,6 +20,18 @@ interface StudentDashboardViewProps {
   onStartExam: (exam: Examination) => void;
   onViewResult: (submission: Submission) => void;
   onNavigateToHistory: () => void;
+}
+
+// Strict normalization to match class cohorts (e.g. "SS 2" === "SS2" === "Senior Secondary 2")
+export function isClassMatch(studentClass: string, examClass: string): boolean {
+  if (!studentClass || !examClass) return false;
+  const normalize = (c: string) =>
+    c.toLowerCase()
+      .replace(/senior\s*secondary/g, 'ss')
+      .replace(/junior\s*secondary/g, 'jss')
+      .replace(/[\s\-_]/g, '');
+
+  return normalize(studentClass) === normalize(examClass);
 }
 
 export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
@@ -20,6 +44,7 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
   const [studentSubmissions, setStudentSubmissions] = useState<Submission[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedExamForModal, setSelectedExamForModal] = useState<Examination | null>(null);
+  const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>('All');
 
   useEffect(() => {
     const loadStudentData = async () => {
@@ -31,12 +56,9 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
         ]);
 
         if (allExams) {
-          // Filter exams targeted to this student's class grade (or general papers)
-          const matched = allExams.filter(
-            e => e.classGrade.toLowerCase().trim() === student.classGrade.toLowerCase().trim() ||
-                 e.classGrade === 'All Classes'
-          );
-          setAvailableExams(matched);
+          // STRICT filter: students only see examinations peculiar to their exact class cohort
+          const classPeculiar = allExams.filter(e => isClassMatch(student.classGrade, e.classGrade));
+          setAvailableExams(classPeculiar);
         }
 
         if (allSubs) {
@@ -51,6 +73,19 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
 
     loadStudentData();
   }, [student]);
+
+  // Distinct subjects available for this student's class
+  const availableSubjects = useMemo(() => {
+    return Array.from(new Set(availableExams.map(e => e.subjectName).filter(Boolean)));
+  }, [availableExams]);
+
+  // Filtered exams according to selected subject
+  const displayedExams = useMemo(() => {
+    if (selectedSubjectFilter === 'All') return availableExams;
+    return availableExams.filter(
+      e => e.subjectName.toLowerCase() === selectedSubjectFilter.toLowerCase()
+    );
+  }, [availableExams, selectedSubjectFilter]);
 
   // Check if student has already submitted an exam
   const getSubmissionForExam = (examId: string): Submission | undefined => {
@@ -73,12 +108,14 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                   Enrolled Active
                 </span>
               </div>
-              <div className="text-xs text-slate-500 font-mono mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <div className="text-xs text-slate-500 font-mono mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span>Admission No: <strong>{student.admissionNumber}</strong></span>
                 <span>·</span>
-                <span>Class Form: <strong>{student.classGrade}</strong></span>
+                <span>Class Cohort: <strong className="text-blue-900 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 font-bold">{student.classGrade}</strong></span>
                 <span>·</span>
                 <span>Session: <strong>{student.academicSession}</strong></span>
+                <span>·</span>
+                <span>Unique Student ID: <strong className="text-slate-900 font-bold">{student.accessCode || student.admissionNumber}</strong></span>
               </div>
             </div>
           </div>
@@ -100,52 +137,126 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
           </div>
         </div>
 
-        {/* Available Scheduled Examinations */}
+        {/* Section Title & Class Scope Notice */}
         <div>
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
             <div>
-              <h2 className="text-lg font-bold text-slate-900">Scheduled Academic Examinations</h2>
+              <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-900 text-[10px] font-bold uppercase tracking-wider mb-1">
+                <Check className="w-3 h-3 text-blue-700" />
+                <span>Class Peculiar Papers: {student.classGrade}</span>
+              </div>
+              <h2 className="text-lg font-black text-slate-900">Scheduled Academic Examinations</h2>
               <p className="text-xs text-slate-500">
-                Official papers published for your class cohort ({student.classGrade})
+                You only see examinations and questions peculiar to your class ({student.classGrade}). Select a subject below to take your test.
               </p>
             </div>
             {studentSubmissions.length > 0 && (
               <button
                 onClick={onNavigateToHistory}
-                className="text-xs font-semibold text-blue-900 hover:underline"
+                className="text-xs font-semibold text-blue-900 hover:underline shrink-0"
               >
                 View Complete History ({studentSubmissions.length}) →
               </button>
             )}
           </div>
 
-          {loading ? (
-            <div className="bg-white rounded-xl border border-slate-200 p-8 text-center text-xs text-slate-500">
-              Loading scheduled examinations...
+          {/* Subject Selection Tabs / Filter Bar */}
+          {availableSubjects.length > 0 && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm mb-6">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2.5 flex items-center gap-1.5">
+                <Filter className="w-3.5 h-3.5 text-blue-900" />
+                <span>Select Subject to Sit:</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedSubjectFilter('All')}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all ${
+                    selectedSubjectFilter === 'All'
+                      ? 'bg-slate-900 text-white shadow-md'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  All Subjects ({availableExams.length})
+                </button>
+                {availableSubjects.map((subject) => {
+                  const count = availableExams.filter(
+                    e => e.subjectName.toLowerCase() === subject.toLowerCase()
+                  ).length;
+                  const isSelected = selectedSubjectFilter.toLowerCase() === subject.toLowerCase();
+
+                  return (
+                    <button
+                      key={subject}
+                      type="button"
+                      onClick={() => setSelectedSubjectFilter(subject)}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+                        isSelected
+                          ? 'bg-blue-900 text-white shadow-md'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                    >
+                      <BookOpen className="w-3.5 h-3.5" />
+                      <span>{subject}</span>
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ${
+                          isSelected ? 'bg-blue-800 text-blue-200' : 'bg-slate-200 text-slate-600'
+                        }`}
+                      >
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          ) : availableExams.length === 0 ? (
-            <div className="bg-white rounded-xl border border-slate-200 p-12 text-center space-y-3">
+          )}
+
+          {/* Examinations List */}
+          {loading ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center text-xs text-slate-500">
+              Loading scheduled examinations for {student.classGrade}...
+            </div>
+          ) : displayedExams.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center space-y-3">
               <BookOpen className="w-10 h-10 text-slate-300 mx-auto" />
-              <h3 className="text-sm font-bold text-slate-800">No Active Examinations Published</h3>
+              <h3 className="text-sm font-bold text-slate-800">
+                {selectedSubjectFilter === 'All'
+                  ? `No Active Examinations Published for ${student.classGrade}`
+                  : `No ${selectedSubjectFilter} Examination Found for ${student.classGrade}`}
+              </h3>
               <p className="text-xs text-slate-500 max-w-md mx-auto">
-                There are currently no published examinations for class <strong>{student.classGrade}</strong>. Please check back when your subject teachers publish the test papers.
+                {selectedSubjectFilter === 'All'
+                  ? `There are currently no published examinations peculiar to class ${student.classGrade}. Please check back when your subject teachers upload the test papers.`
+                  : `There are currently no published papers for ${selectedSubjectFilter} in class ${student.classGrade}. Click "All Subjects" above to view available examinations.`}
               </p>
+              {selectedSubjectFilter !== 'All' && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedSubjectFilter('All')}
+                  className="px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl"
+                >
+                  View All Class Subjects
+                </button>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {availableExams.map((exam) => {
+              {displayedExams.map((exam) => {
                 const pastSubmission = getSubmissionForExam(exam.id);
                 const hasCompleted = Boolean(pastSubmission);
 
                 return (
                   <div
                     key={exam.id}
-                    className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex flex-col justify-between hover:border-slate-300 transition-all"
+                    className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 flex flex-col justify-between hover:border-blue-400 hover:shadow-md transition-all"
                   >
                     <div>
-                      <div className="flex items-start justify-between gap-2 mb-2">
-                        <span className="text-[11px] font-mono font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                          {exam.subjectName}
+                      {/* Subject Tag & Status */}
+                      <div className="flex items-start justify-between gap-2 mb-3">
+                        <span className="text-xs font-mono font-black text-blue-900 bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200 flex items-center gap-1.5">
+                          <BookOpen className="w-3.5 h-3.5" />
+                          <span>{exam.subjectName}</span>
                         </span>
                         {hasCompleted ? (
                           <span className="text-[10px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 flex items-center gap-1">
@@ -159,23 +270,28 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                         )}
                       </div>
 
-                      <h3 className="text-sm font-bold text-slate-900 mb-2">{exam.title}</h3>
-                      <p className="text-xs text-slate-500 line-clamp-2 mb-4">{exam.instructions}</p>
+                      <h3 className="text-base font-bold text-slate-900 mb-2 leading-snug">{exam.title}</h3>
+                      <p className="text-xs text-slate-500 line-clamp-2 mb-4 leading-relaxed">{exam.instructions}</p>
 
-                      <div className="grid grid-cols-2 gap-2 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg mb-4">
-                        <div>
-                          <span className="text-slate-400 block text-[10px] font-semibold">DURATION</span>
-                          <strong className="text-slate-900 font-mono flex items-center gap-1 mt-0.5">
-                            <Clock className="w-3.5 h-3.5 text-slate-400" />
-                            {exam.durationMinutes} Minutes
-                          </strong>
+                      {/* Class Match and Specification Badge */}
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 space-y-1.5 text-xs font-mono">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-sans font-bold text-slate-400 uppercase">Class Cohort:</span>
+                          <span className="font-bold text-blue-900 bg-white px-2 py-0.5 rounded border border-slate-200">
+                            {exam.classGrade} (Verified)
+                          </span>
                         </div>
-                        <div>
-                          <span className="text-slate-400 block text-[10px] font-semibold">TOTAL QUESTIONS</span>
-                          <strong className="text-slate-900 font-mono flex items-center gap-1 mt-0.5">
-                            <FileText className="w-3.5 h-3.5 text-slate-400" />
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-sans font-bold text-slate-400 uppercase">Questions Uploaded:</span>
+                          <span className="font-bold text-slate-800">
                             {exam.totalQuestions} Questions
-                          </strong>
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-sans font-bold text-slate-400 uppercase">Duration:</span>
+                          <span className="font-bold text-slate-800">
+                            {exam.durationMinutes} Minutes
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -191,7 +307,7 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                           </div>
                           <button
                             onClick={() => onViewResult(pastSubmission)}
-                            className="px-3 py-1.5 text-xs font-semibold text-blue-900 bg-blue-50 hover:bg-blue-100 rounded-lg border border-blue-200 transition-colors"
+                            className="px-3.5 py-2 text-xs font-bold text-blue-900 bg-blue-50 hover:bg-blue-100 rounded-xl border border-blue-200 transition-colors"
                           >
                             View Result Slip →
                           </button>
@@ -199,10 +315,10 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                       ) : (
                         <button
                           onClick={() => setSelectedExamForModal(exam)}
-                          className="w-full py-2.5 px-4 bg-blue-900 hover:bg-blue-800 text-white font-bold text-xs rounded-lg shadow-sm transition-colors flex items-center justify-center gap-1.5"
+                          className="w-full py-3 px-4 bg-blue-900 hover:bg-blue-800 text-white font-bold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-2 active:scale-[0.99]"
                         >
                           <Play className="w-3.5 h-3.5 fill-current" />
-                          <span>Start Examination</span>
+                          <span>Sit {exam.subjectName} Examination</span>
                         </button>
                       )}
                     </div>
@@ -220,7 +336,7 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
               <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
                 <div className="flex items-center gap-2 font-bold text-sm">
                   <BookOpen className="w-4 h-4 text-amber-400" />
-                  <span>Examination Briefing & Code of Conduct</span>
+                  <span>{selectedExamForModal.subjectName} Examination Briefing</span>
                 </div>
                 <button
                   onClick={() => setSelectedExamForModal(null)}
@@ -233,19 +349,27 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
               <div className="p-6 space-y-4 text-xs">
                 <div>
                   <h4 className="font-bold text-slate-900 text-sm mb-1">{selectedExamForModal.title}</h4>
-                  <div className="text-slate-500 font-mono">
-                    Subject: {selectedExamForModal.subjectName} · Class: {selectedExamForModal.classGrade} · Duration: {selectedExamForModal.durationMinutes} Minutes
+                  <div className="text-slate-500 font-mono flex items-center gap-2">
+                    <span className="font-bold text-blue-900">Subject: {selectedExamForModal.subjectName}</span>
+                    <span>·</span>
+                    <span>Class: {selectedExamForModal.classGrade}</span>
+                    <span>·</span>
+                    <span>{selectedExamForModal.durationMinutes} Minutes</span>
                   </div>
                 </div>
 
-                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-slate-700">
-                  <h5 className="font-bold text-slate-900 uppercase tracking-wider text-[10px]">
-                    Instructions to Candidates:
+                <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-xl space-y-2 text-slate-700">
+                  <h5 className="font-bold text-blue-950 uppercase tracking-wider text-[10px]">
+                    Candidate Instructions for {selectedExamForModal.subjectName}:
                   </h5>
-                  <p className="leading-relaxed">{selectedExamForModal.instructions}</p>
+                  <p className="leading-relaxed text-blue-900">{selectedExamForModal.instructions}</p>
                 </div>
 
                 <div className="space-y-1.5 text-slate-600">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>You will ONLY be presented questions uploaded specifically for {selectedExamForModal.subjectName}.</span>
+                  </div>
                   <div className="flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                     <span>Timer starts immediately upon entering the examination screen.</span>
@@ -254,17 +378,13 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                     <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                     <span>Your answers auto-save on each selection for disconnection safety.</span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>When countdown reaches 00:00, paper auto-submits instantly.</span>
-                  </div>
                 </div>
 
                 <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
                   <button
                     type="button"
                     onClick={() => setSelectedExamForModal(null)}
-                    className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg"
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
                   >
                     Cancel
                   </button>
@@ -275,10 +395,10 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                       setSelectedExamForModal(null);
                       onStartExam(exam);
                     }}
-                    className="px-5 py-2.5 text-xs font-bold text-white bg-blue-900 hover:bg-blue-800 rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
+                    className="px-5 py-2.5 text-xs font-bold text-white bg-blue-900 hover:bg-blue-800 rounded-xl shadow-md transition-colors flex items-center gap-1.5"
                   >
                     <Play className="w-3.5 h-3.5 fill-current" />
-                    <span>I Understand · Begin Examination</span>
+                    <span>Start {selectedExamForModal.subjectName} Test</span>
                   </button>
                 </div>
               </div>

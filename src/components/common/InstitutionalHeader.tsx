@@ -3,7 +3,7 @@ import { Shield, GraduationCap, UserCheck, LogOut, School } from 'lucide-react';
 import { SchoolSettings } from '../../types/cbt';
 
 interface InstitutionalHeaderProps {
-  currentPortal: 'landing' | 'teacher' | 'student';
+  currentPortal: 'landing' | 'teacher' | 'student' | 'admin';
   currentRoute: string;
   onNavigate: (route: string) => void;
   userDisplayName?: string | null;
@@ -29,7 +29,8 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
           <div
             onClick={() => {
               if (!examInProgress) {
-                if (currentPortal === 'teacher') onNavigate('/teacher/dashboard');
+                if (currentPortal === 'admin') onNavigate('/admin/dashboard');
+                else if (currentPortal === 'teacher') onNavigate('/teacher/dashboard');
                 else if (currentPortal === 'student') onNavigate('/student/dashboard');
                 else onNavigate('/');
               }
@@ -41,9 +42,13 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
             </div>
             <div>
               <div className="text-lg font-extrabold tracking-tight text-white flex items-center gap-2">
-                <span>PRIME CBT</span>
-                <span className="text-[10px] uppercase font-bold tracking-widest px-1.5 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800">
-                  {currentPortal === 'teacher' ? 'Staff Portal' : currentPortal === 'student' ? 'Student Portal' : 'Assessment'}
+                <span>PRIME EDUTECH</span>
+                <span className={`text-[10px] uppercase font-bold tracking-widest px-1.5 py-0.5 rounded border ${
+                  currentPortal === 'admin'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : 'bg-blue-950 text-blue-300 border-blue-800'
+                }`}>
+                  {currentPortal === 'admin' ? 'Admin Authority' : currentPortal === 'teacher' ? 'Staff Portal' : currentPortal === 'student' ? 'Student Portal' : 'Assessment'}
                 </span>
               </div>
               <div className="text-[11px] text-slate-400 hidden sm:block">
@@ -152,7 +157,7 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
                     {userDisplayName}
                   </div>
                   <div className="text-[10px] text-slate-400 capitalize">
-                    {currentPortal === 'teacher' ? 'Faculty Staff' : 'Student Candidate'}
+                    {currentPortal === 'admin' ? 'Institutional Administrator' : currentPortal === 'teacher' ? 'Faculty Staff' : 'Student Candidate'}
                   </div>
                 </div>
                 {onLogout && (

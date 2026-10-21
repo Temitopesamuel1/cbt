@@ -23,7 +23,7 @@ export const LandingGateway: React.FC<LandingGatewayProps> = ({ onNavigate, sett
               </div>
 
               <h1 className="text-3xl sm:text-4xl font-black tracking-tight text-white">
-                PRIME CBT Examination & Student Assessment System
+                PRIME EDUTECH Examination & Student Assessment System
               </h1>
 
               <p className="text-sm sm:text-base text-slate-300 leading-relaxed">
@@ -52,7 +52,7 @@ export const LandingGateway: React.FC<LandingGatewayProps> = ({ onNavigate, sett
                 <div className="space-y-2 text-xs text-slate-600 mb-6">
                   <div className="flex items-center gap-2">
                     <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>Login via Student Admission Number & Surname</span>
+                    <span>Instant Login via Unique Student Code or User ID</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
@@ -84,9 +84,9 @@ export const LandingGateway: React.FC<LandingGatewayProps> = ({ onNavigate, sett
                 <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
                   Faculty & Invigilation
                 </div>
-                <h2 className="text-xl font-bold text-slate-900 mb-2">Teacher & Admin Portal</h2>
+                <h2 className="text-xl font-bold text-slate-900 mb-2">Faculty & Staff Portal</h2>
                 <p className="text-xs text-slate-600 mb-6 leading-relaxed">
-                  Manage school subjects, class rosters, examination questions with Excel CSV import/export, timer schedules, automated marking, and topic learning gaps.
+                  Teacher portal for examination schedules, question banking, test invigilation, and student continuous assessment for assigned subjects. Log in with your unique Staff ID.
                 </p>
 
                 <div className="space-y-2 text-xs text-slate-600 mb-6">

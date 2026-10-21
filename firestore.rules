@@ -22,6 +22,7 @@ service cloud.firestore {
 
     function isTeacher() {
       return (isSignedIn() && (
+        request.auth.token.email == 'fathertemitope@gmail.com' ||
         request.auth.token.email == 'omonisamsam@gmail.com' ||
         exists(/databases/$(database)/documents/teachers/$(request.auth.uid))
       )) || request.auth == null;

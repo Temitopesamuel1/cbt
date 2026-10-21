@@ -15,7 +15,7 @@ export const HelpModal: React.FC<HelpModalProps> = ({ onBack }) => {
           </div>
           <div>
             <h1 className="text-lg font-bold text-slate-900">
-              PRIME CBT Candidate Examination Regulations & Keypad Standards
+              PRIME EDUTECH Candidate Examination Regulations & Keypad Standards
             </h1>
             <p className="text-xs text-slate-500">
               Official instructions for secondary school candidates sitting for computerized examinations

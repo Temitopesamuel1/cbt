@@ -141,9 +141,27 @@
         "allowImmediateResultViewing": { "type": "boolean" }
       },
       "required": ["schoolName", "academicSession", "currentTerm"]
+    },
+    "StaffMember": {
+      "title": "StaffMember",
+      "description": "Faculty staff teacher profile with assigned teaching subjects and unique login ID",
+      "type": "object",
+      "properties": {
+        "uniqueId": { "type": "string", "maxLength": 50 },
+        "fullName": { "type": "string", "maxLength": 140 },
+        "email": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["teacher", "hod"] },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uniqueId", "fullName", "email", "status"]
     }
   },
   "firestore": {
+    "/teachers/{teacherId}": {
+      "schema": "StaffMember",
+      "description": "Teaching faculty and staff records with unique access codes"
+    },
     "/examinations/{examId}": {
       "schema": "Examination",
       "description": "School examinations configured by academic departments"

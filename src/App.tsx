@@ -9,9 +9,11 @@ import { StudentExamScreen } from './components/student/StudentExamScreen';
 import { StudentResultView } from './components/student/StudentResultView';
 import { StudentHistoryView } from './components/student/StudentHistoryView';
 import { StudentProfileView } from './components/student/StudentProfileView';
-import { Examination, Question, Student, Submission, SchoolSettings } from './types/cbt';
+import { AdminLogin } from './components/admin/AdminLogin';
+import { AdminPortal } from './components/admin/AdminPortal';
+import { Examination, Question, Student, Submission, SchoolSettings, StaffMember } from './types/cbt';
 import { DEFAULT_SCHOOL_SETTINGS } from './data/initialSchoolData';
-import { testConnection, fetchQuestions, fetchSchoolSettings, getExaminationById, ensureInitialSchoolData } from './services/firebase';
+import { testConnection, fetchQuestions, fetchSchoolSettings, ensureInitialSchoolData } from './services/firebase';
 
 export default function App() {
   // Current route state
@@ -21,8 +23,31 @@ export default function App() {
   });
 
   // Authentication states
-  const [teacherEmail, setTeacherEmail] = useState<string | null>(null);
-  const [studentSession, setStudentSession] = useState<Student | null>(null);
+  const [teacherStaff, setTeacherStaff] = useState<StaffMember | null>(() => {
+    try {
+      const stored = sessionStorage.getItem('prime_edutech_active_teacher');
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [adminEmail, setAdminEmail] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem('prime_edutech_active_admin') || null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [studentSession, setStudentSession] = useState<Student | null>(() => {
+    try {
+      const stored = sessionStorage.getItem('prime_edutech_active_student');
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
 
   // Active examination state
   const [activeExam, setActiveExam] = useState<Examination | null>(null);
@@ -55,30 +80,59 @@ export default function App() {
   };
 
   // Determine portal context from route
+  const isAdminRoute = currentRoute.startsWith('/admin');
   const isTeacherRoute = currentRoute.startsWith('/teacher');
   const isStudentRoute = currentRoute.startsWith('/student');
   const isExamActive = currentRoute.startsWith('/student/examination') && activeExam !== null;
 
-  const currentPortal: 'landing' | 'teacher' | 'student' = isTeacherRoute
+  const currentPortal: 'landing' | 'teacher' | 'student' | 'admin' = isAdminRoute
+    ? 'admin'
+    : isTeacherRoute
     ? 'teacher'
     : isStudentRoute
     ? 'student'
     : 'landing';
 
+  // Admin Handlers
+  const handleAdminLoginSuccess = (email: string) => {
+    setAdminEmail(email);
+    try {
+      sessionStorage.setItem('prime_edutech_active_admin', email);
+    } catch {}
+    navigate('/admin/dashboard');
+  };
+
+  const handleAdminLogout = () => {
+    setAdminEmail(null);
+    try {
+      sessionStorage.removeItem('prime_edutech_active_admin');
+    } catch {}
+    navigate('/');
+  };
+
   // Teacher Handlers
-  const handleTeacherLoginSuccess = (email: string) => {
-    setTeacherEmail(email);
+  const handleTeacherLoginSuccess = (staff: StaffMember) => {
+    setTeacherStaff(staff);
+    try {
+      sessionStorage.setItem('prime_edutech_active_teacher', JSON.stringify(staff));
+    } catch {}
     navigate('/teacher/dashboard');
   };
 
   const handleTeacherLogout = () => {
-    setTeacherEmail(null);
+    setTeacherStaff(null);
+    try {
+      sessionStorage.removeItem('prime_edutech_active_teacher');
+    } catch {}
     navigate('/');
   };
 
   // Student Handlers
   const handleStudentLoginSuccess = (student: Student) => {
     setStudentSession(student);
+    try {
+      sessionStorage.setItem('prime_edutech_active_student', JSON.stringify(student));
+    } catch {}
     navigate('/student/dashboard');
   };
 
@@ -86,6 +140,9 @@ export default function App() {
     setStudentSession(null);
     setActiveExam(null);
     setActiveSubmission(null);
+    try {
+      sessionStorage.removeItem('prime_edutech_active_student');
+    } catch {}
     navigate('/');
   };
 
@@ -94,10 +151,21 @@ export default function App() {
     try {
       const qs = await fetchQuestions(exam.id);
       if (qs && qs.length > 0) {
-        let finalQuestions = qs;
+        // Enforce strict question-to-subject and examId matching:
+        // Only deliver questions that were uploaded for this examination and subject
+        const cleanExamSubj = exam.subjectName.trim().toLowerCase();
+        const subjectQuestions = qs.filter(q => {
+          if (q.examId && q.examId !== exam.id) return false;
+          if (q.subject && q.subject !== 'General' && q.subject.trim().toLowerCase() !== cleanExamSubj) {
+            return false;
+          }
+          return true;
+        });
+
+        const verifiedQuestions = subjectQuestions.length > 0 ? subjectQuestions : qs;
+        let finalQuestions = verifiedQuestions;
         if (exam.shuffleQuestions) {
-          // Deterministic or clean randomisation
-          finalQuestions = [...qs].sort(() => Math.random() - 0.5);
+          finalQuestions = [...verifiedQuestions].sort(() => Math.random() - 0.5);
         }
         setActiveQuestions(finalQuestions);
       } else {
@@ -105,6 +173,7 @@ export default function App() {
       }
     } catch (err) {
       console.warn('Questions fetch:', err);
+      setActiveQuestions([]);
     }
 
     navigate(`/student/examination/${exam.id}`);
@@ -129,13 +198,23 @@ export default function App() {
           currentRoute={currentRoute}
           onNavigate={navigate}
           userDisplayName={
-            isTeacherRoute
-              ? teacherEmail
+            isAdminRoute
+              ? adminEmail ? `${adminEmail}` : null
+              : isTeacherRoute && teacherStaff
+              ? `${teacherStaff.fullName} (${teacherStaff.uniqueId})`
               : isStudentRoute && studentSession
               ? studentSession.fullName
               : null
           }
-          onLogout={isTeacherRoute ? handleTeacherLogout : isStudentRoute && studentSession ? handleStudentLogout : undefined}
+          onLogout={
+            isAdminRoute
+              ? handleAdminLogout
+              : isTeacherRoute && teacherStaff
+              ? handleTeacherLogout
+              : isStudentRoute && studentSession
+              ? handleStudentLogout
+              : undefined
+          }
           settings={schoolSettings}
           examInProgress={false}
         />
@@ -148,6 +227,22 @@ export default function App() {
           <LandingGateway onNavigate={navigate} settings={schoolSettings} />
         )}
 
+        {/* ADMIN PORTAL ROUTES */}
+        {isAdminRoute && (
+          adminEmail ? (
+            <AdminPortal
+              adminEmail={adminEmail}
+              onLogout={handleAdminLogout}
+              onGoToHome={() => navigate('/')}
+            />
+          ) : (
+            <AdminLogin
+              onLoginSuccess={handleAdminLoginSuccess}
+              onNavigateHome={() => navigate('/')}
+            />
+          )
+        )}
+
         {/* TEACHER PORTAL ROUTES */}
         {currentRoute === '/teacher/login' && (
           <TeacherLogin
@@ -157,9 +252,10 @@ export default function App() {
         )}
 
         {isTeacherRoute && currentRoute !== '/teacher/login' && (
-          teacherEmail ? (
+          teacherStaff ? (
             <TeacherPortal
-              teacherEmail={teacherEmail}
+              teacherEmail={teacherStaff.email}
+              teacherStaff={teacherStaff}
               currentSubroute={currentRoute}
               onNavigateSubroute={navigate}
               onLogout={handleTeacherLogout}
@@ -245,7 +341,7 @@ export default function App() {
         <footer className="bg-white border-t border-slate-200 py-6 text-xs text-slate-500 no-print">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3">
             <div className="font-semibold text-slate-700">
-              PRIME CBT · Institutional Computer-Based Testing & Student Assessment System
+              PRIME EDUTECH · Institutional Computer-Based Testing & Student Assessment System
             </div>
             <div className="flex items-center gap-4 text-slate-400 text-[11px] font-mono">
               <span>Academic Session: {schoolSettings.academicSession}</span>

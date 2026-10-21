@@ -1,4 +1,4 @@
-import { SchoolClass, Subject, SchoolSettings, Student, Examination, Question } from '../types/cbt';
+import { SchoolClass, Subject, SchoolSettings, Student, Examination, Question, StaffMember } from '../types/cbt';
 
 export const DEFAULT_SCHOOL_CLASSES: SchoolClass[] = [
   { id: 'class-jss1', name: 'Junior Secondary 1', code: 'JSS 1', arm: 'General', academicSession: '2025/2026' },
@@ -20,12 +20,51 @@ export const DEFAULT_SUBJECTS: Subject[] = [
 ];
 
 export const DEFAULT_SCHOOL_SETTINGS: SchoolSettings = {
-  schoolName: 'Prime Model Academy & College',
+  schoolName: 'PRIME EDUTECH',
   academicSession: '2025/2026',
   currentTerm: '1st Term',
   passMarkPercentage: 50,
   allowImmediateResultViewing: true
 };
+
+export const DEFAULT_STAFF: StaffMember[] = [
+  {
+    id: 'staff-benson',
+    uniqueId: 'TCH-1001',
+    fullName: 'Mr. Olawale Benson',
+    email: 'benson@primeedutech.ng',
+    assignedSubjectIds: ['sub-csc'],
+    assignedSubjectNames: ['Computer Studies'],
+    assignedClasses: ['SS 1', 'SS 2', 'SS 3'],
+    role: 'hod',
+    status: 'active',
+    createdAt: '2025-09-01T08:00:00.000Z'
+  },
+  {
+    id: 'staff-adeleke',
+    uniqueId: 'TCH-1002',
+    fullName: 'Mrs. Folashade Adeleke',
+    email: 'adeleke@primeedutech.ng',
+    assignedSubjectIds: ['sub-mth'],
+    assignedSubjectNames: ['Mathematics'],
+    assignedClasses: ['SS 1', 'SS 2'],
+    role: 'teacher',
+    status: 'active',
+    createdAt: '2025-09-01T08:30:00.000Z'
+  },
+  {
+    id: 'staff-obi',
+    uniqueId: 'TCH-1003',
+    fullName: 'Dr. Chukwuma Obi',
+    email: 'obi@primeedutech.ng',
+    assignedSubjectIds: ['sub-phy', 'sub-chm'],
+    assignedSubjectNames: ['Physics', 'Chemistry'],
+    assignedClasses: ['SS 2', 'SS 3'],
+    role: 'teacher',
+    status: 'active',
+    createdAt: '2025-09-01T09:00:00.000Z'
+  }
+];
 
 export const DEFAULT_STUDENTS: Student[] = [
   {

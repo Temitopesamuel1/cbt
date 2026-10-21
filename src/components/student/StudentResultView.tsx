@@ -65,7 +65,7 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
               </div>
               <div>
                 <h1 className="text-lg font-black tracking-tight text-white uppercase">
-                  PRIME CBT EXAMINATION RESULT SLIP
+                  PRIME EDUTECH EXAMINATION RESULT SLIP
                 </h1>
                 <p className="text-xs text-slate-400">
                   Institutional Student Assessment Evaluation Record

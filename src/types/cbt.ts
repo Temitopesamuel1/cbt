@@ -25,7 +25,7 @@ export interface Student {
   academicSession: string;
   status: 'active' | 'suspended' | 'graduated';
   registeredAt: string;
-  accessCode: string; // Unique student login passcode e.g. "PRM-4821"
+  accessCode?: string; // Unique student login passcode e.g. "PRM-4821"
 }
 
 export interface Examination {
@@ -139,7 +139,7 @@ export interface SavedStudentLogin {
   firstName: string;
   fullName: string;
   classGrade: string;
-  accessCode: string;
+  accessCode?: string;
   lastLoginAt: string;
 }
 
@@ -154,6 +154,35 @@ export function generateStudentAccessCode(existingCodes: string[] = []): string 
       rand += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     code = `PRM-${rand}`;
+    attempts++;
+  } while (existingCodes.includes(code) && attempts < 100);
+  return code;
+}
+
+export interface StaffMember {
+  id: string;
+  uniqueId: string; // e.g. "TCH-1001" or "TCH-8921"
+  fullName: string;
+  email: string;
+  assignedSubjectIds: string[]; // Subject IDs taught by this teacher e.g. ['sub-csc']
+  assignedSubjectNames: string[]; // Subject Names taught by this teacher e.g. ['Computer Studies']
+  assignedClasses: string[]; // e.g. ['SS 1', 'SS 2', 'SS 3']
+  role: 'teacher' | 'hod';
+  status: 'active' | 'suspended';
+  createdAt: string;
+}
+
+// Generate automatic unique staff login passcode (e.g. TCH-8392)
+export function generateStaffUniqueId(existingCodes: string[] = []): string {
+  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+  let code = '';
+  let attempts = 0;
+  do {
+    let rand = '';
+    for (let i = 0; i < 4; i++) {
+      rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    code = `TCH-${rand}`;
     attempts++;
   } while (existingCodes.includes(code) && attempts < 100);
   return code;

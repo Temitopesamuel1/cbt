@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   BarChart3,
   BookOpen,
@@ -23,8 +23,14 @@ import {
   ArrowRight,
   TrendingDown,
   TrendingUp,
-  FileText
+  FileText,
+  Calendar,
+  Printer,
+  Copy,
+  Check
 } from 'lucide-react';
+import { StudentBatchUploadModal } from './StudentBatchUploadModal';
+import { StudentSlipsModal } from './StudentSlipsModal';
 import {
   Examination,
   Question,
@@ -33,7 +39,9 @@ import {
   SchoolClass,
   Subject,
   SchoolSettings,
-  calculateGrade
+  calculateGrade,
+  generateStudentAccessCode,
+  StaffMember
 } from '../../types/cbt';
 import {
   fetchExaminations,
@@ -59,6 +67,7 @@ import {
 
 interface TeacherPortalProps {
   teacherEmail: string;
+  teacherStaff?: StaffMember | null;
   currentSubroute?: string;
   onNavigateSubroute?: (subroute: string) => void;
   onLogout: () => void;
@@ -67,6 +76,7 @@ interface TeacherPortalProps {
 
 export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   teacherEmail,
+  teacherStaff,
   currentSubroute = '/teacher/dashboard',
   onNavigateSubroute,
   onLogout,
@@ -108,7 +118,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [settings, setSettings] = useState<SchoolSettings>({
-    schoolName: 'Prime Model Academy & College',
+    schoolName: 'PRIME EDUTECH',
     academicSession: '2025/2026',
     currentTerm: '1st Term',
     passMarkPercentage: 50,
@@ -116,11 +126,67 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   });
   const [loading, setLoading] = useState(false);
 
+  // Teacher's authorized subjects
+  const authorizedSubjects = useMemo(() => {
+    if (!teacherStaff || !teacherStaff.assignedSubjectNames || teacherStaff.assignedSubjectNames.length === 0) {
+      return subjects;
+    }
+    return subjects.filter(
+      s => teacherStaff.assignedSubjectNames.includes(s.name) ||
+           (teacherStaff.assignedSubjectIds && teacherStaff.assignedSubjectIds.includes(s.id))
+    );
+  }, [subjects, teacherStaff]);
+
+  // Teacher's authorized exams
+  const authorizedExams = useMemo(() => {
+    if (!teacherStaff || !teacherStaff.assignedSubjectNames || teacherStaff.assignedSubjectNames.length === 0) {
+      return exams;
+    }
+    return exams.filter(
+      e => teacherStaff.assignedSubjectNames.includes(e.subjectName) ||
+           (teacherStaff.assignedSubjectIds && teacherStaff.assignedSubjectIds.includes(e.subjectId)) ||
+           e.teacherId === teacherStaff.uniqueId ||
+           e.teacherId === teacherStaff.email
+    );
+  }, [exams, teacherStaff]);
+
+  // Teacher's authorized classes & students
+  const authorizedClasses = useMemo(() => {
+    if (!teacherStaff || !teacherStaff.assignedClasses || teacherStaff.assignedClasses.length === 0) {
+      return classes;
+    }
+    return classes.filter(c => teacherStaff.assignedClasses.includes(c.code));
+  }, [classes, teacherStaff]);
+
+  const authorizedStudents = useMemo(() => {
+    if (!teacherStaff || !teacherStaff.assignedClasses || teacherStaff.assignedClasses.length === 0) {
+      return students;
+    }
+    return students.filter(s => teacherStaff.assignedClasses.includes(s.classGrade));
+  }, [students, teacherStaff]);
+
+  // Teacher's authorized results/submissions
+  const authorizedSubmissions = useMemo(() => {
+    if (!teacherStaff || !teacherStaff.assignedSubjectNames || teacherStaff.assignedSubjectNames.length === 0) {
+      return submissions;
+    }
+    const authorizedExamIds = new Set(authorizedExams.map(e => e.id));
+    const lowerSubjs = new Set(teacherStaff.assignedSubjectNames.map(s => s.toLowerCase()));
+    return submissions.filter(sub => {
+      if (authorizedExamIds.has(sub.examId)) return true;
+      if (sub.subject && lowerSubjs.has(sub.subject.toLowerCase())) return true;
+      return false;
+    });
+  }, [submissions, teacherStaff, authorizedExams]);
+
   // Modals
   const [showCreateExamModal, setShowCreateExamModal] = useState(false);
   const [showAddQuestionModal, setShowAddQuestionModal] = useState(false);
   const [showCsvImportModal, setShowCsvImportModal] = useState(false);
   const [showAddStudentModal, setShowAddStudentModal] = useState(false);
+  const [showUploadStudentModal, setShowUploadStudentModal] = useState(false);
+  const [showStudentSlipsModal, setShowStudentSlipsModal] = useState(false);
+  const [copiedStudentCode, setCopiedStudentCode] = useState<string | null>(null);
   const [showAddClassModal, setShowAddClassModal] = useState(false);
   const [showAddSubjectModal, setShowAddSubjectModal] = useState(false);
   const [viewingSubmission, setViewingSubmission] = useState<Submission | null>(null);
@@ -233,7 +299,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   const handleSaveExam = async (e: React.FormEvent) => {
     e.preventDefault();
     const newExamId = `exam-${Date.now()}`;
-    const subjectObj = subjects.find(s => s.id === examForm.subjectId) || subjects[0];
+    const subjectObj = authorizedSubjects.find(s => s.id === examForm.subjectId) || authorizedSubjects[0] || subjects[0];
 
     const examData: Examination = {
       id: newExamId,
@@ -241,14 +307,14 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       subjectId: subjectObj?.id || 'sub-gen',
       subjectName: subjectObj?.name || 'General Subject',
       classGrade: examForm.classGrade || 'SS 2',
-      academicSession: settings.academicSession,
-      term: settings.currentTerm,
+      academicSession: examForm.academicSession || settings.academicSession,
+      term: ((examForm.term || settings.currentTerm) as '1st Term' | '2nd Term' | '3rd Term') || '1st Term',
       examType: examForm.examType || 'Mid-Term Test',
       durationMinutes: Number(examForm.durationMinutes) || 15,
       totalQuestions: Number(examForm.totalQuestions) || 10,
       instructions: examForm.instructions || 'Answer all objective questions.',
-      teacherId: teacherEmail,
-      teacherName: teacherEmail.split('@')[0],
+      teacherId: teacherStaff?.uniqueId || teacherEmail,
+      teacherName: teacherStaff?.fullName || teacherEmail.split('@')[0],
       status: (examForm.status as 'draft' | 'published' | 'archived') || 'published',
       shuffleQuestions: Boolean(examForm.shuffleQuestions),
       shuffleOptions: Boolean(examForm.shuffleOptions),
@@ -480,7 +546,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       classGrade: studentForm.classGrade,
       academicSession: settings.academicSession,
       status: 'active',
-      registeredAt: new Date().toISOString()
+      registeredAt: new Date().toISOString(),
+      accessCode: generateStudentAccessCode(students.map(s => s.accessCode || ''))
     };
 
     await saveStudent(newStudent);
@@ -494,6 +561,65 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       await deleteStudent(stdId);
       setStudents(prev => prev.filter(s => s.id !== stdId));
     }
+  };
+
+  // Academic Session & Term Handlers (decide or select term/session)
+  const handleUpdateSession = async (newSession: string) => {
+    const updated = { ...settings, academicSession: newSession };
+    setSettings(updated);
+    try {
+      await saveSchoolSettings(updated);
+    } catch (err) {
+      console.warn('Error saving academic session:', err);
+    }
+  };
+
+  const handleUpdateTerm = async (newTerm: '1st Term' | '2nd Term' | '3rd Term') => {
+    const updated = { ...settings, currentTerm: newTerm };
+    setSettings(updated);
+    try {
+      await saveSchoolSettings(updated);
+    } catch (err) {
+      console.warn('Error saving academic term:', err);
+    }
+  };
+
+  // Batch upload completion
+  const handleBatchUploadSuccess = (newStudents: Student[]) => {
+    setStudents(prev => [...newStudents, ...prev]);
+    setShowStudentSlipsModal(true);
+  };
+
+  // Export Student Credentials CSV
+  const handleExportStudentCodesCsv = () => {
+    if (authorizedStudents.length === 0) {
+      alert('No students found for your assigned classes to export.');
+      return;
+    }
+    const headers = ['Full Name', 'Class Form', 'Admission Number', 'Unique Login ID / Code', 'Session'];
+    const rows = authorizedStudents.map(s => [
+      `"${s.fullName}"`,
+      `"${s.classGrade}"`,
+      `"${s.admissionNumber}"`,
+      `"${s.accessCode || s.admissionNumber}"`,
+      `"${s.academicSession || settings.academicSession}"`
+    ].join(','));
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `prime_edutech_student_codes_${Date.now()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Copy code helper
+  const handleCopyStudentCode = (code: string) => {
+    navigator.clipboard.writeText(code);
+    setCopiedStudentCode(code);
+    setTimeout(() => setCopiedStudentCode(null), 2000);
   };
 
   // Class actions
@@ -529,7 +655,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
   // Results Export for Excel
   const handleExportResultsCsv = () => {
-    if (submissions.length === 0) {
+    if (authorizedSubmissions.length === 0) {
       alert('No student submissions to export.');
       return;
     }
@@ -548,7 +674,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       'Submission Timestamp'
     ];
 
-    const rows = submissions.map(sub => {
+    const rows = authorizedSubmissions.map(sub => {
       const g = calculateGrade(sub.percentage);
       const mins = (sub.timeSpentSeconds / 60).toFixed(1);
       return [
@@ -577,18 +703,18 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     document.body.removeChild(link);
   };
 
-  // Analytics Computation (Intelligent Assessment)
-  const totalSubmissions = submissions.length;
+  // Analytics Computation (Intelligent Assessment for Teacher Scope)
+  const totalSubmissions = authorizedSubmissions.length;
   const avgPercentage = totalSubmissions > 0
-    ? Math.round(submissions.reduce((a, b) => a + b.percentage, 0) / totalSubmissions)
+    ? Math.round(authorizedSubmissions.reduce((a, b) => a + b.percentage, 0) / totalSubmissions)
     : 0;
   const passRate = totalSubmissions > 0
-    ? Math.round((submissions.filter(s => s.percentage >= (settings.passMarkPercentage || 50)).length / totalSubmissions) * 100)
+    ? Math.round((authorizedSubmissions.filter(s => s.percentage >= (settings.passMarkPercentage || 50)).length / totalSubmissions) * 100)
     : 0;
 
   // Topic Level Aggregate Assessment
   const topicAggregateMap: Record<string, { total: number; correct: number; subject: string }> = {};
-  submissions.forEach(sub => {
+  authorizedSubmissions.forEach(sub => {
     if (sub.detailedResults) {
       sub.detailedResults.forEach(item => {
         const t = item.topic || 'General Concepts';
@@ -613,7 +739,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
   // Difficult questions (failure rate > 60% = accuracy < 40%)
   const difficultQuestionsMap: Record<string, { text: string; total: number; wrong: number; topic: string }> = {};
-  submissions.forEach(sub => {
+  authorizedSubmissions.forEach(sub => {
     if (sub.detailedResults) {
       sub.detailedResults.forEach(item => {
         const key = item.questionText;
@@ -632,7 +758,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     .filter(q => q.total >= 1 && (q.wrong / q.total) >= 0.5)
     .sort((a, b) => (b.wrong / b.total) - (a.wrong / a.total));
 
-  const selectedExam = exams.find(e => e.id === selectedExamId) || exams[0];
+  const selectedExam = authorizedExams.find(e => e.id === selectedExamId) || authorizedExams[0];
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
@@ -656,7 +782,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   activeTab === 'examinations' ? 'bg-slate-900 text-white font-bold' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                 }`}
               >
-                Examinations ({exams.length})
+                Examinations ({authorizedExams.length})
               </button>
 
               <button
@@ -674,7 +800,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   activeTab === 'students' ? 'bg-slate-900 text-white font-bold' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                 }`}
               >
-                Students ({students.length})
+                Students ({authorizedStudents.length})
               </button>
 
               <button
@@ -683,7 +809,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   activeTab === 'subjects' ? 'bg-slate-900 text-white font-bold' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                 }`}
               >
-                Subjects ({subjects.length})
+                Subjects ({authorizedSubjects.length})
               </button>
 
               <button
@@ -692,7 +818,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   activeTab === 'classes' ? 'bg-slate-900 text-white font-bold' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                 }`}
               >
-                Classes ({classes.length})
+                Classes ({authorizedClasses.length})
               </button>
 
               <button
@@ -701,7 +827,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   activeTab === 'results' ? 'bg-slate-900 text-white font-bold' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                 }`}
               >
-                Results ({submissions.length})
+                Results ({authorizedSubmissions.length})
               </button>
 
               <button
@@ -735,19 +861,102 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         </div>
       </div>
 
+      {/* Active Academic Session & Term Control Strip (Teacher Decides/Selects) */}
+      <div className="bg-slate-900 text-white border-b border-slate-800 py-3 px-4 sm:px-6 lg:px-8">
+        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4 text-xs">
+          <div className="flex flex-wrap items-center gap-3 sm:gap-4">
+            <div className="flex items-center gap-1.5 font-bold text-amber-300">
+              <Calendar className="w-4 h-4" />
+              <span>Active Academic Window:</span>
+            </div>
+
+            {/* Session Selector */}
+            <div className="flex items-center gap-1.5 bg-slate-800/90 px-2.5 py-1 rounded-lg border border-slate-700">
+              <span className="text-slate-400 text-[11px] font-semibold">Session:</span>
+              <select
+                value={settings.academicSession}
+                onChange={(e) => handleUpdateSession(e.target.value)}
+                className="bg-transparent text-white font-mono font-bold text-xs focus:outline-none cursor-pointer"
+              >
+                <option value="2023/2024" className="bg-slate-900 text-white">2023/2024</option>
+                <option value="2024/2025" className="bg-slate-900 text-white">2024/2025</option>
+                <option value="2025/2026" className="bg-slate-900 text-white">2025/2026</option>
+                <option value="2026/2027" className="bg-slate-900 text-white">2026/2027</option>
+                <option value="2027/2028" className="bg-slate-900 text-white">2027/2028</option>
+              </select>
+            </div>
+
+            {/* Term Selector Buttons */}
+            <div className="flex items-center gap-1 bg-slate-800/90 p-1 rounded-lg border border-slate-700">
+              {(['1st Term', '2nd Term', '3rd Term'] as const).map(t => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => handleUpdateTerm(t)}
+                  className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${
+                    settings.currentTerm === t
+                      ? 'bg-amber-400 text-slate-950 shadow-sm'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-700'
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="text-[11px] text-slate-400 hidden sm:flex items-center gap-2">
+            <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span>Active: <strong>{settings.academicSession} · {settings.currentTerm}</strong> (All papers & enrolments adapt to this term)</span>
+          </div>
+        </div>
+      </div>
+
       {/* Main Workspace Body */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* SUBROUTE 1: OVERVIEW DASHBOARD */}
         {activeTab === 'dashboard' && (
           <div className="space-y-8">
+            {/* Faculty Teacher Identity Card */}
+            {teacherStaff && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-xl bg-slate-900 text-amber-400 flex items-center justify-center font-black text-lg shadow-md border border-slate-800">
+                    {teacherStaff.fullName.charAt(0)}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h1 className="text-lg font-black text-slate-900">{teacherStaff.fullName}</h1>
+                      <span className="text-[10px] uppercase font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                        {teacherStaff.role.toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-500 font-mono mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span>Staff ID: <strong className="text-slate-900">{teacherStaff.uniqueId}</strong></span>
+                      <span>·</span>
+                      <span>Subject: <strong className="text-blue-900">{teacherStaff.assignedSubjectNames.join(', ')}</strong></span>
+                      <span>·</span>
+                      <span>Assigned Classes: <strong className="text-slate-700">{teacherStaff.assignedClasses.join(', ')}</strong></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 text-xs">
+                  <div className="px-3 py-1.5 rounded-lg bg-blue-50 border border-blue-200 text-blue-900 font-semibold">
+                    Assigned Scope: <strong>{authorizedSubjects.length} Subject(s)</strong>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* KPI Cards Strip */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
                 <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
                   Enrolled Students
                 </span>
-                <div className="text-3xl font-black font-mono text-slate-900 mt-1">{students.length}</div>
-                <div className="text-xs text-slate-500 mt-1">Across {classes.length} class cohorts</div>
+                <div className="text-3xl font-black font-mono text-slate-900 mt-1">{authorizedStudents.length}</div>
+                <div className="text-xs text-slate-500 mt-1">Across {authorizedClasses.length} assigned class cohorts</div>
               </div>
 
               <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
@@ -755,22 +964,22 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   Active Examinations
                 </span>
                 <div className="text-3xl font-black font-mono text-blue-900 mt-1">
-                  {exams.filter(e => e.status === 'published').length}
+                  {authorizedExams.filter(e => e.status === 'published').length}
                 </div>
-                <div className="text-xs text-slate-500 mt-1">Published to student terminals</div>
+                <div className="text-xs text-slate-500 mt-1">Published for your subjects</div>
               </div>
 
               <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
                 <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
                   Completed Submissions
                 </span>
-                <div className="text-3xl font-black font-mono text-emerald-700 mt-1">{submissions.length}</div>
-                <div className="text-xs text-slate-500 mt-1">Graded objective papers</div>
+                <div className="text-3xl font-black font-mono text-emerald-700 mt-1">{authorizedSubmissions.length}</div>
+                <div className="text-xs text-slate-500 mt-1">For your examination papers</div>
               </div>
 
               <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
                 <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
-                  School Pass Rate
+                  Overall Pass Rate
                 </span>
                 <div className="text-3xl font-black font-mono text-slate-900 mt-1">{passRate}%</div>
                 <div className="text-xs text-slate-500 mt-1">Scores ≥ {settings.passMarkPercentage}% benchmark</div>
@@ -792,13 +1001,13 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   </button>
                 </div>
 
-                {exams.length === 0 ? (
+                {authorizedExams.length === 0 ? (
                   <div className="py-8 text-center text-xs text-slate-400">
-                    No examinations created yet. Click "Create Examination" to start.
+                    No examinations created yet. Click "New Examination" to start.
                   </div>
                 ) : (
                   <div className="divide-y divide-slate-100">
-                    {exams.slice(0, 5).map(e => (
+                    {authorizedExams.slice(0, 5).map(e => (
                       <div key={e.id} className="py-3 flex items-center justify-between gap-4">
                         <div>
                           <div className="text-xs font-bold text-slate-900">{e.title}</div>
@@ -899,65 +1108,77 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {exams.map(exam => (
-                <div
-                  key={exam.id}
-                  className={`bg-white rounded-2xl border p-5 shadow-sm transition-all flex flex-col justify-between ${
-                    exam.id === selectedExamId ? 'border-blue-900 ring-1 ring-blue-900' : 'border-slate-200'
-                  }`}
-                >
-                  <div>
-                    <div className="flex items-start justify-between gap-2 mb-2">
-                      <span className="text-[11px] font-mono font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                        {exam.subjectName} · {exam.classGrade}
-                      </span>
+              {authorizedExams.length === 0 ? (
+                <div className="col-span-full py-12 text-center bg-white rounded-2xl border border-slate-200 p-8 space-y-2">
+                  <BookOpen className="w-8 h-8 text-slate-300 mx-auto" />
+                  <div className="text-sm font-bold text-slate-700">No Examinations Found for Your Subjects</div>
+                  <p className="text-xs text-slate-500 max-w-md mx-auto">
+                    {teacherStaff && teacherStaff.assignedSubjectNames.length > 0
+                      ? `You are assigned to: ${teacherStaff.assignedSubjectNames.join(', ')}. Create an examination for your curriculum to get started.`
+                      : 'No examinations created yet. Click "Create Examination" above to build your first paper.'}
+                  </p>
+                </div>
+              ) : (
+                authorizedExams.map(exam => (
+                  <div
+                    key={exam.id}
+                    className={`bg-white rounded-2xl border p-5 shadow-sm transition-all flex flex-col justify-between ${
+                      exam.id === selectedExamId ? 'border-blue-900 ring-1 ring-blue-900' : 'border-slate-200'
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <span className="text-[11px] font-mono font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                          {exam.subjectName} · {exam.classGrade}
+                        </span>
+                        <button
+                          onClick={() => handleTogglePublish(exam)}
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded border transition-colors ${
+                            exam.status === 'published'
+                              ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                              : 'bg-slate-100 text-slate-600 border-slate-300 hover:bg-slate-200'
+                          }`}
+                          title="Click to toggle publish status"
+                        >
+                          {exam.status === 'published' ? '● Published' : '○ Draft'}
+                        </button>
+                      </div>
+
+                      <h3 className="text-sm font-bold text-slate-900 mb-1">{exam.title}</h3>
+                      <p className="text-xs text-slate-500 line-clamp-2 mb-4">{exam.instructions}</p>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs bg-slate-50 p-2.5 rounded-xl mb-4 font-mono">
+                        <div>
+                          <span className="text-[10px] text-slate-400 block font-sans">DURATION</span>
+                          <strong className="text-slate-900">{exam.durationMinutes} Mins</strong>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-400 block font-sans">TARGET Qs</span>
+                          <strong className="text-slate-900">{exam.totalQuestions} Questions</strong>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-3 border-t border-slate-100 text-xs">
                       <button
-                        onClick={() => handleTogglePublish(exam)}
-                        className={`text-[10px] font-bold px-2 py-0.5 rounded border transition-colors ${
-                          exam.status === 'published'
-                            ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
-                            : 'bg-slate-100 text-slate-600 border-slate-300 hover:bg-slate-200'
-                        }`}
-                        title="Click to toggle publish status"
+                        onClick={() => {
+                          setSelectedExamId(exam.id);
+                          handleTabChange('questions');
+                        }}
+                        className="text-blue-900 hover:underline font-bold"
                       >
-                        {exam.status === 'published' ? '● Published' : '○ Draft'}
+                        Manage Questions →
+                      </button>
+                      <button
+                        onClick={() => handleDeleteExam(exam.id)}
+                        className="p-1 text-slate-400 hover:text-rose-600 rounded"
+                      >
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
-
-                    <h3 className="text-sm font-bold text-slate-900 mb-1">{exam.title}</h3>
-                    <p className="text-xs text-slate-500 line-clamp-2 mb-4">{exam.instructions}</p>
-
-                    <div className="grid grid-cols-2 gap-2 text-xs bg-slate-50 p-2.5 rounded-xl mb-4 font-mono">
-                      <div>
-                        <span className="text-[10px] text-slate-400 block font-sans">DURATION</span>
-                        <strong className="text-slate-900">{exam.durationMinutes} Mins</strong>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-400 block font-sans">TARGET Qs</span>
-                        <strong className="text-slate-900">{exam.totalQuestions} Questions</strong>
-                      </div>
-                    </div>
                   </div>
-
-                  <div className="flex items-center justify-between pt-3 border-t border-slate-100 text-xs">
-                    <button
-                      onClick={() => {
-                        setSelectedExamId(exam.id);
-                        handleTabChange('questions');
-                      }}
-                      className="text-blue-900 hover:underline font-bold"
-                    >
-                      Manage Questions →
-                    </button>
-                    <button
-                      onClick={() => handleDeleteExam(exam.id)}
-                      className="p-1 text-slate-400 hover:text-rose-600 rounded"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
         )}
@@ -975,7 +1196,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   onChange={(e) => setSelectedExamId(e.target.value)}
                   className="px-3.5 py-2 text-xs font-bold text-slate-900 bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
                 >
-                  {exams.map(ex => (
+                  {authorizedExams.map(ex => (
                     <option key={ex.id} value={ex.id}>
                       {ex.title} ({ex.classGrade} · {ex.subjectName})
                     </option>
@@ -1117,21 +1338,54 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         {/* SUBROUTE 4: STUDENTS REGISTER */}
         {activeTab === 'students' && (
           <div className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
               <div>
                 <h2 className="text-lg font-black text-slate-900">Student Directory & Enrolment</h2>
                 <p className="text-xs text-slate-500">
-                  Manage student profiles, admission numbers, and class form assignments
+                  Manage student profiles, admission numbers, and auto-generated unique examination login IDs
                 </p>
               </div>
 
-              <button
-                onClick={() => setShowAddStudentModal(true)}
-                className="px-4 py-2.5 bg-blue-900 hover:bg-blue-800 text-white text-xs font-bold rounded-xl shadow-sm transition-colors flex items-center gap-1.5"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Enrol New Student</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleExportStudentCodesCsv}
+                  className="px-3 py-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+                  title="Export full roster with unique IDs to CSV"
+                >
+                  <Download className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Export IDs CSV</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowStudentSlipsModal(true)}
+                  className="px-3 py-2 bg-white hover:bg-blue-50 text-blue-900 border border-blue-300 text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+                  title="View and print candidate examination slips / passcards"
+                >
+                  <Printer className="w-3.5 h-3.5 text-blue-700" />
+                  <span>Print Login Slips</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowUploadStudentModal(true)}
+                  className="px-3.5 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+                  title="Upload students from CSV or spreadsheet"
+                >
+                  <Upload className="w-3.5 h-3.5 text-amber-300" />
+                  <span>Upload Students (CSV)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowAddStudentModal(true)}
+                  className="px-4 py-2 bg-blue-900 hover:bg-blue-800 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Enrol Single Student</span>
+                </button>
+              </div>
             </div>
 
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -1141,34 +1395,57 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                     <th className="py-3 px-4">Student Name</th>
                     <th className="py-3 px-4">Admission Number</th>
                     <th className="py-3 px-4">Class Form</th>
-                    <th className="py-3 px-4">Registered Password</th>
+                    <th className="py-3 px-4">Unique Login ID / Passcode</th>
+                    <th className="py-3 px-4">Academic Session</th>
                     <th className="py-3 px-4">Status</th>
                     <th className="py-3 px-4 text-center">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {students.map(s => (
-                    <tr key={s.id} className="hover:bg-slate-50/60 transition-colors">
-                      <td className="py-3 px-4 font-bold text-slate-900">{s.fullName}</td>
-                      <td className="py-3 px-4 font-mono font-semibold text-blue-900">{s.admissionNumber}</td>
-                      <td className="py-3 px-4 font-medium text-slate-700">{s.classGrade}</td>
-                      <td className="py-3 px-4 font-mono text-slate-500">{s.surname}</td>
-                      <td className="py-3 px-4">
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
-                          {s.status}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <button
-                          onClick={() => handleDeleteStudent(s.id)}
-                          className="p-1 text-slate-400 hover:text-rose-600 rounded"
-                          title="Delete student"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {authorizedStudents.map(s => {
+                    const code = s.accessCode || s.admissionNumber;
+                    return (
+                      <tr key={s.id} className="hover:bg-slate-50/60 transition-colors">
+                        <td className="py-3 px-4 font-bold text-slate-900">{s.fullName}</td>
+                        <td className="py-3 px-4 font-mono font-semibold text-slate-700">{s.admissionNumber}</td>
+                        <td className="py-3 px-4 font-medium text-slate-700">{s.classGrade}</td>
+                        <td className="py-3 px-4">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono font-black text-xs text-blue-950 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded shadow-2xs tracking-wider">
+                              {code}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleCopyStudentCode(code)}
+                              className="p-1 text-slate-400 hover:text-blue-900 rounded transition-colors"
+                              title="Copy unique code"
+                            >
+                              {copiedStudentCode === code ? (
+                                <Check className="w-3.5 h-3.5 text-emerald-600" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 font-mono text-slate-500">{s.academicSession || settings.academicSession}</td>
+                        <td className="py-3 px-4">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                            {s.status}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <button
+                            onClick={() => handleDeleteStudent(s.id)}
+                            className="p-1 text-slate-400 hover:text-rose-600 rounded transition-colors"
+                            title="Delete student"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1180,30 +1457,28 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           <div className="space-y-6">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-lg font-black text-slate-900">Academic Subjects</h2>
-                <p className="text-xs text-slate-500">Curriculum subjects taught within the secondary school</p>
+                <h2 className="text-lg font-black text-slate-900">Assigned Curriculum Subjects</h2>
+                <p className="text-xs text-slate-500">
+                  {teacherStaff
+                    ? `Curriculum subjects assigned to ${teacherStaff.fullName} (${teacherStaff.uniqueId}).`
+                    : 'Curriculum subjects taught within the secondary school'}
+                </p>
               </div>
-              <button
-                onClick={() => setShowAddSubjectModal(true)}
-                className="px-4 py-2 bg-blue-900 text-white text-xs font-bold rounded-xl"
-              >
-                + Add Subject
-              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {subjects.map(sub => (
-                <div key={sub.id} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between">
+              {authorizedSubjects.map(sub => (
+                <div key={sub.id} className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
                   <div>
+                    <span className="text-[10px] uppercase font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 mb-1 inline-block">
+                      Taught Subject
+                    </span>
                     <h3 className="text-sm font-bold text-slate-900">{sub.name}</h3>
-                    <div className="text-xs text-slate-500 font-mono">{sub.code} · {sub.department}</div>
+                    <div className="text-xs text-slate-500 font-mono mt-0.5">{sub.code} · {sub.department}</div>
                   </div>
-                  <button
-                    onClick={() => deleteSubject(sub.id).then(() => setSubjects(prev => prev.filter(s => s.id !== sub.id)))}
-                    className="p-1 text-slate-400 hover:text-rose-600 rounded"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-black text-xs shadow-xs">
+                    {sub.code ? sub.code.slice(0, 3) : 'SUB'}
+                  </div>
                 </div>
               ))}
             </div>
@@ -1215,30 +1490,28 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           <div className="space-y-6">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-lg font-black text-slate-900">Classes & Cohort Arms</h2>
-                <p className="text-xs text-slate-500">Secondary school levels from JSS 1 to SS 3</p>
+                <h2 className="text-lg font-black text-slate-900">Assigned Class Cohorts</h2>
+                <p className="text-xs text-slate-500">
+                  {teacherStaff
+                    ? `Classes offering subjects taught by ${teacherStaff.fullName}.`
+                    : 'Secondary school levels from JSS 1 to SS 3'}
+                </p>
               </div>
-              <button
-                onClick={() => setShowAddClassModal(true)}
-                className="px-4 py-2 bg-blue-900 text-white text-xs font-bold rounded-xl"
-              >
-                + Add Class
-              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {classes.map(cls => (
-                <div key={cls.id} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between">
+              {authorizedClasses.map(cls => (
+                <div key={cls.id} className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
                   <div>
+                    <span className="text-[10px] uppercase font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 mb-1 inline-block">
+                      Taught Class Cohort
+                    </span>
                     <h3 className="text-sm font-bold text-slate-900">{cls.name}</h3>
-                    <div className="text-xs text-slate-500 font-mono">Code: {cls.code} · Arm: {cls.arm || 'All'}</div>
+                    <div className="text-xs text-slate-500 font-mono mt-0.5">Code: {cls.code} · Arm: {cls.arm || 'All'}</div>
                   </div>
-                  <button
-                    onClick={() => deleteSchoolClass(cls.id).then(() => setClasses(prev => prev.filter(c => c.id !== cls.id)))}
-                    className="p-1 text-slate-400 hover:text-rose-600 rounded"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="text-xs font-mono font-bold text-slate-900 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
+                    {cls.code}
+                  </div>
                 </div>
               ))}
             </div>
@@ -1547,10 +1820,15 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
                   >
                     <option value="">Select Subject...</option>
-                    {subjects.map(s => (
+                    {authorizedSubjects.map(s => (
                       <option key={s.id} value={s.id}>{s.name}</option>
                     ))}
                   </select>
+                  {teacherStaff && teacherStaff.assignedSubjectNames.length > 0 && (
+                    <span className="text-[10px] text-blue-700 font-semibold mt-0.5 block">
+                      Restricted to your assigned subjects: {teacherStaff.assignedSubjectNames.join(', ')}
+                    </span>
+                  )}
                 </div>
 
                 <div>
@@ -1560,9 +1838,39 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                     onChange={(e) => setExamForm({ ...examForm, classGrade: e.target.value })}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
                   >
-                    {classes.map(c => (
+                    {authorizedClasses.map(c => (
                       <option key={c.id} value={c.code}>{c.name} ({c.code})</option>
                     ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Academic Session</label>
+                  <select
+                    value={examForm.academicSession || settings.academicSession}
+                    onChange={(e) => setExamForm({ ...examForm, academicSession: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
+                  >
+                    <option value="2023/2024">2023/2024</option>
+                    <option value="2024/2025">2024/2025</option>
+                    <option value="2025/2026">2025/2026</option>
+                    <option value="2026/2027">2026/2027</option>
+                    <option value="2027/2028">2027/2028</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Academic Term</label>
+                  <select
+                    value={examForm.term || settings.currentTerm}
+                    onChange={(e) => setExamForm({ ...examForm, term: e.target.value as any })}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
+                  >
+                    <option value="1st Term">1st Term</option>
+                    <option value="2nd Term">2nd Term</option>
+                    <option value="3rd Term">3rd Term</option>
                   </select>
                 </div>
               </div>
@@ -2139,6 +2447,26 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           </div>
         </div>
       )}
+
+      {/* STUDENT BATCH UPLOAD MODAL */}
+      <StudentBatchUploadModal
+        isOpen={showUploadStudentModal}
+        onClose={() => setShowUploadStudentModal(false)}
+        classes={classes}
+        currentSession={settings.academicSession}
+        existingStudents={students}
+        onUploadSuccess={handleBatchUploadSuccess}
+      />
+
+      {/* STUDENT LOGIN SLIPS / ID CARDS MODAL */}
+      <StudentSlipsModal
+        isOpen={showStudentSlipsModal}
+        onClose={() => setShowStudentSlipsModal(false)}
+        students={students}
+        schoolName={settings.schoolName}
+        currentSession={settings.academicSession}
+        currentTerm={settings.currentTerm}
+      />
     </div>
   );
 };
