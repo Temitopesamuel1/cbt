@@ -18,7 +18,8 @@ import {
   query,
   where,
   deleteDoc,
-  updateDoc
+  updateDoc,
+  onSnapshot
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
@@ -32,7 +33,8 @@ import {
   ExamAttempt,
   generateStudentAccessCode,
   StaffMember,
-  generateStaffUniqueId
+  generateStaffUniqueId,
+  StudentAssessmentRecord
 } from '../types/cbt';
 import {
   DEFAULT_SCHOOL_CLASSES,
@@ -149,50 +151,115 @@ export async function deleteStaffMember(staffId: string): Promise<void> {
   }
 }
 
-// Teacher Authentication via Unique Staff ID (e.g. TCH-1001)
-export async function authenticateStaffByUniqueId(rawUniqueId: string): Promise<StaffMember | null> {
-  const cleanId = rawUniqueId.trim().toUpperCase();
-  if (!cleanId) return null;
+export interface StaffAuthResult {
+  success: boolean;
+  staff?: StaffMember;
+  error?: string;
+  requiresPassword?: boolean;
+  isFirstTime?: boolean;
+}
 
+// Teacher Authentication via Unique Staff ID & Optional Password
+export async function authenticateStaffWithCredentials(
+  rawUniqueId: string,
+  providedPassword?: string
+): Promise<StaffAuthResult> {
+  const cleanId = rawUniqueId.trim().toUpperCase();
+  if (!cleanId) {
+    return { success: false, error: 'Please enter your unique Staff ID.' };
+  }
+
+  let matchedStaff: StaffMember | null = null;
   const path = 'teachers';
+
   try {
-    // 1. Primary lookup by uniqueId
     const qCode = query(collection(db, path), where('uniqueId', '==', cleanId));
     const snapCode = await getDocs(qCode);
     if (!snapCode.empty) {
-      for (const docSnap of snapCode.docs) {
-        const data = docSnap.data() as StaffMember;
-        if (data.status === 'active') {
-          return { ...data, id: docSnap.id };
-        }
+      const docSnap = snapCode.docs[0];
+      matchedStaff = { ...(docSnap.data() as StaffMember), id: docSnap.id };
+    } else {
+      const qEmail = query(collection(db, path), where('email', '==', rawUniqueId.trim().toLowerCase()));
+      const snapEmail = await getDocs(qEmail);
+      if (!snapEmail.empty) {
+        const docSnap = snapEmail.docs[0];
+        matchedStaff = { ...(docSnap.data() as StaffMember), id: docSnap.id };
       }
     }
+  } catch (err) {
+    console.warn('Teacher lookup from Firestore failed, checking local default staff:', err);
+  }
 
-    // 2. Secondary lookup by email if teacher types staff email
-    const qEmail = query(collection(db, path), where('email', '==', rawUniqueId.trim().toLowerCase()));
-    const snapEmail = await getDocs(qEmail);
-    if (!snapEmail.empty) {
-      for (const docSnap of snapEmail.docs) {
-        const data = docSnap.data() as StaffMember;
-        if (data.status === 'active') {
-          return { ...data, id: docSnap.id };
-        }
-      }
+  if (!matchedStaff) {
+    const local = DEFAULT_STAFF.find(
+      s => (s.uniqueId && s.uniqueId.toUpperCase() === cleanId) ||
+           s.email.toLowerCase() === rawUniqueId.trim().toLowerCase()
+    );
+    if (local) {
+      matchedStaff = { ...local };
     }
-  } catch (error) {
-    console.warn('Teacher authentication query fallback:', error);
   }
 
-  // Fallback check against default staff roster
-  const localMatch = DEFAULT_STAFF.find(
-    s => (s.uniqueId && s.uniqueId.toUpperCase() === cleanId) ||
-         s.email.toLowerCase() === rawUniqueId.trim().toLowerCase()
-  );
-  if (localMatch && localMatch.status === 'active') {
-    return localMatch;
+  if (!matchedStaff) {
+    return {
+      success: false,
+      error: `Access Denied: Staff ID "${cleanId}" does not exist in the faculty database. Only registered teachers created by the Administrator can log in.`
+    };
   }
 
-  return null;
+  if (matchedStaff.status !== 'active') {
+    return {
+      success: false,
+      error: `Your faculty account is currently marked as ${matchedStaff.status}. Please contact the institutional administrator.`
+    };
+  }
+
+  // Password verification:
+  if (matchedStaff.password && matchedStaff.password.trim().length > 0) {
+    if (!providedPassword || providedPassword.trim().length === 0) {
+      return {
+        success: false,
+        requiresPassword: true,
+        error: 'Please enter your account password to verify your login.'
+      };
+    }
+    if (matchedStaff.password !== providedPassword.trim()) {
+      return {
+        success: false,
+        requiresPassword: true,
+        error: 'Incorrect security password. Please re-enter your password.'
+      };
+    }
+    return { success: true, staff: matchedStaff };
+  }
+
+  // Teacher has no password set yet (first-time login)
+  return {
+    success: true,
+    staff: matchedStaff,
+    isFirstTime: true
+  };
+}
+
+// Legacy helper for direct ID lookup
+export async function authenticateStaffByUniqueId(rawUniqueId: string): Promise<StaffMember | null> {
+  const res = await authenticateStaffWithCredentials(rawUniqueId);
+  return res.success && res.staff ? res.staff : null;
+}
+
+// Update teacher profile & password
+export async function updateTeacherProfile(staffId: string, updates: Partial<StaffMember>): Promise<StaffMember> {
+  const path = `teachers/${staffId}`;
+  try {
+    await setDoc(doc(db, 'teachers', staffId), updates, { merge: true });
+    const snap = await getDoc(doc(db, 'teachers', staffId));
+    if (snap.exists()) {
+      return { id: snap.id, ...snap.data() } as StaffMember;
+    }
+  } catch (err) {
+    console.warn('Firestore update error, updating local representation:', err);
+  }
+  return { id: staffId, ...updates } as StaffMember;
 }
 
 export async function logoutTeacher(): Promise<void> {
@@ -667,4 +734,297 @@ export async function fetchSubmissions(examId?: string, studentId?: string): Pro
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path);
   }
+}
+
+// Continuous Assessment / Master Gradebook Records
+export async function fetchAssessmentRecords(
+  subjectId?: string,
+  classGrade?: string,
+  academicSession?: string,
+  term?: string
+): Promise<StudentAssessmentRecord[]> {
+  const path = 'caRecords';
+  try {
+    const qList: any[] = [];
+    if (subjectId) qList.push(where('subjectId', '==', subjectId));
+    if (classGrade) qList.push(where('classGrade', '==', classGrade));
+    if (academicSession) qList.push(where('academicSession', '==', academicSession));
+    if (term) qList.push(where('term', '==', term));
+
+    const q = qList.length > 0 ? query(collection(db, path), ...qList) : collection(db, path);
+    const snapshot = await getDocs(q);
+    const records: StudentAssessmentRecord[] = [];
+    snapshot.forEach(docSnap => {
+      records.push({ id: docSnap.id, ...docSnap.data() } as StudentAssessmentRecord);
+    });
+    return records;
+  } catch (error) {
+    console.warn('Fallback fetching CA records from local cache:', error);
+    try {
+      const local = localStorage.getItem('prime_edutech_ca_records');
+      if (local) {
+        const parsed: StudentAssessmentRecord[] = JSON.parse(local);
+        return parsed.filter(r => {
+          if (subjectId && r.subjectId !== subjectId) return false;
+          if (classGrade && r.classGrade !== classGrade) return false;
+          if (academicSession && r.academicSession !== academicSession) return false;
+          if (term && r.term !== term) return false;
+          return true;
+        });
+      }
+    } catch {}
+    return [];
+  }
+}
+
+export async function saveAssessmentRecord(record: StudentAssessmentRecord): Promise<void> {
+  const path = `caRecords/${record.id}`;
+  try {
+    await setDoc(doc(db, 'caRecords', record.id), record, { merge: true });
+  } catch (error) {
+    console.warn('Firestore write warning for caRecord, falling back to local cache:', error);
+  }
+
+  // Always mirror in localStorage for instant offline access
+  try {
+    const local = localStorage.getItem('prime_edutech_ca_records');
+    const records: StudentAssessmentRecord[] = local ? JSON.parse(local) : [];
+    const filtered = records.filter(r => r.id !== record.id);
+    filtered.push(record);
+    localStorage.setItem('prime_edutech_ca_records', JSON.stringify(filtered));
+  } catch {}
+
+  // Broadcast real-time score update event across components & tabs
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('caRecordsUpdated', { detail: record }));
+  }
+}
+
+export async function saveAssessmentBatch(records: StudentAssessmentRecord[]): Promise<void> {
+  for (const record of records) {
+    await saveAssessmentRecord(record);
+  }
+}
+
+// Real-time listener for a student's continuous assessment records across all subjects
+export function subscribeStudentAssessmentRecords(
+  studentId: string,
+  admissionNumber: string,
+  callback: (records: StudentAssessmentRecord[]) => void
+): () => void {
+  const path = 'caRecords';
+  let unsubFirestore: (() => void) | null = null;
+
+  const triggerFromLocalCache = () => {
+    try {
+      const local = localStorage.getItem('prime_edutech_ca_records');
+      if (local) {
+        const parsed: StudentAssessmentRecord[] = JSON.parse(local);
+        const matched = parsed.filter(
+          r => r.studentId === studentId || (r.admissionNumber && r.admissionNumber.toUpperCase() === admissionNumber.toUpperCase())
+        );
+        callback(matched);
+      }
+    } catch {}
+  };
+
+  // Immediate local cache dispatch
+  triggerFromLocalCache();
+
+  try {
+    const q = collection(db, path);
+    unsubFirestore = onSnapshot(
+      q,
+      snapshot => {
+        const records: StudentAssessmentRecord[] = [];
+        snapshot.forEach(docSnap => {
+          const data = docSnap.data() as StudentAssessmentRecord;
+          if (
+            data.studentId === studentId ||
+            (data.admissionNumber && data.admissionNumber.toUpperCase() === admissionNumber.toUpperCase())
+          ) {
+            records.push({ id: docSnap.id, ...data });
+          }
+        });
+
+        // Merge any local unsynced records
+        try {
+          const local = localStorage.getItem('prime_edutech_ca_records');
+          if (local) {
+            const parsed: StudentAssessmentRecord[] = JSON.parse(local);
+            parsed.forEach(lr => {
+              if (
+                (lr.studentId === studentId || lr.admissionNumber.toUpperCase() === admissionNumber.toUpperCase()) &&
+                !records.some(r => r.id === lr.id)
+              ) {
+                records.push(lr);
+              }
+            });
+          }
+        } catch {}
+
+        callback(records);
+      },
+      err => {
+        console.warn('Real-time score listener fallback:', err);
+        triggerFromLocalCache();
+      }
+    );
+  } catch (error) {
+    console.warn('Firestore onSnapshot error, falling back to local events:', error);
+  }
+
+  // Cross-tab and local broadcast listener
+  const handleLocalUpdate = () => triggerFromLocalCache();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('caRecordsUpdated', handleLocalUpdate);
+    window.addEventListener('storage', handleLocalUpdate);
+  }
+
+  return () => {
+    if (unsubFirestore) unsubFirestore();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('caRecordsUpdated', handleLocalUpdate);
+      window.removeEventListener('storage', handleLocalUpdate);
+    }
+  };
+}
+
+// Fetch cumulative records across all terms for a student
+export async function fetchStudentAllAssessmentRecords(
+  studentId: string,
+  admissionNumber: string
+): Promise<StudentAssessmentRecord[]> {
+  const path = 'caRecords';
+  try {
+    const q = collection(db, path);
+    const snapshot = await getDocs(q);
+    const records: StudentAssessmentRecord[] = [];
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data() as StudentAssessmentRecord;
+      if (
+        data.studentId === studentId ||
+        (data.admissionNumber && data.admissionNumber.toUpperCase() === admissionNumber.toUpperCase())
+      ) {
+        records.push({ id: docSnap.id, ...data });
+      }
+    });
+
+    // Check local cache
+    try {
+      const local = localStorage.getItem('prime_edutech_ca_records');
+      if (local) {
+        const parsed: StudentAssessmentRecord[] = JSON.parse(local);
+        parsed.forEach(lr => {
+          if (
+            (lr.studentId === studentId || lr.admissionNumber.toUpperCase() === admissionNumber.toUpperCase()) &&
+            !records.some(r => r.id === lr.id)
+          ) {
+            records.push(lr);
+          }
+        });
+      }
+    } catch {}
+
+    return records;
+  } catch (err) {
+    console.warn('Fallback fetching cumulative student records:', err);
+    try {
+      const local = localStorage.getItem('prime_edutech_ca_records');
+      if (local) {
+        const parsed: StudentAssessmentRecord[] = JSON.parse(local);
+        return parsed.filter(
+          r => r.studentId === studentId || r.admissionNumber.toUpperCase() === admissionNumber.toUpperCase()
+        );
+      }
+    } catch {}
+    return [];
+  }
+}
+
+// Update student profile (passport, email, password, etc.)
+export async function updateStudentProfile(
+  studentId: string,
+  updates: Partial<Student>
+): Promise<Student> {
+  const path = `students/${studentId}`;
+  try {
+    await updateDoc(doc(db, 'students', studentId), updates);
+  } catch (error) {
+    try {
+      await setDoc(doc(db, 'students', studentId), updates, { merge: true });
+    } catch (err) {
+      console.warn('Firestore write warning for student profile:', err);
+    }
+  }
+
+  // Update in localStorage
+  try {
+    const stored = localStorage.getItem('prime_edutech_saved_students');
+    if (stored) {
+      const list = JSON.parse(stored);
+      const updatedList = list.map((s: any) =>
+        s.id === studentId || s.admissionNumber === updates.admissionNumber ? { ...s, ...updates } : s
+      );
+      localStorage.setItem('prime_edutech_saved_students', JSON.stringify(updatedList));
+    }
+  } catch {}
+
+  return updates as Student;
+}
+
+// Comprehensive Student Authentication (Passcode, Admission No, or Connected Email + Password)
+export async function authenticateStudentWithCredentials(
+  identifier: string,
+  password?: string
+): Promise<{ success: boolean; student?: Student; error?: string }> {
+  const cleanId = identifier.trim();
+  if (!cleanId) {
+    return { success: false, error: 'Please enter your unique Passcode, Admission Number, or Connected Email.' };
+  }
+
+  const path = 'students';
+  try {
+    const allStudents = await fetchStudents();
+    const cleanUpper = cleanId.toUpperCase();
+    const cleanLower = cleanId.toLowerCase();
+
+    // 1. Match by Email
+    const byEmail = allStudents.find(s => s.email && s.email.toLowerCase() === cleanLower);
+    if (byEmail) {
+      if (byEmail.password) {
+        if (!password || password.trim() !== byEmail.password) {
+          return { success: false, error: 'Incorrect personal security password. Please re-enter your password.' };
+        }
+      }
+      return { success: true, student: byEmail };
+    }
+
+    // 2. Match by Passcode or Admission Number
+    const byCode = allStudents.find(
+      s => (s.accessCode && s.accessCode.toUpperCase() === cleanUpper) || s.admissionNumber.toUpperCase() === cleanUpper
+    );
+    if (byCode) {
+      if (byCode.password && password && password.trim() !== byCode.password) {
+        return { success: false, error: 'Invalid password. You have set a personal password for this account.' };
+      }
+      return { success: true, student: byCode };
+    }
+  } catch (err) {
+    console.warn('Student authentication check fallback:', err);
+  }
+
+  // Local fallback
+  const fallback = DEFAULT_STUDENTS.find(
+    s => (s.accessCode && s.accessCode.toUpperCase() === cleanId.toUpperCase()) ||
+         s.admissionNumber.toUpperCase() === cleanId.toUpperCase()
+  );
+  if (fallback) {
+    return { success: true, student: fallback };
+  }
+
+  return {
+    success: false,
+    error: `No student profile found for "${cleanId}". Please verify your credentials or ask your subject teacher.`
+  };
 }

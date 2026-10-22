@@ -18,14 +18,24 @@ export interface Student {
   id: string;
   admissionNumber: string; // e.g. "STU/2025/014"
   firstName: string; // e.g. "Emmanuel"
-  surname: string; // e.g. "Adebayo" - used as password per school request
+  surname: string; // e.g. "Adebayo"
   fullName: string;
-  classGrade: string; // e.g. "SS2"
+  classGrade: string; // e.g. "SS 2"
   classId?: string;
   academicSession: string;
   status: 'active' | 'suspended' | 'graduated';
   registeredAt: string;
   accessCode?: string; // Unique student login passcode e.g. "PRM-4821"
+  gender?: string;
+  passportUrl?: string; // Uploaded passport photo URL or base64
+  email?: string; // Connected student email address
+  password?: string; // Personal security password set by student
+  phoneNumber?: string;
+  dateOfBirth?: string;
+  stateOfOrigin?: string;
+  department?: string; // e.g. "Science & Tech", "Arts & Humanities", "Commercial"
+  bio?: string;
+  cgpa?: number; // Cumulative Grade Point Average (0.00 - 5.00)
 }
 
 export interface Examination {
@@ -170,6 +180,93 @@ export interface StaffMember {
   role: 'teacher' | 'hod';
   status: 'active' | 'suspended';
   createdAt: string;
+  password?: string; // Teacher custom login password
+  qualification?: string; // e.g. "B.Sc. Ed (Computer Science)", "M.Ed", "PGDE"
+  courseOfStudy?: string; // e.g. "Computer Science Education", "Pure Mathematics"
+  phoneNumber?: string;
+  avatarUrl?: string; // Teacher photo or preset avatar URL
+  bio?: string; // Professional summary / specialization
+}
+
+export interface StudentAssessmentRecord {
+  id: string; // e.g. ca_stu123_subcsc_2025-2026_1stTerm
+  studentId: string;
+  studentName: string;
+  admissionNumber: string;
+  classGrade: string; // e.g. "SS 2"
+  subjectId: string;
+  subjectName: string;
+  academicSession: string; // e.g. "2025/2026"
+  term: '1st Term' | '2nd Term' | '3rd Term';
+  assignmentScore: number; // e.g. 0-10 or 0-20
+  projectScore: number;    // e.g. 0-10 or 0-20
+  testScore: number;       // Continuous Assessment test, e.g. 0-20
+  examScore: number;       // CBT exam score or manual exam score, e.g. 0-60
+  totalScore: number;      // 0 - 100
+  grade: string;           // A1, B2, B3, C4, C5, C6, D7, E8, F9
+  remark: string;          // Excellent, Very Good, Credit, Pass, Fail
+  cbtSubmissionId?: string;
+  isAutoSynced?: boolean;
+  teacherComment?: string;
+  updatedAt: string;
+}
+
+export interface ExamTimeWindowStatus {
+  isOpen: boolean;
+  code: 'published_open' | 'not_yet_started' | 'closed' | 'unpublished';
+  message: string;
+  startDateFormatted?: string;
+  endDateFormatted?: string;
+}
+
+export function checkExamTimeWindow(exam: Examination): ExamTimeWindowStatus {
+  if (exam.status !== 'published') {
+    return {
+      isOpen: false,
+      code: 'unpublished',
+      message: 'This examination is currently unpublished by the subject teacher.'
+    };
+  }
+
+  const now = new Date().getTime();
+
+  if (exam.startDate) {
+    const startTime = new Date(exam.startDate).getTime();
+    if (!isNaN(startTime) && now < startTime) {
+      const formatted = new Date(exam.startDate).toLocaleString(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short'
+      });
+      return {
+        isOpen: false,
+        code: 'not_yet_started',
+        message: `Examination has not started yet. Scheduled to open on ${formatted}.`,
+        startDateFormatted: formatted
+      };
+    }
+  }
+
+  if (exam.endDate) {
+    const endTime = new Date(exam.endDate).getTime();
+    if (!isNaN(endTime) && now > endTime) {
+      const formatted = new Date(exam.endDate).toLocaleString(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short'
+      });
+      return {
+        isOpen: false,
+        code: 'closed',
+        message: `Examination closed on ${formatted}. Submissions are no longer accepted.`,
+        endDateFormatted: formatted
+      };
+    }
+  }
+
+  return {
+    isOpen: true,
+    code: 'published_open',
+    message: 'Examination is active and currently open.'
+  };
 }
 
 // Generate automatic unique staff login passcode (e.g. TCH-8392)
@@ -263,4 +360,44 @@ export function generateTopicRevisionInsights(detailedResults: QuestionResultDet
   }
 
   return { topicAnalysis, recommendations };
+}
+
+// Grade Point Calculation (5.00 University GPA scale)
+export function calculateGradePoint(percentage: number): number {
+  if (percentage >= 75) return 5.0; // A1
+  if (percentage >= 70) return 4.0; // B2
+  if (percentage >= 65) return 3.5; // B3
+  if (percentage >= 60) return 3.0; // C4
+  if (percentage >= 55) return 2.5; // C5
+  if (percentage >= 50) return 2.0; // C6
+  if (percentage >= 45) return 1.5; // D7
+  if (percentage >= 40) return 1.0; // E8
+  return 0.0; // F9
+}
+
+export function getAcademicStanding(cgpa: number): { title: string; color: string; badge: string } {
+  if (cgpa >= 4.50) return { title: 'First Class Honours / Distinction', color: 'text-amber-800 bg-amber-50 border-amber-200', badge: 'Distinction' };
+  if (cgpa >= 3.50) return { title: 'Second Class Honours (Upper Division)', color: 'text-emerald-800 bg-emerald-50 border-emerald-200', badge: 'Upper Credit' };
+  if (cgpa >= 2.40) return { title: 'Second Class Honours (Lower Division)', color: 'text-blue-800 bg-blue-50 border-blue-200', badge: 'Lower Credit' };
+  if (cgpa >= 1.50) return { title: 'Third Class Standing', color: 'text-slate-800 bg-slate-100 border-slate-200', badge: 'Pass' };
+  return { title: 'Remedial Academic Standing', color: 'text-rose-800 bg-rose-50 border-rose-200', badge: 'Warning' };
+}
+
+export interface CumulativeTermRecord {
+  academicSession: string;
+  term: '1st Term' | '2nd Term' | '3rd Term';
+  records: StudentAssessmentRecord[];
+  gpa: number;
+  totalCourses: number;
+  passedCourses: number;
+  averagePercentage: number;
+}
+
+export interface CumulativeStudentTranscript {
+  terms: CumulativeTermRecord[];
+  cgpa: number;
+  overallAverage: number;
+  totalRegisteredCourses: number;
+  totalPassedCourses: number;
+  standing: { title: string; color: string; badge: string };
 }

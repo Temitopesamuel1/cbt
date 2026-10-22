@@ -11,7 +11,7 @@ import { StudentHistoryView } from './components/student/StudentHistoryView';
 import { StudentProfileView } from './components/student/StudentProfileView';
 import { AdminLogin } from './components/admin/AdminLogin';
 import { AdminPortal } from './components/admin/AdminPortal';
-import { Examination, Question, Student, Submission, SchoolSettings, StaffMember } from './types/cbt';
+import { Examination, Question, Student, Submission, SchoolSettings, StaffMember, checkExamTimeWindow } from './types/cbt';
 import { DEFAULT_SCHOOL_SETTINGS } from './data/initialSchoolData';
 import { testConnection, fetchQuestions, fetchSchoolSettings, ensureInitialSchoolData } from './services/firebase';
 
@@ -147,6 +147,12 @@ export default function App() {
   };
 
   const handleStartExam = async (exam: Examination) => {
+    const timeCheck = checkExamTimeWindow(exam);
+    if (!timeCheck.isOpen) {
+      alert(`Cannot enter examination:\n${timeCheck.message}`);
+      return;
+    }
+
     setActiveExam(exam);
     try {
       const qs = await fetchQuestions(exam.id);

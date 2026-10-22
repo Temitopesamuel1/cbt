@@ -126,5 +126,11 @@ service cloud.firestore {
         && request.resource.data.admissionNumber is string && request.resource.data.admissionNumber.size() <= 60;
       allow update, delete: if isTeacher();
     }
+
+    // Continuous Assessment & Report Sheet Records
+    match /caRecords/{recordId} {
+      allow read: if true;
+      allow write: if isTeacher();
+    }
   }
 }

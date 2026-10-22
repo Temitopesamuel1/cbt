@@ -38,6 +38,10 @@ export const DEFAULT_STAFF: StaffMember[] = [
     assignedClasses: ['SS 1', 'SS 2', 'SS 3'],
     role: 'hod',
     status: 'active',
+    qualification: 'B.Sc. (Ed) Computer Science',
+    courseOfStudy: 'Computer Science Education',
+    phoneNumber: '+234 803 123 4567',
+    bio: 'Head of Department, Computing & Educational Technology',
     createdAt: '2025-09-01T08:00:00.000Z'
   },
   {
@@ -50,6 +54,10 @@ export const DEFAULT_STAFF: StaffMember[] = [
     assignedClasses: ['SS 1', 'SS 2'],
     role: 'teacher',
     status: 'active',
+    qualification: 'B.Sc. Mathematics, PGDE',
+    courseOfStudy: 'Pure & Applied Mathematics',
+    phoneNumber: '+234 802 345 6789',
+    bio: 'Senior Mathematics Instructor & Continuous Assessment Coordinator',
     createdAt: '2025-09-01T08:30:00.000Z'
   },
   {
@@ -62,6 +70,10 @@ export const DEFAULT_STAFF: StaffMember[] = [
     assignedClasses: ['SS 2', 'SS 3'],
     role: 'teacher',
     status: 'active',
+    qualification: 'Ph.D Chemical Physics',
+    courseOfStudy: 'Physics & Applied Chemistry',
+    phoneNumber: '+234 805 678 9012',
+    bio: 'Lead Faculty for Physical Sciences & STEM Laboratories',
     createdAt: '2025-09-01T09:00:00.000Z'
   }
 ];

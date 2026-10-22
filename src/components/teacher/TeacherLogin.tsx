@@ -11,7 +11,7 @@ import {
   BookOpen
 } from 'lucide-react';
 import { StaffMember } from '../../types/cbt';
-import { authenticateStaffByUniqueId, fetchStaffMembers } from '../../services/firebase';
+import { authenticateStaffWithCredentials, fetchStaffMembers } from '../../services/firebase';
 
 interface TeacherLoginProps {
   onLoginSuccess: (staff: StaffMember) => void;
@@ -20,6 +20,7 @@ interface TeacherLoginProps {
 
 export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNavigateToStudent }) => {
   const [uniqueStaffId, setUniqueStaffId] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [enrolledStaff, setEnrolledStaff] = useState<StaffMember[]>([]);
@@ -46,6 +47,8 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNa
     );
   }, [uniqueStaffId, enrolledStaff]);
 
+  const hasPasswordSet = Boolean(matchedStaff && matchedStaff.password && matchedStaff.password.trim().length > 0);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -59,22 +62,22 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNa
     setLoading(true);
 
     try {
-      // Authenticate strictly against the database
-      const staff = await authenticateStaffByUniqueId(cleanId);
+      // Authenticate strictly against the database with credentials
+      const res = await authenticateStaffWithCredentials(cleanId, password);
 
-      if (!staff) {
-        setError(`Access Denied: Staff ID "${cleanId}" does not exist in the faculty database. Only registered teachers created by the Administrator can log in.`);
+      if (!res.success) {
+        setError(res.error || 'Authentication denied. Please check your credentials.');
         setLoading(false);
         return;
       }
 
-      if (staff.status !== 'active') {
-        setError(`Your faculty account is currently marked as ${staff.status}. Please contact the institutional administrator.`);
+      if (!res.staff) {
+        setError(`Access Denied: Staff ID "${cleanId}" does not exist in the faculty database.`);
         setLoading(false);
         return;
       }
 
-      onLoginSuccess(staff);
+      onLoginSuccess(res.staff);
     } catch (err) {
       console.error('Teacher authentication error:', err);
       setError('Connection to faculty authentication service failed. Please check your network and retry.');
@@ -141,6 +144,43 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNa
               </div>
               <p className="text-[11px] text-slate-400 mt-1.5">
                 Only teachers whose details exist on the database are authorized to log in.
+              </p>
+            </div>
+
+            {/* Teacher Password Field */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Teacher Password</span>
+                </label>
+                {hasPasswordSet ? (
+                  <span className="text-[10px] text-amber-800 bg-amber-50 px-2 py-0.5 rounded font-bold border border-amber-200">
+                    Password Protected
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-slate-400">
+                    Set in Profile
+                  </span>
+                )}
+              </div>
+
+              <div className="relative">
+                <input
+                  type="password"
+                  placeholder={hasPasswordSet ? "Enter your faculty password" : "Enter password (leave blank if first time)"}
+                  value={password}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    setError(null);
+                  }}
+                  className="w-full px-3.5 py-2.5 text-sm border-2 border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-slate-900 text-slate-900 placeholder:text-xs placeholder:text-slate-400"
+                />
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                {hasPasswordSet
+                  ? 'Enter the password you created in your profile settings.'
+                  : 'First login? Leave blank and proceed; then set your password in your profile.'}
               </p>
             </div>
 

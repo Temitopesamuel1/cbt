@@ -12,7 +12,7 @@ import {
   Filter,
   Check
 } from 'lucide-react';
-import { Student, Examination, Submission } from '../../types/cbt';
+import { Student, Examination, Submission, checkExamTimeWindow } from '../../types/cbt';
 import { fetchExaminations, fetchSubmissions } from '../../services/firebase';
 
 interface StudentDashboardViewProps {
@@ -245,6 +245,7 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
               {displayedExams.map((exam) => {
                 const pastSubmission = getSubmissionForExam(exam.id);
                 const hasCompleted = Boolean(pastSubmission);
+                const windowStatus = checkExamTimeWindow(exam);
 
                 return (
                   <div
@@ -262,6 +263,15 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                           <span className="text-[10px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 flex items-center gap-1">
                             <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                             Completed
+                          </span>
+                        ) : !windowStatus.isOpen ? (
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded border flex items-center gap-1 ${
+                            windowStatus.code === 'not_yet_started'
+                              ? 'text-amber-800 bg-amber-50 border-amber-200'
+                              : 'text-rose-800 bg-rose-50 border-rose-200'
+                          }`}>
+                            <Clock className="w-3 h-3" />
+                            {windowStatus.code === 'not_yet_started' ? 'Scheduled' : 'Window Closed'}
                           </span>
                         ) : (
                           <span className="text-[10px] font-bold text-blue-800 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
@@ -293,6 +303,28 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                             {exam.durationMinutes} Minutes
                           </span>
                         </div>
+
+                        {/* Scheduled Time Frame Display */}
+                        {(exam.startDate || exam.endDate) && (
+                          <div className="pt-1.5 border-t border-slate-200 text-[10px] font-sans space-y-0.5">
+                            {exam.startDate && (
+                              <div className="flex items-center justify-between text-slate-600">
+                                <span>Opens:</span>
+                                <span className="font-semibold text-slate-800">
+                                  {new Date(exam.startDate).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
+                                </span>
+                              </div>
+                            )}
+                            {exam.endDate && (
+                              <div className="flex items-center justify-between text-slate-600">
+                                <span>Closes:</span>
+                                <span className="font-semibold text-slate-800">
+                                  {new Date(exam.endDate).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -311,6 +343,23 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                           >
                             View Result Slip →
                           </button>
+                        </div>
+                      ) : !windowStatus.isOpen ? (
+                        <div className="space-y-2">
+                          <button
+                            disabled
+                            className="w-full py-3 px-4 bg-slate-200 text-slate-500 font-bold text-xs rounded-xl cursor-not-allowed flex items-center justify-center gap-2"
+                          >
+                            <Clock className="w-3.5 h-3.5" />
+                            <span>
+                              {windowStatus.code === 'not_yet_started'
+                                ? `Opens ${windowStatus.startDateFormatted || 'Later'}`
+                                : 'Examination Ended'}
+                            </span>
+                          </button>
+                          <p className="text-[11px] text-center text-slate-500">
+                            {windowStatus.message}
+                          </p>
                         </div>
                       ) : (
                         <button
