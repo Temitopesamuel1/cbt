@@ -20,11 +20,15 @@ export const DEFAULT_SUBJECTS: Subject[] = [
 ];
 
 export const DEFAULT_SCHOOL_SETTINGS: SchoolSettings = {
-  schoolName: 'PRIME EDUTECH',
+  schoolName: "Honey's World High School",
+  address: 'Gaa Ajanaku, Ilorin, Kwara State',
+  location: 'Ilorin, Kwara State, Nigeria',
+  motto: 'Knowledge, Character & Academic Excellence',
   academicSession: '2025/2026',
   currentTerm: '1st Term',
   passMarkPercentage: 50,
-  allowImmediateResultViewing: true
+  allowImmediateResultViewing: true,
+  studentIdPrefix: 'HWHS'
 };
 
 export const DEFAULT_STAFF: StaffMember[] = [

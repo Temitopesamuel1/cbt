@@ -24,7 +24,6 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNa
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [enrolledStaff, setEnrolledStaff] = useState<StaffMember[]>([]);
-  const [showRoster, setShowRoster] = useState(false);
 
   // Load registered staff roster for quick lookup and preview
   useEffect(() => {
@@ -206,52 +205,12 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNa
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 px-4 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 active:scale-[0.99]"
+              className="w-full py-3.5 px-4 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 active:scale-[0.99] cursor-pointer"
             >
               <span>{loading ? 'Verifying Faculty Credentials...' : 'Authenticate & Enter Staff Portal'}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
-
-          {/* Quick Roster for Verification & Fast Testing */}
-          {enrolledStaff.length > 0 && (
-            <div className="mt-6 pt-5 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setShowRoster(prev => !prev)}
-                className="w-full flex items-center justify-between text-xs font-semibold text-slate-600 hover:text-slate-900 p-2 rounded-lg hover:bg-slate-50 transition-colors"
-              >
-                <div className="flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                  <span>View Registered Faculty IDs ({enrolledStaff.length})</span>
-                </div>
-                <span className="text-[11px] text-blue-900 underline">{showRoster ? 'Hide' : 'Show List'}</span>
-              </button>
-
-              {showRoster && (
-                <div className="mt-3 space-y-2 max-h-52 overflow-y-auto">
-                  {enrolledStaff.map(st => (
-                    <button
-                      key={st.id}
-                      type="button"
-                      onClick={() => handleQuickFill(st)}
-                      className="w-full text-left p-2.5 bg-slate-50 hover:bg-blue-50 border border-slate-200 rounded-lg transition-colors flex items-center justify-between text-xs group"
-                    >
-                      <div>
-                        <div className="font-bold text-slate-900 group-hover:text-blue-900">{st.fullName}</div>
-                        <div className="text-[11px] text-slate-500">
-                          Subjects: <strong className="text-slate-700">{st.assignedSubjectNames.join(', ')}</strong>
-                        </div>
-                      </div>
-                      <span className="font-mono font-bold text-slate-900 bg-white group-hover:bg-slate-900 group-hover:text-white px-2 py-1 rounded border border-slate-300 text-xs transition-colors">
-                        {st.uniqueId}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
 
           {/* Security Notice */}
           <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">

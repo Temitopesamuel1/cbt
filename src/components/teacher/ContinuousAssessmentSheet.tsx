@@ -29,7 +29,8 @@ import {
 } from '../../types/cbt';
 import {
   fetchAssessmentRecords,
-  saveAssessmentBatch
+  saveAssessmentBatch,
+  saveAssessmentRecord
 } from '../../services/firebase';
 
 interface ContinuousAssessmentSheetProps {
@@ -65,6 +66,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   const [searchQuery, setSearchQuery] = useState('');
   const [assessmentRecords, setAssessmentRecords] = useState<Record<string, StudentAssessmentRecord>>({});
   const [isSaving, setIsSaving] = useState(false);
+  const [savingStudentId, setSavingStudentId] = useState<string | null>(null);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [saveStatus, setSaveStatus] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   // Sync selected subject if available
@@ -114,6 +117,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
           recordMap[r.studentId] = r;
         });
         setAssessmentRecords(recordMap);
+        setHasUnsavedChanges(false);
       })
       .catch(err => console.warn('Error loading assessment records:', err));
   }, [selectedSubjectId, selectedClassCode, academicSession, currentTerm]);
@@ -137,15 +141,20 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     };
   };
 
-  // Get or initialize record for student
+  // Get or initialize record for student with sanitized Firestore ID
   const getRecord = (student: Student): StudentAssessmentRecord => {
     if (assessmentRecords[student.id]) {
       return assessmentRecords[student.id];
     }
     const cleanExam = 0;
     const initialDetails = computeScoreDetails(0, 0, 0, cleanExam);
+    const cleanStudentId = (student.id || student.admissionNumber || 'stu').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const cleanSubjId = (selectedSubjectId || 'sub').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const cleanSession = (academicSession || '2025-2026').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const cleanTerm = (currentTerm || '1stTerm').replace(/[^a-zA-Z0-9_-]/g, '_');
+
     return {
-      id: `ca_${student.id}_${selectedSubjectId}_${academicSession.replace('/', '-')}_${currentTerm.replace(' ', '')}`,
+      id: `ca_${cleanStudentId}_${cleanSubjId}_${cleanSession}_${cleanTerm}`,
       studentId: student.id,
       studentName: student.fullName,
       admissionNumber: student.admissionNumber,
@@ -172,6 +181,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     value: string | number
   ) => {
     const current = getRecord(student);
+    setHasUnsavedChanges(true);
 
     if (field === 'teacherComment') {
       const updated: StudentAssessmentRecord = {
@@ -246,10 +256,11 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     });
 
     setAssessmentRecords(updatedMap);
+    setHasUnsavedChanges(true);
 
     if (matchCount > 0) {
       setSaveStatus({
-        text: `Successfully synced CBT examination scores for ${matchCount} student(s) into the 60% exam column!`,
+        text: `Successfully synced CBT scores for ${matchCount} student(s) into the 60% exam column! Click 'Save All Scores' to commit.`,
         type: 'success'
       });
     } else {
@@ -259,48 +270,60 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       });
     }
 
-    setTimeout(() => setSaveStatus(null), 4000);
+    setTimeout(() => setSaveStatus(null), 5000);
   };
 
-  // Set standard default score for all students
-  const handleQuickFillComponent = (field: 'assignmentScore' | 'projectScore' | 'testScore', defaultVal: number) => {
-    const updatedMap = { ...assessmentRecords };
-    classStudents.forEach(student => {
-      const current = updatedMap[student.id] || getRecord(student);
-      const assignment = field === 'assignmentScore' ? defaultVal : current.assignmentScore;
-      const project = field === 'projectScore' ? defaultVal : current.projectScore;
-      const test = field === 'testScore' ? defaultVal : current.testScore;
-
-      const computed = computeScoreDetails(assignment, project, test, current.examScore);
-
-      updatedMap[student.id] = {
-        ...current,
-        ...computed,
-        updatedAt: new Date().toISOString()
-      };
-    });
-    setAssessmentRecords(updatedMap);
+  // Save a single student's row directly
+  const handleSaveSingleRecord = async (student: Student) => {
+    setSavingStudentId(student.id);
+    try {
+      const rec = getRecord(student);
+      await saveAssessmentRecord(rec);
+      setSaveStatus({
+        text: `Scores for ${student.fullName} saved successfully!`,
+        type: 'success'
+      });
+    } catch (err) {
+      console.error('Error saving single student score:', err);
+      setSaveStatus({
+        text: `Failed to save score for ${student.fullName}.`,
+        type: 'error'
+      });
+    } finally {
+      setSavingStudentId(null);
+      setTimeout(() => setSaveStatus(null), 4000);
+    }
   };
 
   // Save all records to Firestore
   const handleSaveAllRecords = async () => {
     setIsSaving(true);
     try {
+      if (classStudents.length === 0) {
+        setSaveStatus({
+          text: `No students found in class ${selectedClassCode} to save.`,
+          type: 'error'
+        });
+        setIsSaving(false);
+        return;
+      }
+
       const recordsToSave: StudentAssessmentRecord[] = classStudents.map(s => getRecord(s));
       await saveAssessmentBatch(recordsToSave);
+      setHasUnsavedChanges(false);
       setSaveStatus({
-        text: `Master Assessment Record Sheet for ${selectedClassCode} (${activeSubject?.name}) saved successfully!`,
+        text: `Master Assessment Record Sheet for ${selectedClassCode} (${activeSubject?.name}) with ${recordsToSave.length} student(s) saved & published successfully!`,
         type: 'success'
       });
     } catch (err) {
       console.error('Error saving continuous assessment records:', err);
       setSaveStatus({
-        text: 'Failed to save assessment records to database.',
+        text: 'Failed to save assessment records to database: ' + (err instanceof Error ? err.message : 'Network error'),
         type: 'error'
       });
     } finally {
       setIsSaving(false);
-      setTimeout(() => setSaveStatus(null), 4000);
+      setTimeout(() => setSaveStatus(null), 5000);
     }
   };
 
@@ -330,51 +353,51 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       'Teacher Comment'
     ];
 
-    const rows = classStudents.map((s, idx) => {
-      const r = getRecord(s);
-      const totalCa = r.assignmentScore + r.projectScore + r.testScore;
+    const rows = classStudents.map((student, idx) => {
+      const rec = getRecord(student);
+      const totalCa = rec.assignmentScore + rec.projectScore + rec.testScore;
       return [
         idx + 1,
-        `"${s.admissionNumber}"`,
-        `"${s.fullName}"`,
+        `"${student.admissionNumber}"`,
+        `"${student.fullName}"`,
         `"${selectedClassCode}"`,
-        `"${activeSubject?.name || 'Subject'}"`,
+        `"${activeSubject?.name}"`,
         `"${academicSession}"`,
         `"${currentTerm}"`,
-        r.assignmentScore,
-        r.projectScore,
-        r.testScore,
+        rec.assignmentScore,
+        rec.projectScore,
+        rec.testScore,
         totalCa,
-        r.examScore,
-        r.totalScore,
-        `"${r.grade}"`,
-        `"${r.remark}"`,
-        `"${r.teacherComment || ''}"`
+        rec.examScore,
+        rec.totalScore,
+        `"${rec.grade}"`,
+        `"${rec.remark}"`,
+        `"${rec.teacherComment || ''}"`
       ].join(',');
     });
 
-    const csvData = [headers.join(','), ...rows].join('\n');
-    const blob = new Blob([csvData], { type: 'text/csv;charset=utf-8;' });
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `${selectedClassCode}_${activeSubject?.name || 'Subject'}_Assessment_Broadsheet.csv`;
+    link.download = `broad_sheet_${selectedClassCode.replace(/\s+/g, '_')}_${activeSubject?.code}_${currentTerm.replace(/\s+/g, '')}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
-  // Print Broad Sheet
+  // Print function
   const handlePrint = () => {
     window.print();
   };
 
-  // Class Statistics
-  const statistics = useMemo(() => {
+  // Class Statistics Summary
+  const stats = useMemo(() => {
+    if (classStudents.length === 0) return { avg: 0, high: 0, low: 0, passRate: 0 };
     const scores = classStudents.map(s => getRecord(s).totalScore);
-    if (scores.length === 0) return { avg: 0, high: 0, low: 0, passRate: 0 };
-    const total = scores.reduce((a, b) => a + b, 0);
-    const avg = Math.round(total / scores.length);
+    const sum = scores.reduce((a, b) => a + b, 0);
+    const avg = Math.round(sum / scores.length);
     const high = Math.max(...scores);
     const low = Math.min(...scores);
     const passed = scores.filter(s => s >= 50).length;
@@ -383,10 +406,13 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   }, [classStudents, assessmentRecords]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-20">
       {/* Printable Institutional Letterhead (Hidden on screen, visible on print) */}
       <div className="hidden print:block border-b-2 border-slate-900 pb-4 mb-6 text-center">
-        <h1 className="text-2xl font-black uppercase tracking-wider">{schoolName}</h1>
+        <h1 className="text-2xl font-black uppercase tracking-wider">{schoolName || "HONEY'S WORLD HIGH SCHOOL"}</h1>
+        <p className="text-xs font-bold text-slate-800 uppercase tracking-widest mt-0.5">
+          Gaa Ajanaku, Ilorin, Kwara State
+        </p>
         <h2 className="text-sm font-bold text-slate-700 uppercase tracking-widest mt-1">
           Official Continuous Assessment & Examination Master Grade Sheet
         </h2>
@@ -410,15 +436,21 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
               Continuous Assessment & Master Gradebook
             </h2>
             <p className="text-xs text-slate-500">
-              Record assignment, project, test, and exam scores manually or auto-fill from CBT results with automatic grade calculations.
+              Record assignment, project, test, and exam scores manually or auto-fill from CBT results. All calculations and grades compute automatically.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {hasUnsavedChanges && (
+              <span className="px-2.5 py-1 bg-amber-100 border border-amber-300 text-amber-900 text-xs font-bold rounded-lg animate-pulse">
+                Unsaved Edits
+              </span>
+            )}
+
             <button
               type="button"
               onClick={handleAutoFillCbtScores}
-              className="px-3.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-950 border border-blue-200 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+              className="px-3.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-950 border border-blue-200 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
               title="Automatically sync CBT objective test scores into the Exam (60%) column"
             >
               <Sparkles className="w-4 h-4 text-blue-700" />
@@ -428,29 +460,30 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
             <button
               type="button"
               onClick={handleExportCsv}
-              className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+              className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
             >
               <Download className="w-3.5 h-3.5 text-slate-500" />
-              <span>Export Excel CSV</span>
+              <span>Export CSV</span>
             </button>
 
             <button
               type="button"
               onClick={handlePrint}
-              className="px-3.5 py-2 bg-white hover:bg-blue-50 text-blue-900 border border-blue-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+              className="px-3.5 py-2 bg-white hover:bg-blue-50 text-blue-900 border border-blue-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5 text-blue-700" />
-              <span>Print Broad Sheet</span>
+              <span>Print Sheet</span>
             </button>
 
+            {/* PRIMARY SAVE BUTTON IN TOP RIBBON */}
             <button
               type="button"
               onClick={handleSaveAllRecords}
               disabled={isSaving}
-              className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+              className="px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-black transition-all flex items-center gap-2 shadow-md hover:shadow-lg disabled:opacity-50 cursor-pointer"
             >
-              <Save className="w-3.5 h-3.5 text-amber-400" />
-              <span>{isSaving ? 'Saving Sheet...' : 'Save & Publish Sheet'}</span>
+              <Save className={`w-4 h-4 ${isSaving ? 'animate-spin' : ''}`} />
+              <span>{isSaving ? 'Saving to Database...' : 'Save All Scores & Publish'}</span>
             </button>
           </div>
         </div>
@@ -458,10 +491,10 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
         {/* Status Notification */}
         {saveStatus && (
           <div
-            className={`p-3.5 rounded-xl text-xs flex items-center gap-2.5 ${
+            className={`p-3.5 rounded-xl text-xs flex items-center gap-2.5 shadow-xs animate-fadeIn ${
               saveStatus.type === 'success'
-                ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
-                : 'bg-rose-50 border border-rose-200 text-rose-800'
+                ? 'bg-emerald-50 border border-emerald-200 text-emerald-800 font-bold'
+                : 'bg-rose-50 border border-rose-200 text-rose-800 font-bold'
             }`}
           >
             {saveStatus.type === 'success' ? (
@@ -469,7 +502,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
             ) : (
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
             )}
-            <span className="font-medium">{saveStatus.text}</span>
+            <span>{saveStatus.text}</span>
           </div>
         )}
 
@@ -518,15 +551,12 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
             <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">
               Academic Window
             </label>
-            <div className="px-3 py-2 bg-slate-100 rounded-xl text-slate-700 font-mono font-bold flex items-center justify-between border border-slate-200">
-              <span>{academicSession}</span>
-              <span className="text-[10px] bg-white px-2 py-0.5 rounded border border-slate-300 font-sans font-bold text-blue-900">
-                {currentTerm}
-              </span>
+            <div className="px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl font-mono font-bold text-slate-800 text-xs">
+              {academicSession} · {currentTerm}
             </div>
           </div>
 
-          {/* Search Student Filter */}
+          {/* Candidate Search */}
           <div>
             <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1 flex items-center gap-1">
               <Search className="w-3 h-3 text-slate-400" />
@@ -534,118 +564,64 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
             </label>
             <input
               type="text"
-              placeholder="Filter by name or admission no..."
+              placeholder="Search by name or admission #..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 placeholder:text-slate-400"
+              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900"
             />
           </div>
         </div>
 
-        {/* Quick Batch Fill Tools */}
-        <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-slate-400 text-[11px] font-semibold">Quick Scoring:</span>
-            <button
-              type="button"
-              onClick={() => handleQuickFillComponent('assignmentScore', 8)}
-              className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium transition-colors"
-            >
-              Set All Assignments = 8/10
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickFillComponent('projectScore', 8)}
-              className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium transition-colors"
-            >
-              Set All Projects = 8/10
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickFillComponent('testScore', 15)}
-              className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium transition-colors"
-            >
-              Set All Tests = 15/20
-            </button>
+        {/* Cohort Performance Statistics Bar */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs">
+          <div className="text-center sm:text-left">
+            <span className="text-[10px] text-slate-400 font-bold uppercase block">Enrolled Candidates</span>
+            <span className="text-base font-black font-mono text-slate-900">{classStudents.length}</span>
           </div>
-
-          <div className="text-[11px] text-slate-500 font-mono">
-            Weighting Standard: <strong>CA (40%) + Exam (60%) = 100%</strong>
+          <div className="text-center sm:text-left">
+            <span className="text-[10px] text-slate-400 font-bold uppercase block">Class Average</span>
+            <span className="text-base font-black font-mono text-blue-900">{stats.avg}%</span>
+          </div>
+          <div className="text-center sm:text-left">
+            <span className="text-[10px] text-slate-400 font-bold uppercase block">Highest Score</span>
+            <span className="text-base font-black font-mono text-emerald-700">{stats.high}%</span>
+          </div>
+          <div className="text-center sm:text-left">
+            <span className="text-[10px] text-slate-400 font-bold uppercase block">Overall Pass Rate</span>
+            <span className="text-base font-black font-mono text-slate-900">{stats.passRate}%</span>
           </div>
         </div>
       </div>
 
-      {/* Class Statistics Ribbon */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 no-print">
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Class Enrollment</span>
-          <span className="text-2xl font-black font-mono text-slate-900 mt-1 block">{classStudents.length}</span>
-          <span className="text-[11px] text-slate-500">Candidates in {selectedClassCode}</span>
-        </div>
-
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Class Average</span>
-          <span className="text-2xl font-black font-mono text-blue-900 mt-1 block">{statistics.avg}%</span>
-          <span className="text-[11px] text-slate-500">Subject overall mean</span>
-        </div>
-
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Score Range</span>
-          <div className="flex items-center gap-2 mt-1">
-            <span className="text-xl font-black font-mono text-emerald-700">{statistics.high}%</span>
-            <span className="text-slate-300">/</span>
-            <span className="text-xl font-black font-mono text-rose-600">{statistics.low}%</span>
-          </div>
-          <span className="text-[11px] text-slate-500">Highest / Lowest marks</span>
-        </div>
-
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Pass Rate (≥50%)</span>
-          <span className="text-2xl font-black font-mono text-amber-500 mt-1 block">{statistics.passRate}%</span>
-          <span className="text-[11px] text-slate-500">Benchmark clearance</span>
-        </div>
-      </div>
-
-      {/* Assessment Broad Sheet Table */}
+      {/* Broad Sheet Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs font-bold text-slate-800 uppercase tracking-wider">
-            <span>Class Master Roster: {selectedClassCode}</span>
-            <span>·</span>
-            <span className="text-blue-900">{activeSubject?.name}</span>
-            <span>·</span>
-            <span className="text-slate-500 font-mono font-normal">({displayedStudents.length} Students)</span>
-          </div>
-          <div className="text-[11px] text-slate-500">
-            Type directly into score boxes. Grades and remarks update automatically.
-          </div>
-        </div>
-
         {classStudents.length === 0 ? (
-          <div className="p-12 text-center text-xs text-slate-400 space-y-2">
-            <Users className="w-8 h-8 mx-auto text-slate-300" />
-            <p className="font-bold text-slate-600">No students enrolled in class {selectedClassCode}.</p>
-            <p className="text-slate-400">Select another class from the dropdown above or enroll students in this cohort.</p>
+          <div className="py-16 text-center text-slate-400 space-y-2">
+            <Users className="w-10 h-10 mx-auto text-slate-300" />
+            <div className="text-sm font-bold text-slate-700">No Students Found for {selectedClassCode}</div>
+            <p className="text-xs text-slate-400 max-w-sm mx-auto">
+              Please ensure students are enrolled in this class form via the "Students" directory tab.
+            </p>
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs border-collapse">
               <thead>
-                <tr className="bg-slate-100/80 border-b border-slate-200 text-slate-600 uppercase font-bold text-[10px] tracking-wider">
+                <tr className="bg-slate-100 text-slate-700 font-bold text-[10px] uppercase tracking-wider border-b border-slate-200">
                   <th className="py-3 px-3 w-10 text-center">S/N</th>
-                  <th className="py-3 px-3 w-28">Admission No</th>
-                  <th className="py-3 px-4 min-w-[180px]">Candidate Full Name</th>
+                  <th className="py-3 px-3 w-28">Admission #</th>
+                  <th className="py-3 px-4 min-w-[150px]">Student Full Name</th>
                   <th className="py-3 px-2 w-20 text-center bg-blue-50/60 border-l border-blue-100">
-                    Assign.<br /><span className="text-[9px] text-blue-700">(10)</span>
+                    Assgn<br /><span className="text-[9px] text-blue-700">(10)</span>
                   </th>
                   <th className="py-3 px-2 w-20 text-center bg-blue-50/60">
-                    Project<br /><span className="text-[9px] text-blue-700">(10)</span>
+                    Proj<br /><span className="text-[9px] text-blue-700">(10)</span>
                   </th>
                   <th className="py-3 px-2 w-20 text-center bg-blue-50/60">
                     CA Test<br /><span className="text-[9px] text-blue-700">(20)</span>
                   </th>
-                  <th className="py-3 px-2 w-16 text-center font-black bg-blue-100/60 text-blue-950 border-r border-blue-200">
-                    Total CA<br /><span className="text-[9px]">(40)</span>
+                  <th className="py-3 px-2 w-20 text-center font-black bg-blue-100/70 text-blue-900 border-r border-blue-200">
+                    CA Total<br /><span className="text-[9px]">(40)</span>
                   </th>
                   <th className="py-3 px-2 w-24 text-center bg-amber-50/60">
                     Exam<br /><span className="text-[9px] text-amber-700">(60)</span>
@@ -656,12 +632,14 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                   <th className="py-3 px-2 w-16 text-center">Grade</th>
                   <th className="py-3 px-3 w-24 text-center">Remark</th>
                   <th className="py-3 px-4 min-w-[160px]">Teacher Assessment Comment</th>
+                  <th className="py-3 px-3 w-16 text-center no-print">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {displayedStudents.map((student, idx) => {
                   const rec = getRecord(student);
                   const totalCa = rec.assignmentScore + rec.projectScore + rec.testScore;
+                  const isRowSaving = savingStudentId === student.id;
 
                   return (
                     <tr
@@ -793,11 +771,65 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                           className="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-900 placeholder:text-slate-400 placeholder:italic"
                         />
                       </td>
+
+                      {/* Row Action Save Button */}
+                      <td className="py-2 px-3 text-center no-print">
+                        <button
+                          type="button"
+                          onClick={() => handleSaveSingleRecord(student)}
+                          disabled={isRowSaving}
+                          className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-emerald-100 text-slate-700 hover:text-emerald-800 text-[10px] font-bold transition-colors inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                          title="Save this student's score"
+                        >
+                          <Save className={`w-3 h-3 ${isRowSaving ? 'animate-spin' : ''}`} />
+                          <span>{isRowSaving ? '...' : 'Save'}</span>
+                        </button>
+                      </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* Dedicated Bottom-of-Table Save Section Card */}
+        {classStudents.length > 0 && (
+          <div className="bg-slate-900 text-white p-5 sm:p-6 border-t border-slate-800 flex flex-col md:flex-row items-center justify-between gap-4 no-print">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-400 text-slate-950 flex items-center justify-center font-bold shrink-0">
+                <Save className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-white">Save Continuous Assessment Ledger</h4>
+                <p className="text-xs text-slate-400">
+                  {hasUnsavedChanges
+                    ? 'Edits detected. Save scores to update the student information portal and transcripts.'
+                    : `All scores for ${classStudents.length} student(s) in ${selectedClassCode} are up to date.`}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+              <button
+                type="button"
+                onClick={handleAutoFillCbtScores}
+                className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold transition-all border border-slate-700 flex items-center gap-1.5 cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                <span>Auto-Fill CBT</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSaveAllRecords}
+                disabled={isSaving}
+                className="w-full sm:w-auto px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                <Save className={`w-4 h-4 ${isSaving ? 'animate-spin' : ''}`} />
+                <span>{isSaving ? 'Saving Scores...' : `Save All Scores (${classStudents.length} Students)`}</span>
+              </button>
+            </div>
           </div>
         )}
 
@@ -819,6 +851,32 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
           </div>
         </div>
       </div>
+
+      {/* Persistent Floating Bottom Save Bar */}
+      {classStudents.length > 0 && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 backdrop-blur-md text-white px-5 py-2.5 rounded-2xl shadow-2xl border border-slate-700 flex items-center gap-4 no-print animate-fadeIn">
+          <div className="flex items-center gap-2 text-xs">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-bold text-amber-300">{activeSubject?.name}</span>
+            <span className="text-slate-400 font-mono">({selectedClassCode})</span>
+            {hasUnsavedChanges && (
+              <span className="bg-amber-400 text-slate-950 text-[10px] font-black px-2 py-0.5 rounded uppercase">
+                Unsaved
+              </span>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={handleSaveAllRecords}
+            disabled={isSaving}
+            className="px-4 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs rounded-xl shadow-md transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+          >
+            <Save className={`w-3.5 h-3.5 ${isSaving ? 'animate-spin' : ''}`} />
+            <span>{isSaving ? 'Saving...' : 'Save Sheet'}</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 };

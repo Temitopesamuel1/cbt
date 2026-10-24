@@ -41,8 +41,8 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
               <School className="w-5 h-5 text-amber-300" />
             </div>
             <div>
-              <div className="text-lg font-extrabold tracking-tight text-white flex items-center gap-2">
-                <span>PRIME EDUTECH</span>
+              <div className="text-base sm:text-lg font-extrabold tracking-tight text-white flex items-center gap-2">
+                <span>{settings?.schoolName || "HONEY'S WORLD HIGH SCHOOL"}</span>
                 <span className={`text-[10px] uppercase font-bold tracking-widest px-1.5 py-0.5 rounded border ${
                   currentPortal === 'admin'
                     ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
@@ -51,8 +51,8 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
                   {currentPortal === 'admin' ? 'Admin Authority' : currentPortal === 'teacher' ? 'Staff Portal' : currentPortal === 'student' ? 'Student Portal' : 'Assessment'}
                 </span>
               </div>
-              <div className="text-[11px] text-slate-400 hidden sm:block">
-                {settings?.schoolName || 'Secondary School Examination & Assessment System'}
+              <div className="text-[11px] text-amber-300/90 hidden sm:block font-medium">
+                {settings?.address || 'Gaa Ajanaku, Ilorin, Kwara State'}
               </div>
             </div>
           </div>

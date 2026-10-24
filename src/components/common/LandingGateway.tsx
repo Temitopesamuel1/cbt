@@ -22,12 +22,17 @@ export const LandingGateway: React.FC<LandingGatewayProps> = ({ onNavigate, sett
                 <span className="font-mono">{settings.academicSession} ({settings.currentTerm})</span>
               </div>
 
-              <h1 className="text-3xl sm:text-4xl font-black tracking-tight text-white">
-                PRIME EDUTECH Examination & Student Assessment System
-              </h1>
+              <div>
+                <h1 className="text-3xl sm:text-4xl font-black tracking-tight text-white">
+                  {settings.schoolName}
+                </h1>
+                <p className="text-sm sm:text-base text-amber-300 font-semibold mt-1">
+                  {settings.address || 'Gaa Ajanaku, Ilorin, Kwara State'}
+                </p>
+              </div>
 
               <p className="text-sm sm:text-base text-slate-300 leading-relaxed">
-                An institutional, online computer-based evaluation platform for secondary school midterm, continuous assessment, and term-end examinations.
+                Computer-Based Examination, Continuous Assessment Master Broadsheet, and Student Information System.
               </p>
             </div>
           </div>

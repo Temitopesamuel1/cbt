@@ -299,6 +299,7 @@ export default function App() {
                   onStartExam={handleStartExam}
                   onViewResult={handleViewResultSlip}
                   onNavigateToHistory={() => navigate('/student/history')}
+                  onUpdateStudent={(updated) => setStudentSession(updated)}
                 />
               )}
 
@@ -335,6 +336,7 @@ export default function App() {
                 <StudentProfileView
                   student={studentSession}
                   onBackToDashboard={() => navigate('/student/dashboard')}
+                  onProfileUpdated={(updated) => setStudentSession(updated)}
                 />
               )}
             </>
@@ -346,8 +348,10 @@ export default function App() {
       {!isExamActive && (
         <footer className="bg-white border-t border-slate-200 py-6 text-xs text-slate-500 no-print">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3">
-            <div className="font-semibold text-slate-700">
-              PRIME EDUTECH · Institutional Computer-Based Testing & Student Assessment System
+            <div className="font-semibold text-slate-800 flex items-center gap-2">
+              <span className="font-bold text-blue-950">{schoolSettings.schoolName || "HONEY'S WORLD HIGH SCHOOL"}</span>
+              <span className="text-slate-400">·</span>
+              <span className="text-slate-600 font-normal">{schoolSettings.address || 'Gaa Ajanaku, Ilorin, Kwara State'}</span>
             </div>
             <div className="flex items-center gap-4 text-slate-400 text-[11px] font-mono">
               <span>Academic Session: {schoolSettings.academicSession}</span>

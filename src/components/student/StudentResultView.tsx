@@ -65,10 +65,10 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
               </div>
               <div>
                 <h1 className="text-lg font-black tracking-tight text-white uppercase">
-                  PRIME EDUTECH EXAMINATION RESULT SLIP
+                  HONEY'S WORLD HIGH SCHOOL
                 </h1>
-                <p className="text-xs text-slate-400">
-                  Institutional Student Assessment Evaluation Record
+                <p className="text-xs text-amber-300 font-semibold">
+                  Gaa Ajanaku, Ilorin, Kwara State · Official Examination Result Slip
                 </p>
               </div>
             </div>

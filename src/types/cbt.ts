@@ -137,6 +137,9 @@ export interface Submission {
 
 export interface SchoolSettings {
   schoolName: string;
+  address?: string;
+  location?: string;
+  motto?: string;
   academicSession: string;
   currentTerm: string;
   passMarkPercentage: number;

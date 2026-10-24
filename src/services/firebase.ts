@@ -349,8 +349,21 @@ export async function fetchSchoolSettings(): Promise<SchoolSettings> {
   try {
     const snap = await getDoc(doc(db, 'settings', 'school'));
     if (snap.exists()) {
-      return snap.data() as SchoolSettings;
+      const data = snap.data() as SchoolSettings;
+      if (!data.schoolName || data.schoolName === 'PRIME EDUTECH' || !data.address) {
+        const merged: SchoolSettings = {
+          ...DEFAULT_SCHOOL_SETTINGS,
+          ...data,
+          schoolName: "Honey's World High School",
+          address: 'Gaa Ajanaku, Ilorin, Kwara State',
+          location: 'Ilorin, Kwara State, Nigeria'
+        };
+        saveSchoolSettings(merged).catch(() => {});
+        return merged;
+      }
+      return data;
     }
+    saveSchoolSettings(DEFAULT_SCHOOL_SETTINGS).catch(() => {});
     return DEFAULT_SCHOOL_SETTINGS;
   } catch (error) {
     return DEFAULT_SCHOOL_SETTINGS;
@@ -778,9 +791,12 @@ export async function fetchAssessmentRecords(
 }
 
 export async function saveAssessmentRecord(record: StudentAssessmentRecord): Promise<void> {
-  const path = `caRecords/${record.id}`;
+  const sanitizedId = (record.id || `ca_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`)
+    .replace(/[^a-zA-Z0-9_-]/g, '_');
+  record.id = sanitizedId;
+  const path = `caRecords/${sanitizedId}`;
   try {
-    await setDoc(doc(db, 'caRecords', record.id), record, { merge: true });
+    await setDoc(doc(db, 'caRecords', sanitizedId), record, { merge: true });
   } catch (error) {
     console.warn('Firestore write warning for caRecord, falling back to local cache:', error);
   }
@@ -843,7 +859,7 @@ export function subscribeStudentAssessmentRecords(
             data.studentId === studentId ||
             (data.admissionNumber && data.admissionNumber.toUpperCase() === admissionNumber.toUpperCase())
           ) {
-            records.push({ id: docSnap.id, ...data });
+            records.push({ ...data, id: docSnap.id });
           }
         });
 
@@ -906,7 +922,7 @@ export async function fetchStudentAllAssessmentRecords(
         data.studentId === studentId ||
         (data.admissionNumber && data.admissionNumber.toUpperCase() === admissionNumber.toUpperCase())
       ) {
-        records.push({ id: docSnap.id, ...data });
+        records.push({ ...data, id: docSnap.id });
       }
     });
 
