@@ -1,4 +1,30 @@
-import { SchoolClass, Subject, SchoolSettings, Student, Examination, Question, StaffMember } from '../types/cbt';
+import {
+  SchoolClass,
+  Subject,
+  SchoolSettings,
+  Student,
+  Examination,
+  Question,
+  StaffMember,
+  AdminUser,
+  DEFAULT_CA_WEIGHTS,
+  DEFAULT_GRADE_SCALE
+} from '../types/cbt';
+
+export const DEFAULT_ADMINS: AdminUser[] = [
+  {
+    id: 'admin-main-temitope',
+    email: 'fathertemitope@gmail.com',
+    fullName: 'Chief Administrator (Father Temitope)',
+    role: 'super_admin',
+    passcode: 'admin2025',
+    status: 'active',
+    isMainSuperAdmin: true,
+    phoneNumber: '+234 803 000 0000',
+    assignedPermissions: ['all'],
+    createdAt: '2025-01-01T00:00:00.000Z'
+  }
+];
 
 export const DEFAULT_SCHOOL_CLASSES: SchoolClass[] = [
   { id: 'class-jss1', name: 'Junior Secondary 1', code: 'JSS 1', arm: 'General', academicSession: '2025/2026' },
@@ -24,11 +50,22 @@ export const DEFAULT_SCHOOL_SETTINGS: SchoolSettings = {
   address: 'Gaa Ajanaku, Ilorin, Kwara State',
   location: 'Ilorin, Kwara State, Nigeria',
   motto: 'Knowledge, Character & Academic Excellence',
+  phone: '+234 803 000 0000',
+  email: 'info@honeysworldhigh.edu.ng',
+  website: 'www.honeysworldhigh.edu.ng',
+  principalName: 'Mrs. A. B. Adeyemi (M.Ed, FSTAN)',
   academicSession: '2025/2026',
   currentTerm: '1st Term',
   passMarkPercentage: 50,
   allowImmediateResultViewing: true,
-  studentIdPrefix: 'HWHS'
+  studentIdPrefix: 'HWHS',
+  announcementBanner: 'Welcome to Honey\'s World High School Examination Portal. 1st Term Examinations & CA Assessments are now in progress.',
+  isStudentPortalActive: true,
+  isTeacherPortalActive: true,
+  enableAiAdvisor: true,
+  enablePracticeCenter: true,
+  caWeights: DEFAULT_CA_WEIGHTS,
+  gradingScale: DEFAULT_GRADE_SCALE
 };
 
 export const DEFAULT_STAFF: StaffMember[] = [

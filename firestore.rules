@@ -24,41 +24,15 @@ service cloud.firestore {
       return (isSignedIn() && (
         request.auth.token.email == 'fathertemitope@gmail.com' ||
         request.auth.token.email == 'omonisamsam@gmail.com' ||
-        exists(/databases/$(database)/documents/teachers/$(request.auth.uid))
+        exists(/databases/$(database)/documents/teachers/$(request.auth.uid)) ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       )) || request.auth == null;
     }
 
-    // Schema Validation Helpers
-    function isValidExamination() {
-      return request.resource.data.keys().hasAll(['title', 'subjectName', 'classGrade', 'durationMinutes', 'totalQuestions', 'status'])
-        && request.resource.data.title is string && request.resource.data.title.size() <= 150
-        && request.resource.data.durationMinutes is number
-        && request.resource.data.totalQuestions is number;
-    }
-
-    function isValidQuestion() {
-      return request.resource.data.keys().hasAll(['examId', 'questionNumber', 'text', 'optionA', 'optionB', 'optionC', 'optionD', 'correctOption'])
-        && request.resource.data.text is string && request.resource.data.text.size() <= 4000
-        && request.resource.data.questionNumber is number;
-    }
-
-    function isValidStudent() {
-      return request.resource.data.keys().hasAll(['admissionNumber', 'firstName', 'surname', 'classGrade', 'status'])
-        && request.resource.data.admissionNumber is string && request.resource.data.admissionNumber.size() <= 60
-        && request.resource.data.firstName is string && request.resource.data.firstName.size() <= 60
-        && request.resource.data.surname is string && request.resource.data.surname.size() <= 60;
-    }
-
-    function isValidSchoolClass() {
-      return request.resource.data.keys().hasAll(['name', 'code', 'academicSession'])
-        && request.resource.data.name is string && request.resource.data.name.size() <= 100
-        && request.resource.data.code is string && request.resource.data.code.size() <= 30;
-    }
-
-    function isValidSubject() {
-      return request.resource.data.keys().hasAll(['name', 'code', 'department'])
-        && request.resource.data.name is string && request.resource.data.name.size() <= 100
-        && request.resource.data.code is string && request.resource.data.code.size() <= 30;
+    // Administrators collection
+    match /admins/{adminId} {
+      allow read: if true;
+      allow write: if isTeacher();
     }
 
     // Teachers collection

@@ -135,16 +135,75 @@ export interface Submission {
   aiRevisionRecommendations?: string[];
 }
 
+export interface AdminUser {
+  id: string;
+  email: string;
+  fullName: string;
+  role: 'super_admin' | 'admin' | 'vice_principal' | 'examination_officer';
+  passcode: string;
+  status: 'active' | 'suspended';
+  isMainSuperAdmin?: boolean;
+  phoneNumber?: string;
+  assignedPermissions?: string[];
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
+export interface CaWeightsConfig {
+  assignmentMax: number;
+  projectMax: number;
+  testMax: number;
+  examMax: number;
+}
+
+export interface GradeScaleItem {
+  grade: string;
+  minScore: number;
+  maxScore: number;
+  gradePoint: number;
+  remark: string;
+}
+
+export const DEFAULT_CA_WEIGHTS: CaWeightsConfig = {
+  assignmentMax: 10,
+  projectMax: 10,
+  testMax: 20,
+  examMax: 60
+};
+
+export const DEFAULT_GRADE_SCALE: GradeScaleItem[] = [
+  { grade: 'A1', minScore: 75, maxScore: 100, gradePoint: 5.0, remark: 'Excellent' },
+  { grade: 'B2', minScore: 70, maxScore: 74, gradePoint: 4.0, remark: 'Very Good' },
+  { grade: 'B3', minScore: 65, maxScore: 69, gradePoint: 3.5, remark: 'Good' },
+  { grade: 'C4', minScore: 60, maxScore: 64, gradePoint: 3.0, remark: 'Credit' },
+  { grade: 'C5', minScore: 55, maxScore: 59, gradePoint: 2.5, remark: 'Credit' },
+  { grade: 'C6', minScore: 50, maxScore: 54, gradePoint: 2.0, remark: 'Credit' },
+  { grade: 'D7', minScore: 45, maxScore: 49, gradePoint: 1.5, remark: 'Pass' },
+  { grade: 'E8', minScore: 40, maxScore: 44, gradePoint: 1.0, remark: 'Pass' },
+  { grade: 'F9', minScore: 0,  maxScore: 39, gradePoint: 0.0, remark: 'Fail' }
+];
+
 export interface SchoolSettings {
   schoolName: string;
   address?: string;
   location?: string;
   motto?: string;
+  phone?: string;
+  email?: string;
+  website?: string;
+  principalName?: string;
   academicSession: string;
   currentTerm: string;
   passMarkPercentage: number;
   allowImmediateResultViewing: boolean;
   studentIdPrefix?: string;
+  announcementBanner?: string;
+  isStudentPortalActive?: boolean;
+  isTeacherPortalActive?: boolean;
+  caWeights?: CaWeightsConfig;
+  gradingScale?: GradeScaleItem[];
+  enableAiAdvisor?: boolean;
+  enablePracticeCenter?: boolean;
 }
 
 export interface SavedStudentLogin {

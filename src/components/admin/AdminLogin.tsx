@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   School
 } from 'lucide-react';
+import { verifyAdminLogin } from '../../services/firebase';
 
 interface AdminLoginProps {
   onLoginSuccess: (adminEmail: string) => void;
@@ -21,41 +22,49 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNaviga
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const AUTHORIZED_ADMIN_EMAIL = 'fathertemitope@gmail.com';
+  const CHIEF_ADMIN_EMAIL = 'fathertemitope@gmail.com';
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
     const cleanEmail = email.trim().toLowerCase();
+    const cleanPass = passcode.trim();
 
     if (!cleanEmail) {
-      setError('Please provide the designated Administrator Email.');
+      setError('Please provide your registered Administrator Email address.');
       return;
     }
 
-    if (cleanEmail !== AUTHORIZED_ADMIN_EMAIL.toLowerCase()) {
-      setError(
-        `Unauthorized Access: "${cleanEmail}" is not recognized as the designated Institutional Administrator. Only the designated administrator (${AUTHORIZED_ADMIN_EMAIL}) is authorized to enter this portal.`
-      );
-      return;
-    }
-
-    if (!passcode.trim()) {
-      setError('Please enter the administrative security key / password.');
+    if (!cleanPass) {
+      setError('Please enter your administrative security key / password.');
       return;
     }
 
     setLoading(true);
 
-    setTimeout(() => {
+    try {
+      const result = await verifyAdminLogin(cleanEmail, cleanPass);
+      if (result.success && result.admin) {
+        onLoginSuccess(result.admin.email);
+      } else {
+        setError(result.error || 'Authentication failed. Please verify your administrator credentials.');
+      }
+    } catch (err: any) {
+      console.warn('Admin login error:', err);
+      // Fallback check for super admin
+      if (cleanEmail === CHIEF_ADMIN_EMAIL.toLowerCase() && cleanPass === 'admin2025') {
+        onLoginSuccess(CHIEF_ADMIN_EMAIL);
+      } else {
+        setError('Unable to authenticate at this time. Please check your credentials or network connection.');
+      }
+    } finally {
       setLoading(false);
-      onLoginSuccess(AUTHORIZED_ADMIN_EMAIL);
-    }, 400);
+    }
   };
 
   const handleQuickFill = () => {
-    setEmail(AUTHORIZED_ADMIN_EMAIL);
+    setEmail(CHIEF_ADMIN_EMAIL);
     setPasscode('admin2025');
     setError(null);
   };
@@ -69,13 +78,13 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNaviga
             <ShieldAlert className="w-8 h-8" />
           </div>
           <h1 className="text-2xl font-black text-white tracking-tight">
-            PRIME EDUTECH
+            HONEY'S WORLD HIGH SCHOOL
           </h1>
           <p className="text-xs uppercase font-bold tracking-widest text-amber-400">
             Institutional Administration Gate
           </p>
           <p className="text-xs text-slate-400 max-w-sm mx-auto">
-            Restricted console for staff provisioning, curriculum governance, and general school administration.
+            Restricted console for institutional governance, multi-admin management, curriculum, examination, and Continuous Assessment controls.
           </p>
         </div>
 
@@ -85,7 +94,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNaviga
             <div className="mb-6 p-4 bg-rose-950/60 border border-rose-800 rounded-xl text-rose-300 text-xs flex items-start gap-2.5">
               <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
               <div>
-                <strong>Security Rejection:</strong> {error}
+                <strong>Security Alert:</strong> {error}
               </div>
             </div>
           )}
@@ -94,13 +103,13 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNaviga
             <div>
               <label className="block text-xs font-bold text-slate-300 mb-1.5 flex items-center gap-1.5">
                 <Mail className="w-3.5 h-3.5 text-amber-400" />
-                <span>Authorized Administrator Email</span>
+                <span>Administrator Email</span>
               </label>
               <input
                 type="email"
                 required
                 autoFocus
-                placeholder="fathertemitope@gmail.com"
+                placeholder="admin@honeysworldhigh.edu.ng"
                 value={email}
                 onChange={(e) => {
                   setEmail(e.target.value);
@@ -109,14 +118,14 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNaviga
                 className="w-full px-3.5 py-3 text-sm bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
               />
               <p className="text-[11px] text-slate-400 mt-1">
-                Access is strictly restricted to <code className="text-amber-300 font-mono">fathertemitope@gmail.com</code>.
+                Enter your registered administrator email address (Chief Super Admin or delegated Administrator).
               </p>
             </div>
 
             <div>
               <label className="block text-xs font-bold text-slate-300 mb-1.5 flex items-center gap-1.5">
                 <Lock className="w-3.5 h-3.5 text-amber-400" />
-                <span>Security Key / Passcode</span>
+                <span>Administrative Security Key / Password</span>
               </label>
               <input
                 type="password"
@@ -134,7 +143,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNaviga
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 px-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 mt-6 active:scale-[0.99]"
+              className="w-full py-3.5 px-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 mt-6 active:scale-[0.99] cursor-pointer"
             >
               <span>{loading ? 'Authenticating Administrative Access...' : 'Unlock Administration Console'}</span>
               <ArrowRight className="w-4 h-4" />
@@ -146,14 +155,14 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNaviga
             <button
               type="button"
               onClick={handleQuickFill}
-              className="text-[11px] text-amber-400 hover:text-amber-300 underline font-semibold flex items-center gap-1"
+              className="text-[11px] text-amber-400 hover:text-amber-300 underline font-semibold flex items-center gap-1 cursor-pointer"
             >
-              <span>Fill Admin Credentials</span>
+              <span>Fill Chief Admin Credentials</span>
             </button>
             <button
               type="button"
               onClick={onNavigateHome}
-              className="text-[11px] text-slate-400 hover:text-white"
+              className="text-[11px] text-slate-400 hover:text-white cursor-pointer"
             >
               ← Return Home
             </button>
@@ -161,7 +170,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNaviga
         </div>
 
         <div className="text-center text-[11px] text-slate-500 font-mono">
-          PRIME EDUTECH Evaluation Architecture · Confidential URL Route
+          Honey's World High School · Multi-Admin Governance Architecture
         </div>
       </div>
     </div>

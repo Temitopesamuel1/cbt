@@ -34,7 +34,8 @@ import {
   generateStudentAccessCode,
   StaffMember,
   generateStaffUniqueId,
-  StudentAssessmentRecord
+  StudentAssessmentRecord,
+  AdminUser
 } from '../types/cbt';
 import {
   DEFAULT_SCHOOL_CLASSES,
@@ -43,7 +44,8 @@ import {
   DEFAULT_STUDENTS,
   DEFAULT_EXAMINATIONS,
   DEFAULT_QUESTIONS_MAP,
-  DEFAULT_STAFF
+  DEFAULT_STAFF,
+  DEFAULT_ADMINS
 } from '../data/initialSchoolData';
 
 const app = initializeApp(firebaseConfig);
@@ -109,6 +111,156 @@ export async function testConnection(): Promise<boolean> {
     }
     return true;
   }
+}
+
+// =========================================================================
+// Institutional Administrators Management (Super Admin & Co-Admins)
+// =========================================================================
+export async function fetchAdmins(): Promise<AdminUser[]> {
+  const path = 'admins';
+  try {
+    const snapshot = await getDocs(collection(db, path));
+    let admins: AdminUser[] = [];
+    if (!snapshot.empty) {
+      snapshot.forEach(docSnap => {
+        admins.push({ id: docSnap.id, ...docSnap.data() } as AdminUser);
+      });
+    }
+
+    // Always ensure the primary Super Admin (fathertemitope@gmail.com) exists
+    const hasMain = admins.some(a => a.email.toLowerCase() === 'fathertemitope@gmail.com');
+    if (!hasMain) {
+      const mainAdmin = DEFAULT_ADMINS[0];
+      await saveAdmin(mainAdmin).catch(() => {});
+      admins = [mainAdmin, ...admins];
+    }
+
+    // Sync to local storage for instant offline fallback
+    try {
+      localStorage.setItem('prime_edutech_saved_admins', JSON.stringify(admins));
+    } catch {}
+
+    return admins;
+  } catch (error) {
+    console.warn('Fallback to local admins:', error);
+    try {
+      const local = localStorage.getItem('prime_edutech_saved_admins');
+      if (local) {
+        return JSON.parse(local);
+      }
+    } catch {}
+    return DEFAULT_ADMINS;
+  }
+}
+
+export async function saveAdmin(admin: AdminUser): Promise<void> {
+  const adminId = admin.id || `admin_${admin.email.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+  const path = `admins/${adminId}`;
+  const dataToSave: AdminUser = {
+    ...admin,
+    id: adminId,
+    email: admin.email.trim().toLowerCase(),
+    passcode: admin.passcode || 'admin2025'
+  };
+
+  try {
+    await setDoc(doc(db, 'admins', adminId), dataToSave, { merge: true });
+  } catch (error) {
+    console.warn('Firestore write warning for admin:', error);
+  }
+
+  // Always update local cache
+  try {
+    const stored = localStorage.getItem('prime_edutech_saved_admins');
+    const list: AdminUser[] = stored ? JSON.parse(stored) : [...DEFAULT_ADMINS];
+    const filtered = list.filter(a => a.id !== adminId && a.email.toLowerCase() !== dataToSave.email.toLowerCase());
+    localStorage.setItem('prime_edutech_saved_admins', JSON.stringify([dataToSave, ...filtered]));
+  } catch {}
+}
+
+export async function deleteAdmin(adminId: string): Promise<void> {
+  // Prevent deleting the main super admin
+  const admins = await fetchAdmins();
+  const target = admins.find(a => a.id === adminId);
+  if (target?.isMainSuperAdmin || target?.email.toLowerCase() === 'fathertemitope@gmail.com') {
+    throw new Error('The Chief Super Administrator (fathertemitope@gmail.com) is permanently protected and cannot be deleted.');
+  }
+
+  const path = `admins/${adminId}`;
+  try {
+    await deleteDoc(doc(db, 'admins', adminId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+
+  try {
+    const stored = localStorage.getItem('prime_edutech_saved_admins');
+    if (stored) {
+      const list: AdminUser[] = JSON.parse(stored);
+      localStorage.setItem('prime_edutech_saved_admins', JSON.stringify(list.filter(a => a.id !== adminId)));
+    }
+  } catch {}
+}
+
+export async function verifyAdminLogin(
+  email: string,
+  passcode: string
+): Promise<{ success: boolean; admin?: AdminUser; error?: string }> {
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanPasscode = passcode.trim();
+
+  if (!cleanEmail) {
+    return { success: false, error: 'Please enter your registered Administrator Email.' };
+  }
+  if (!cleanPasscode) {
+    return { success: false, error: 'Please enter your administrative Security Key / Password.' };
+  }
+
+  // Fetch all admins
+  let admins: AdminUser[] = [];
+  try {
+    admins = await fetchAdmins();
+  } catch {
+    admins = DEFAULT_ADMINS;
+  }
+
+  // Ensure fathertemitope is present even if DB was blank
+  if (!admins.some(a => a.email.toLowerCase() === 'fathertemitope@gmail.com')) {
+    admins = [...DEFAULT_ADMINS, ...admins];
+  }
+
+  const matched = admins.find(a => a.email.toLowerCase() === cleanEmail);
+
+  if (!matched) {
+    return {
+      success: false,
+      error: `Access Denied: "${cleanEmail}" is not recognized as an authorized Administrator. Only administrators configured by the Chief Super Admin (fathertemitope@gmail.com) may access this console.`
+    };
+  }
+
+  if (matched.status === 'suspended') {
+    return {
+      success: false,
+      error: `Access Suspended: The administrator account for "${matched.fullName}" (${cleanEmail}) has been suspended. Please contact the Chief Super Administrator.`
+    };
+  }
+
+  // Check password
+  if (matched.passcode && matched.passcode !== cleanPasscode) {
+    return {
+      success: false,
+      error: 'Invalid Administrative Security Key / Password. Please check your credentials.'
+    };
+  }
+
+  // Update last login
+  const updatedAdmin: AdminUser = {
+    ...matched,
+    lastLoginAt: new Date().toISOString()
+  };
+  saveAdmin(updatedAdmin).catch(() => {});
+
+  return { success: true, admin: updatedAdmin };
 }
 
 // Faculty & Staff Management
@@ -819,6 +971,38 @@ export async function saveAssessmentRecord(record: StudentAssessmentRecord): Pro
 export async function saveAssessmentBatch(records: StudentAssessmentRecord[]): Promise<void> {
   for (const record of records) {
     await saveAssessmentRecord(record);
+  }
+}
+
+export async function deleteAssessmentRecord(recordId: string): Promise<void> {
+  const cleanId = recordId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const path = `caRecords/${cleanId}`;
+  try {
+    await deleteDoc(doc(db, 'caRecords', cleanId));
+  } catch (error) {
+    console.warn('Firestore CA delete warning:', error);
+  }
+
+  try {
+    const local = localStorage.getItem('prime_edutech_ca_records');
+    if (local) {
+      const records: StudentAssessmentRecord[] = JSON.parse(local);
+      const filtered = records.filter(r => r.id !== cleanId);
+      localStorage.setItem('prime_edutech_ca_records', JSON.stringify(filtered));
+    }
+  } catch {}
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('caRecordsUpdated', { detail: { id: cleanId, deleted: true } }));
+  }
+}
+
+export async function deleteSubmission(submissionId: string): Promise<void> {
+  const path = `submissions/${submissionId}`;
+  try {
+    await deleteDoc(doc(db, 'submissions', submissionId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
 

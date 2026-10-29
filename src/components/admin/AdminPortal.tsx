@@ -23,7 +23,11 @@ import {
   BarChart3,
   LogOut,
   RefreshCw,
-  Eye
+  Award,
+  Sparkles,
+  ShieldCheck,
+  Sliders,
+  CheckSquare
 } from 'lucide-react';
 import {
   StaffMember,
@@ -33,6 +37,7 @@ import {
   SchoolSettings,
   Examination,
   Submission,
+  AdminUser,
   generateStaffUniqueId,
   generateStudentAccessCode
 } from '../../types/cbt';
@@ -44,19 +49,23 @@ import {
   saveStudent,
   deleteStudent,
   fetchSchoolClasses,
-  saveSchoolClass,
-  deleteSchoolClass,
   fetchSubjects,
-  saveSubject,
-  deleteSubject,
   fetchSchoolSettings,
   saveSchoolSettings,
   fetchExaminations,
-  fetchSubmissions
+  fetchSubmissions,
+  fetchAdmins
 } from '../../services/firebase';
 import { StaffSlipsModal } from './StaffSlipsModal';
 import { StudentSlipsModal } from '../teacher/StudentSlipsModal';
 import { StudentBatchUploadModal } from '../teacher/StudentBatchUploadModal';
+import { AdminUserManagementTab } from './AdminUserManagementTab';
+import { AdminBrandAndPoliciesTab } from './AdminBrandAndPoliciesTab';
+import { AdminGradingScaleTab } from './AdminGradingScaleTab';
+import { AdminCurriculumTab } from './AdminCurriculumTab';
+import { AdminExamsTab } from './AdminExamsTab';
+import { AdminBroadsheetTab } from './AdminBroadsheetTab';
+import { AdminSubmissionsTab } from './AdminSubmissionsTab';
 
 interface AdminPortalProps {
   adminEmail: string;
@@ -64,17 +73,27 @@ interface AdminPortalProps {
   onGoToHome: () => void;
 }
 
+export type AdminTabType =
+  | 'admins'
+  | 'brand'
+  | 'grading'
+  | 'curriculum'
+  | 'staff'
+  | 'students'
+  | 'exams'
+  | 'broadsheet'
+  | 'submissions';
+
 export const AdminPortal: React.FC<AdminPortalProps> = ({
   adminEmail,
   onLogout,
   onGoToHome
 }) => {
   // Navigation tabs
-  const [activeTab, setActiveTab] = useState<'staff' | 'students' | 'curriculum' | 'settings' | 'exams'>(
-    'staff'
-  );
+  const [activeTab, setActiveTab] = useState<AdminTabType>('admins');
 
-  // Core Data
+  // Core Institutional Data
+  const [admins, setAdmins] = useState<AdminUser[]>([]);
   const [staffList, setStaffList] = useState<StaffMember[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [classes, setClasses] = useState<SchoolClass[]>([]);
@@ -82,16 +101,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [exams, setExams] = useState<Examination[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [settings, setSettings] = useState<SchoolSettings>({
-    schoolName: 'PRIME EDUTECH',
+    schoolName: "Honey's World High School",
+    address: 'Gaa Ajanaku, Ilorin, Kwara State',
+    location: 'Ilorin, Kwara State, Nigeria',
+    motto: 'Knowledge, Character & Academic Excellence',
     academicSession: '2025/2026',
     currentTerm: '1st Term',
     passMarkPercentage: 50,
     allowImmediateResultViewing: true
   });
+
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
-  // Modals state
+  // Staff and Student Modals
   const [showAddStaffModal, setShowAddStaffModal] = useState(false);
   const [editingStaff, setEditingStaff] = useState<StaffMember | null>(null);
   const [showStaffSlipsModal, setShowStaffSlipsModal] = useState(false);
@@ -101,55 +124,44 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [showBatchStudentModal, setShowBatchStudentModal] = useState(false);
   const [showStudentSlipsModal, setShowStudentSlipsModal] = useState(false);
 
-  const [showAddClassModal, setShowAddClassModal] = useState(false);
-  const [showAddSubjectModal, setShowAddSubjectModal] = useState(false);
-
-  // Search & Filters
+  // Search & Filters for staff & student subtabs
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedClassFilter, setSelectedClassFilter] = useState('All');
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
-  // Form states for Staff
+  // Staff Form
   const [staffForm, setStaffForm] = useState({
     fullName: '',
     email: '',
     uniqueId: '',
     role: 'teacher' as 'teacher' | 'hod',
     status: 'active' as 'active' | 'suspended',
+    qualification: '',
+    courseOfStudy: '',
+    phoneNumber: '',
+    password: '',
     assignedSubjectIds: [] as string[],
     assignedClasses: [] as string[]
   });
 
-  // Form states for Student
+  // Student Form
   const [studentForm, setStudentForm] = useState({
     firstName: '',
     surname: '',
     admissionNumber: '',
-    classGrade: 'SS 2',
+    classGrade: 'SS 1',
     accessCode: '',
-    academicSession: '2025/2026'
-  });
-
-  // Form state for Class
-  const [classForm, setClassForm] = useState({
-    name: '',
-    code: '',
-    arm: 'A',
-    academicSession: '2025/2026'
-  });
-
-  // Form state for Subject
-  const [subjectForm, setSubjectForm] = useState({
-    name: '',
-    code: '',
-    department: 'Science & Tech'
+    academicSession: '2025/2026',
+    email: '',
+    password: ''
   });
 
   // Load all institutional data
   const loadData = async () => {
     setLoading(true);
     try {
-      const [st, stu, cls, subs, ex, subms, sett] = await Promise.all([
+      const [adm, st, stu, cls, subs, ex, subms, sett] = await Promise.all([
+        fetchAdmins(),
         fetchStaffMembers(),
         fetchStudents(),
         fetchSchoolClasses(),
@@ -159,6 +171,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         fetchSchoolSettings()
       ]);
 
+      if (adm) setAdmins(adm);
       if (st) setStaffList(st);
       if (stu) setStudents(stu);
       if (cls) setClasses(cls);
@@ -179,7 +192,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   const showNotification = (text: string, type: 'success' | 'error' = 'success') => {
     setStatusMessage({ text, type });
-    setTimeout(() => setStatusMessage(null), 3500);
+    setTimeout(() => setStatusMessage(null), 4000);
   };
 
   const handleCopy = (code: string) => {
@@ -197,6 +210,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       uniqueId: generateStaffUniqueId(existing),
       role: 'teacher',
       status: 'active',
+      qualification: 'B.Sc (Ed)',
+      courseOfStudy: '',
+      phoneNumber: '',
+      password: '',
       assignedSubjectIds: subjects.length > 0 ? [subjects[0].id] : [],
       assignedClasses: classes.length > 0 ? [classes[0].code] : ['SS 1']
     });
@@ -212,6 +229,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       uniqueId: staff.uniqueId,
       role: staff.role,
       status: staff.status,
+      qualification: staff.qualification || '',
+      courseOfStudy: staff.courseOfStudy || '',
+      phoneNumber: staff.phoneNumber || '',
+      password: staff.password || '',
       assignedSubjectIds: staff.assignedSubjectIds || [],
       assignedClasses: staff.assignedClasses || []
     });
@@ -225,12 +246,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       return;
     }
 
-    // Determine subject names
     const assignedNames = subjects
       .filter(s => staffForm.assignedSubjectIds.includes(s.id))
       .map(s => s.name);
 
-    const staffId = editingStaff ? editingStaff.id : `staff-${Date.now()}`;
+    const staffId = editingStaff ? editingStaff.id : `staff_${Date.now()}`;
     const newStaff: StaffMember = {
       id: staffId,
       uniqueId: staffForm.uniqueId.trim().toUpperCase() || generateStaffUniqueId(),
@@ -241,6 +261,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       assignedClasses: staffForm.assignedClasses,
       role: staffForm.role,
       status: staffForm.status,
+      qualification: staffForm.qualification.trim(),
+      courseOfStudy: staffForm.courseOfStudy.trim(),
+      phoneNumber: staffForm.phoneNumber.trim(),
+      password: staffForm.password.trim() || undefined,
       createdAt: editingStaff ? editingStaff.createdAt : new Date().toISOString()
     };
 
@@ -259,7 +283,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   };
 
   const handleDeleteStaff = async (staff: StaffMember) => {
-    if (confirm(`Are you sure you want to delete staff member "${staff.fullName}" (${staff.uniqueId})? They will no longer be able to log in.`)) {
+    if (confirm(`Are you sure you want to delete staff member "${staff.fullName}" (${staff.uniqueId})?`)) {
       try {
         await deleteStaffMember(staff.id);
         setStaffList(prev => prev.filter(s => s.id !== staff.id));
@@ -275,13 +299,17 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     const existing = students.map(s => s.accessCode || '');
     const nextIdx = students.length + 1;
     const yr = new Date().getFullYear();
+    const prefix = settings.studentIdPrefix || 'HWHS';
+
     setStudentForm({
       firstName: '',
       surname: '',
-      admissionNumber: `STU/${yr}/${String(nextIdx).padStart(3, '0')}`,
-      classGrade: classes[0]?.code || 'SS 2',
+      admissionNumber: `${prefix}/${yr}/${String(nextIdx).padStart(3, '0')}`,
+      classGrade: classes[0]?.code || 'SS 1',
       accessCode: generateStudentAccessCode(existing),
-      academicSession: settings.academicSession
+      academicSession: settings.academicSession,
+      email: '',
+      password: ''
     });
     setEditingStudent(null);
     setShowAddStudentModal(true);
@@ -295,7 +323,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       admissionNumber: student.admissionNumber,
       classGrade: student.classGrade,
       accessCode: student.accessCode || '',
-      academicSession: student.academicSession || settings.academicSession
+      academicSession: student.academicSession || settings.academicSession,
+      email: student.email || '',
+      password: student.password || ''
     });
     setShowAddStudentModal(true);
   };
@@ -307,7 +337,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       return;
     }
 
-    const studentId = editingStudent ? editingStudent.id : `stu-${Date.now()}`;
+    const studentId = editingStudent ? editingStudent.id : `stu_${Date.now()}`;
     const code = studentForm.accessCode.trim().toUpperCase() || generateStudentAccessCode();
 
     const newStudent: Student = {
@@ -319,6 +349,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       classGrade: studentForm.classGrade.trim(),
       academicSession: studentForm.academicSession,
       status: 'active',
+      email: studentForm.email.trim().toLowerCase() || undefined,
+      password: studentForm.password.trim() || undefined,
       registeredAt: editingStudent ? editingStudent.registeredAt : new Date().toISOString(),
       accessCode: code
     };
@@ -330,7 +362,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         return [newStudent, ...filtered];
       });
       setShowAddStudentModal(false);
-      showNotification(`Student ${newStudent.fullName} saved with Unique ID ${code}!`);
+      showNotification(`Student ${newStudent.fullName} saved with Admission No ${newStudent.admissionNumber}!`);
     } catch (err) {
       console.error('Error saving student:', err);
       showNotification('Could not save student to database', 'error');
@@ -346,88 +378,6 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       } catch (err) {
         showNotification('Failed to delete student', 'error');
       }
-    }
-  };
-
-  // Class Actions
-  const handleSaveClass = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!classForm.name.trim() || !classForm.code.trim()) return;
-
-    const newClass: SchoolClass = {
-      id: `cls-${Date.now()}`,
-      name: classForm.name.trim(),
-      code: classForm.code.trim().toUpperCase(),
-      arm: classForm.arm.trim(),
-      academicSession: classForm.academicSession || settings.academicSession
-    };
-
-    try {
-      await saveSchoolClass(newClass);
-      setClasses(prev => [...prev, newClass]);
-      setShowAddClassModal(false);
-      setClassForm({ name: '', code: '', arm: 'A', academicSession: settings.academicSession });
-      showNotification(`Class ${newClass.code} added successfully!`);
-    } catch (err) {
-      showNotification('Failed to save class', 'error');
-    }
-  };
-
-  const handleDeleteClass = async (cls: SchoolClass) => {
-    if (confirm(`Delete class "${cls.code}"?`)) {
-      try {
-        await deleteSchoolClass(cls.id);
-        setClasses(prev => prev.filter(c => c.id !== cls.id));
-        showNotification(`Class "${cls.code}" deleted.`);
-      } catch (err) {
-        showNotification('Failed to delete class', 'error');
-      }
-    }
-  };
-
-  // Subject Actions
-  const handleSaveSubject = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!subjectForm.name.trim() || !subjectForm.code.trim()) return;
-
-    const newSub: Subject = {
-      id: `sub-${Date.now()}`,
-      name: subjectForm.name.trim(),
-      code: subjectForm.code.trim().toUpperCase(),
-      department: subjectForm.department.trim()
-    };
-
-    try {
-      await saveSubject(newSub);
-      setSubjects(prev => [...prev, newSub]);
-      setShowAddSubjectModal(false);
-      setSubjectForm({ name: '', code: '', department: 'Science & Tech' });
-      showNotification(`Subject ${newSub.name} added successfully!`);
-    } catch (err) {
-      showNotification('Failed to save subject', 'error');
-    }
-  };
-
-  const handleDeleteSubject = async (sub: Subject) => {
-    if (confirm(`Delete curriculum subject "${sub.name}"?`)) {
-      try {
-        await deleteSubject(sub.id);
-        setSubjects(prev => prev.filter(s => s.id !== sub.id));
-        showNotification(`Subject "${sub.name}" deleted.`);
-      } catch (err) {
-        showNotification('Failed to delete subject', 'error');
-      }
-    }
-  };
-
-  // Settings Actions
-  const handleSaveSettings = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      await saveSchoolSettings(settings);
-      showNotification('Institutional settings updated successfully!');
-    } catch (err) {
-      showNotification('Failed to save school settings', 'error');
     }
   };
 
@@ -455,7 +405,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans">
-      {/* Top Admin Security Bar */}
+      {/* Top Admin Security Crest Bar */}
       <div className="bg-slate-900 text-white border-b border-amber-500/30">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -465,14 +415,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-black text-sm tracking-wide text-white uppercase">
-                  PRIME EDUTECH
+                  {settings.schoolName || "HONEY'S WORLD HIGH SCHOOL"}
                 </span>
                 <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500 text-slate-950">
-                  Admin Authority
+                  Total Admin Control
                 </span>
               </div>
               <div className="text-xs text-slate-400">
-                Institutional Control & Faculty Provisioning Console · <span className="text-amber-300 font-mono">{adminEmail}</span>
+                Institutional Administration & Multi-Admin Console · <span className="text-amber-300 font-mono">{adminEmail}</span>
               </div>
             </div>
           </div>
@@ -481,20 +431,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             <button
               onClick={loadData}
               disabled={loading}
-              className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
-              title="Refresh Data"
+              className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+              title="Refresh Institutional Data"
             >
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-amber-400' : ''}`} />
             </button>
             <button
               onClick={onGoToHome}
-              className="text-xs text-slate-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors"
+              className="text-xs text-slate-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
             >
               Exit to Home
             </button>
             <button
               onClick={onLogout}
-              className="text-xs font-bold text-rose-400 hover:text-white px-3 py-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/50 flex items-center gap-1.5 transition-colors"
+              className="text-xs font-bold text-rose-400 hover:text-white px-3 py-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/50 flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
               <span>Logout Admin</span>
@@ -525,157 +475,247 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
       {/* Institutional KPI Metrics Bar */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
-          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-xs">
+            <div className="text-[11px] font-bold uppercase text-slate-500 flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-amber-600" />
+              <span>Admins</span>
+            </div>
+            <div className="text-xl font-black text-slate-900 mt-1">{admins.length}</div>
+            <div className="text-[10px] text-amber-600 font-semibold mt-0.5">Authorized Accounts</div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-xs">
             <div className="text-[11px] font-bold uppercase text-slate-500 flex items-center gap-1.5">
               <Users className="w-3.5 h-3.5 text-blue-900" />
-              <span>Faculty Staff</span>
+              <span>Faculty</span>
             </div>
-            <div className="text-2xl font-black text-slate-900 mt-1">{staffList.length}</div>
-            <div className="text-[11px] text-emerald-600 font-semibold mt-0.5">
-              {staffList.filter(s => s.status === 'active').length} Active Credentials
-            </div>
+            <div className="text-xl font-black text-slate-900 mt-1">{staffList.length}</div>
+            <div className="text-[10px] text-emerald-600 font-semibold mt-0.5">Active Teachers</div>
           </div>
 
-          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+          <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-xs">
             <div className="text-[11px] font-bold uppercase text-slate-500 flex items-center gap-1.5">
               <GraduationCap className="w-3.5 h-3.5 text-indigo-700" />
-              <span>Enrolled Students</span>
+              <span>Students</span>
             </div>
-            <div className="text-2xl font-black text-slate-900 mt-1">{students.length}</div>
-            <div className="text-[11px] text-slate-500 mt-0.5">Across {classes.length} Classes</div>
+            <div className="text-xl font-black text-slate-900 mt-1">{students.length}</div>
+            <div className="text-[10px] text-slate-500 mt-0.5">{classes.length} Classes</div>
           </div>
 
-          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+          <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-xs">
             <div className="text-[11px] font-bold uppercase text-slate-500 flex items-center gap-1.5">
-              <BookOpen className="w-3.5 h-3.5 text-amber-600" />
+              <BookOpen className="w-3.5 h-3.5 text-emerald-600" />
               <span>Curriculum</span>
             </div>
-            <div className="text-2xl font-black text-slate-900 mt-1">{subjects.length}</div>
-            <div className="text-[11px] text-slate-500 mt-0.5">Active School Subjects</div>
+            <div className="text-xl font-black text-slate-900 mt-1">{subjects.length}</div>
+            <div className="text-[10px] text-slate-500 mt-0.5">School Subjects</div>
           </div>
 
-          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+          <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-xs">
             <div className="text-[11px] font-bold uppercase text-slate-500 flex items-center gap-1.5">
               <BarChart3 className="w-3.5 h-3.5 text-purple-700" />
               <span>Examinations</span>
             </div>
-            <div className="text-2xl font-black text-slate-900 mt-1">{exams.length}</div>
-            <div className="text-[11px] text-slate-500 mt-0.5">
-              {exams.filter(e => e.status === 'published').length} Published Papers
-            </div>
+            <div className="text-xl font-black text-slate-900 mt-1">{exams.length}</div>
+            <div className="text-[10px] text-purple-600 font-semibold mt-0.5">{submissions.length} Submissions</div>
           </div>
 
-          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm col-span-2 sm:col-span-1">
+          <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-xs">
             <div className="text-[11px] font-bold uppercase text-slate-500 flex items-center gap-1.5">
-              <School className="w-3.5 h-3.5 text-emerald-700" />
+              <School className="w-3.5 h-3.5 text-teal-700" />
               <span>Active Term</span>
             </div>
-            <div className="text-base font-black text-slate-900 mt-1 truncate">{settings.currentTerm}</div>
-            <div className="text-[11px] font-mono text-slate-500 mt-0.5 truncate">{settings.academicSession}</div>
+            <div className="text-sm font-black text-slate-900 mt-1 truncate">{settings.currentTerm}</div>
+            <div className="text-[10px] font-mono text-slate-500 truncate">{settings.academicSession}</div>
           </div>
         </div>
       </div>
 
-      {/* Main Admin Navigation Tabs */}
+      {/* Main Admin Tabbed Navigation */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-2 flex flex-wrap items-center gap-2">
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-1.5 flex flex-wrap items-center gap-1.5">
           <button
-            onClick={() => setActiveTab('staff')}
-            className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all ${
-              activeTab === 'staff'
-                ? 'bg-slate-900 text-white shadow-md'
+            onClick={() => setActiveTab('admins')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'admins'
+                ? 'bg-amber-500 text-slate-950 shadow-md font-black'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            <KeyRound className="w-4 h-4 text-amber-400" />
-            <span>Staff Directory & Unique IDs ({staffList.length})</span>
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>Admins Authority ({admins.length})</span>
           </button>
 
           <button
-            onClick={() => setActiveTab('students')}
-            className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all ${
-              activeTab === 'students'
+            onClick={() => setActiveTab('brand')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'brand'
                 ? 'bg-slate-900 text-white shadow-md'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            <GraduationCap className="w-4 h-4 text-blue-400" />
-            <span>Student Management ({students.length})</span>
+            <School className="w-3.5 h-3.5 text-blue-400" />
+            <span>School Identity & Brand</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('grading')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'grading'
+                ? 'bg-slate-900 text-white shadow-md'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <Award className="w-3.5 h-3.5 text-emerald-400" />
+            <span>CA Weights & Grading Scale</span>
           </button>
 
           <button
             onClick={() => setActiveTab('curriculum')}
-            className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all ${
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
               activeTab === 'curriculum'
                 ? 'bg-slate-900 text-white shadow-md'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            <BookOpen className="w-4 h-4 text-emerald-400" />
+            <BookOpen className="w-3.5 h-3.5 text-teal-400" />
             <span>Classes & Subjects</span>
           </button>
 
           <button
+            onClick={() => setActiveTab('staff')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'staff'
+                ? 'bg-slate-900 text-white shadow-md'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <KeyRound className="w-3.5 h-3.5 text-amber-400" />
+            <span>Faculty Staff ({staffList.length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('students')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'students'
+                ? 'bg-slate-900 text-white shadow-md'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <GraduationCap className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Students ({students.length})</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('exams')}
-            className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all ${
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
               activeTab === 'exams'
                 ? 'bg-slate-900 text-white shadow-md'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            <BarChart3 className="w-4 h-4 text-purple-400" />
-            <span>Global Exam Oversight ({exams.length})</span>
+            <BarChart3 className="w-3.5 h-3.5 text-purple-400" />
+            <span>Examinations ({exams.length})</span>
           </button>
 
           <button
-            onClick={() => setActiveTab('settings')}
-            className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all ${
-              activeTab === 'settings'
+            onClick={() => setActiveTab('broadsheet')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'broadsheet'
                 ? 'bg-slate-900 text-white shadow-md'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            <Settings className="w-4 h-4 text-slate-400" />
-            <span>School Settings & Term</span>
+            <FileSpreadsheet className="w-3.5 h-3.5 text-amber-400" />
+            <span>CA Broadsheet Master</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('submissions')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'submissions'
+                ? 'bg-slate-900 text-white shadow-md'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <CheckSquare className="w-3.5 h-3.5 text-emerald-400" />
+            <span>CBT Submissions ({submissions.length})</span>
           </button>
         </div>
       </div>
 
       {/* Main Tab Panels */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full">
-        {/* =========================================================================
-            TAB 1: STAFF DIRECTORY & UNIQUE IDS (ADMIN ONLY RIGHT)
-        ========================================================================= */}
+        {/* TAB 1: ADMINISTRATORS AUTHORITY */}
+        {activeTab === 'admins' && (
+          <AdminUserManagementTab
+            currentAdminEmail={adminEmail}
+            admins={admins}
+            onAdminsUpdated={loadData}
+            showNotification={showNotification}
+          />
+        )}
+
+        {/* TAB 2: SCHOOL BRANDING & POLICIES */}
+        {activeTab === 'brand' && (
+          <AdminBrandAndPoliciesTab
+            settings={settings}
+            onSettingsUpdated={(updated) => setSettings(updated)}
+            showNotification={showNotification}
+          />
+        )}
+
+        {/* TAB 3: CA WEIGHTS & GRADING SCALE */}
+        {activeTab === 'grading' && (
+          <AdminGradingScaleTab
+            settings={settings}
+            onSettingsUpdated={(updated) => setSettings(updated)}
+            showNotification={showNotification}
+          />
+        )}
+
+        {/* TAB 4: CURRICULUM (CLASSES & SUBJECTS) */}
+        {activeTab === 'curriculum' && (
+          <AdminCurriculumTab
+            classes={classes}
+            subjects={subjects}
+            academicSession={settings.academicSession}
+            onCurriculumUpdated={loadData}
+            showNotification={showNotification}
+          />
+        )}
+
+        {/* TAB 5: FACULTY STAFF MANAGEMENT */}
         {activeTab === 'staff' && (
           <div className="space-y-6">
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-100">
                 <div>
                   <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-amber-50 text-amber-800 text-[11px] font-bold border border-amber-200 uppercase tracking-wide mb-1">
-                    <ShieldAlert className="w-3 h-3" />
-                    <span>Admin-Only Authority</span>
+                    <ShieldAlert className="w-3 h-3 text-amber-600" />
+                    <span>Admin Authority</span>
                   </div>
                   <h2 className="text-xl font-black text-slate-900">Faculty Staff Management</h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Only the Administrator can register teachers and generate their Unique Staff Login IDs. Teachers cannot enter the staff portal without an approved ID.
+                    Register teachers, generate unique Staff IDs, assign curriculum subjects and classes, and control login status.
                   </p>
                 </div>
 
                 <div className="flex items-center gap-2.5 flex-wrap">
                   <button
                     onClick={() => setShowStaffSlipsModal(true)}
-                    className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5"
+                    className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
                     <Printer className="w-3.5 h-3.5 text-slate-600" />
                     <span>Print Credential Slips</span>
                   </button>
                   <button
                     onClick={handleOpenAddStaff}
-                    className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-md transition-colors flex items-center gap-1.5"
+                    className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-md transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
                     <Plus className="w-4 h-4 text-amber-400" />
-                    <span>Add New Faculty Staff</span>
+                    <span>Add Faculty Staff</span>
                   </button>
                 </div>
               </div>
@@ -689,14 +729,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     placeholder="Search faculty by name, email, subject, or Unique ID (e.g. TCH-1001)..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    className="w-full pl-10 pr-4 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
                   />
                 </div>
               </div>
 
               {/* Staff Table */}
               <div className="mt-6 overflow-x-auto">
-                <table className="w-full text-left border-collapse">
+                <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-50/50">
                       <th className="py-3 px-4">Faculty Member</th>
@@ -708,11 +748,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                       <th className="py-3 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
+                  <tbody className="divide-y divide-slate-100 text-slate-700">
                     {filteredStaff.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="py-8 text-center text-slate-400">
-                          No faculty staff members found matching query. Click "Add New Faculty Staff" above.
+                          No faculty staff members found. Click "Add Faculty Staff" above.
                         </td>
                       </tr>
                     ) : (
@@ -723,11 +763,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             <div className="text-[11px] text-slate-400 font-mono font-normal">{staff.email}</div>
                           </td>
                           <td className="py-3.5 px-4">
-                            <div className="inline-flex items-center gap-1.5 bg-slate-900 text-amber-300 font-mono font-black text-xs px-2.5 py-1 rounded-lg shadow-sm border border-slate-800">
+                            <div className="inline-flex items-center gap-1.5 bg-slate-900 text-amber-300 font-mono font-black text-xs px-2.5 py-1 rounded-lg shadow-xs border border-slate-800">
                               <span>{staff.uniqueId}</span>
                               <button
                                 onClick={() => handleCopy(staff.uniqueId)}
-                                className="text-slate-400 hover:text-white"
+                                className="text-slate-400 hover:text-white cursor-pointer"
                                 title="Copy Unique ID"
                               >
                                 {copiedCode === staff.uniqueId ? (
@@ -780,14 +820,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             <div className="flex items-center justify-end gap-1.5">
                               <button
                                 onClick={() => handleOpenEditStaff(staff)}
-                                className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
+                                className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
                                 title="Edit Staff"
                               >
                                 <Edit3 className="w-4 h-4" />
                               </button>
                               <button
                                 onClick={() => handleDeleteStaff(staff)}
-                                className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors"
+                                className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
                                 title="Delete Staff"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -804,9 +844,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
           </div>
         )}
 
-        {/* =========================================================================
-            TAB 2: STUDENT MANAGEMENT & UNIQUE ACCESS CODES
-        ========================================================================= */}
+        {/* TAB 6: STUDENTS MANAGEMENT */}
         {activeTab === 'students' && (
           <div className="space-y-6">
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8">
@@ -814,45 +852,45 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 <div>
                   <h2 className="text-xl font-black text-slate-900">Student Directory & Unique Passcodes</h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Each student receives an auto-generated unique User ID / Code (e.g. <span className="font-mono font-bold text-blue-900">PRM-4821</span>). When they log in with this ID, they immediately enter their candidate portal with their exams.
+                    Enroll students, assign admission numbers, issue login passcodes, and monitor cohort registrations.
                   </p>
                 </div>
 
                 <div className="flex items-center gap-2.5 flex-wrap">
                   <button
                     onClick={() => setShowStudentSlipsModal(true)}
-                    className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5"
+                    className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
                     <Printer className="w-3.5 h-3.5 text-slate-600" />
                     <span>Print Student Slips</span>
                   </button>
                   <button
                     onClick={() => setShowBatchStudentModal(true)}
-                    className="px-3.5 py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5"
+                    className="px-3.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
                     <Upload className="w-3.5 h-3.5 text-blue-700" />
                     <span>Batch CSV Upload</span>
                   </button>
                   <button
                     onClick={handleOpenAddStudent}
-                    className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-md transition-colors flex items-center gap-1.5"
+                    className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-md transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
                     <Plus className="w-4 h-4 text-amber-400" />
-                    <span>Add Student</span>
+                    <span>Enroll Student</span>
                   </button>
                 </div>
               </div>
 
-              {/* Filters & Search */}
+              {/* Filters */}
               <div className="mt-6 flex flex-col sm:flex-row items-center gap-3">
                 <div className="relative flex-1 w-full">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
-                    placeholder="Search by student full name, admission number, or unique code (e.g. PRM-4821)..."
+                    placeholder="Search by student full name, admission number, or passcode..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    className="w-full pl-10 pr-4 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
                   />
                 </div>
 
@@ -861,7 +899,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   <select
                     value={selectedClassFilter}
                     onChange={(e) => setSelectedClassFilter(e.target.value)}
-                    className="px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-700 focus:outline-none"
+                    className="px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-700 cursor-pointer"
                   >
                     <option value="All">All Classes ({students.length})</option>
                     {classes.map(c => (
@@ -873,11 +911,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
               {/* Students Table */}
               <div className="mt-6 overflow-x-auto">
-                <table className="w-full text-left border-collapse">
+                <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-50/50">
                       <th className="py-3 px-4">Student Full Name</th>
-                      <th className="py-3 px-4">Unique Login ID / Code</th>
+                      <th className="py-3 px-4">Unique Login Passcode</th>
                       <th className="py-3 px-4">Admission Number</th>
                       <th className="py-3 px-4">Class</th>
                       <th className="py-3 px-4">Session</th>
@@ -885,7 +923,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                       <th className="py-3 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
+                  <tbody className="divide-y divide-slate-100 text-slate-700">
                     {filteredStudents.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="py-8 text-center text-slate-400">
@@ -896,14 +934,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                       filteredStudents.map((stu) => (
                         <tr key={stu.id} className="hover:bg-slate-50/80 transition-colors">
                           <td className="py-3.5 px-4 font-bold text-slate-900">
-                            {stu.fullName}
+                            <div>{stu.fullName}</div>
+                            {stu.email && <div className="text-[10px] text-slate-400 font-mono">{stu.email}</div>}
                           </td>
                           <td className="py-3.5 px-4">
                             <div className="inline-flex items-center gap-1.5 bg-blue-950 text-blue-300 font-mono font-black text-xs px-2.5 py-1 rounded-lg border border-blue-800">
                               <span>{stu.accessCode || stu.admissionNumber}</span>
                               <button
                                 onClick={() => handleCopy(stu.accessCode || stu.admissionNumber)}
-                                className="text-slate-400 hover:text-white"
+                                className="text-slate-400 hover:text-white cursor-pointer"
                                 title="Copy Student Code"
                               >
                                 {copiedCode === (stu.accessCode || stu.admissionNumber) ? (
@@ -932,14 +971,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             <div className="flex items-center justify-end gap-1.5">
                               <button
                                 onClick={() => handleOpenEditStudent(stu)}
-                                className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
+                                className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
                                 title="Edit Student"
                               >
                                 <Edit3 className="w-4 h-4" />
                               </button>
                               <button
                                 onClick={() => handleDeleteStudent(stu)}
-                                className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors"
+                                className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
                                 title="Delete Student"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -956,259 +995,46 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
           </div>
         )}
 
-        {/* =========================================================================
-            TAB 3: CURRICULUM (CLASSES & SUBJECTS)
-        ========================================================================= */}
-        {activeTab === 'curriculum' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* School Classes Card */}
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-              <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-4">
-                <div>
-                  <h3 className="text-base font-black text-slate-900">Academic Classes ({classes.length})</h3>
-                  <p className="text-xs text-slate-500">Junior & Senior Secondary cohorts</p>
-                </div>
-                <button
-                  onClick={() => setShowAddClassModal(true)}
-                  className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl flex items-center gap-1.5"
-                >
-                  <Plus className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Add Class</span>
-                </button>
-              </div>
-
-              <div className="space-y-2.5">
-                {classes.map(cls => (
-                  <div
-                    key={cls.id}
-                    className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs"
-                  >
-                    <div>
-                      <div className="font-bold text-slate-900">{cls.name}</div>
-                      <div className="text-[11px] text-slate-500 font-mono">
-                        Code: <strong>{cls.code}</strong> · Arm: {cls.arm || 'General'}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => handleDeleteClass(cls)}
-                      className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg"
-                      title="Delete Class"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* School Subjects Card */}
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-              <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-4">
-                <div>
-                  <h3 className="text-base font-black text-slate-900">Curriculum Subjects ({subjects.length})</h3>
-                  <p className="text-xs text-slate-500">Subjects assigned to faculty teachers</p>
-                </div>
-                <button
-                  onClick={() => setShowAddSubjectModal(true)}
-                  className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl flex items-center gap-1.5"
-                >
-                  <Plus className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Add Subject</span>
-                </button>
-              </div>
-
-              <div className="space-y-2.5 max-h-[480px] overflow-y-auto">
-                {subjects.map(sub => (
-                  <div
-                    key={sub.id}
-                    className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs"
-                  >
-                    <div>
-                      <div className="font-bold text-slate-900">{sub.name}</div>
-                      <div className="text-[11px] text-slate-500 font-mono">
-                        Code: <strong>{sub.code}</strong> · Dept: {sub.department}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => handleDeleteSubject(sub)}
-                      className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg"
-                      title="Delete Subject"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* =========================================================================
-            TAB 4: GLOBAL EXAMINATIONS OVERSIGHT
-        ========================================================================= */}
+        {/* TAB 7: EXAMINATIONS & QUESTION BANKS */}
         {activeTab === 'exams' && (
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8 space-y-6">
-            <div className="pb-4 border-b border-slate-100">
-              <h2 className="text-xl font-black text-slate-900">Institutional Examination Directory</h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Overview of all examinations configured across all academic subjects and teachers.
-              </p>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-50/50">
-                    <th className="py-3 px-4">Examination Title</th>
-                    <th className="py-3 px-4">Subject</th>
-                    <th className="py-3 px-4">Target Class</th>
-                    <th className="py-3 px-4">Term & Session</th>
-                    <th className="py-3 px-4">Questions / Duration</th>
-                    <th className="py-3 px-4">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
-                  {exams.map(exam => (
-                    <tr key={exam.id} className="hover:bg-slate-50/80">
-                      <td className="py-3.5 px-4 font-bold text-slate-900">
-                        {exam.title}
-                      </td>
-                      <td className="py-3.5 px-4 font-medium text-blue-900">
-                        {exam.subjectName}
-                      </td>
-                      <td className="py-3.5 px-4 font-bold">
-                        {exam.classGrade}
-                      </td>
-                      <td className="py-3.5 px-4 font-mono text-slate-500 text-[11px]">
-                        {exam.term} · {exam.academicSession}
-                      </td>
-                      <td className="py-3.5 px-4">
-                        {exam.totalQuestions} Qs ({exam.durationMinutes} mins)
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <span
-                          className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded border ${
-                            exam.status === 'published'
-                              ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                              : 'bg-amber-50 text-amber-800 border-amber-200'
-                          }`}
-                        >
-                          {exam.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <AdminExamsTab
+            exams={exams}
+            classes={classes}
+            subjects={subjects}
+            academicSession={settings.academicSession}
+            currentTerm={settings.currentTerm}
+            onExamsUpdated={loadData}
+            showNotification={showNotification}
+          />
         )}
 
-        {/* =========================================================================
-            TAB 5: SCHOOL SETTINGS & SESSION CONFIGURATION
-        ========================================================================= */}
-        {activeTab === 'settings' && (
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8 max-w-2xl mx-auto">
-            <div className="pb-6 border-b border-slate-100 mb-6">
-              <h2 className="text-xl font-black text-slate-900">Institutional School Settings</h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Configure official school name, active term, and academic evaluation policies.
-              </p>
-            </div>
+        {/* TAB 8: CONTINUOUS ASSESSMENT BROADSHEET */}
+        {activeTab === 'broadsheet' && (
+          <AdminBroadsheetTab
+            students={students}
+            subjects={subjects}
+            classes={classes}
+            settings={settings}
+            showNotification={showNotification}
+          />
+        )}
 
-            <form onSubmit={handleSaveSettings} className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Institutional Name
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={settings.schoolName}
-                  onChange={(e) => setSettings({ ...settings, schoolName: e.target.value })}
-                  className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Academic Session
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={settings.academicSession}
-                    onChange={(e) => setSettings({ ...settings, academicSession: e.target.value })}
-                    className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Current Active Term
-                  </label>
-                  <select
-                    value={settings.currentTerm}
-                    onChange={(e) => setSettings({ ...settings, currentTerm: e.target.value })}
-                    className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  >
-                    <option value="1st Term">1st Term</option>
-                    <option value="2nd Term">2nd Term</option>
-                    <option value="3rd Term">3rd Term</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Examination Pass Mark (%)
-                </label>
-                <input
-                  type="number"
-                  min="30"
-                  max="100"
-                  value={settings.passMarkPercentage}
-                  onChange={(e) => setSettings({ ...settings, passMarkPercentage: Number(e.target.value) })}
-                  className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
-                />
-              </div>
-
-              <div className="pt-2">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={settings.allowImmediateResultViewing}
-                    onChange={(e) => setSettings({ ...settings, allowImmediateResultViewing: e.target.checked })}
-                    className="w-4 h-4 rounded text-blue-900 focus:ring-blue-900 border-slate-300"
-                  />
-                  <span className="text-xs text-slate-700 font-semibold">
-                    Allow students to view graded result slips immediately after test submission
-                  </span>
-                </label>
-              </div>
-
-              <div className="pt-4 border-t border-slate-100">
-                <button
-                  type="submit"
-                  className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-md transition-colors"
-                >
-                  Save Institutional Settings
-                </button>
-              </div>
-            </form>
-          </div>
+        {/* TAB 9: CBT SUBMISSIONS & RETAKE RESET */}
+        {activeTab === 'submissions' && (
+          <AdminSubmissionsTab
+            submissions={submissions}
+            exams={exams}
+            classes={classes}
+            onSubmissionsUpdated={loadData}
+            showNotification={showNotification}
+          />
         )}
       </main>
-
-      {/* =========================================================================
-          MODALS
-      ========================================================================= */}
 
       {/* Add / Edit Staff Modal */}
       {showAddStaffModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden">
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden my-6">
             <div className="bg-slate-900 text-white p-5 flex items-center justify-between">
               <div className="flex items-center gap-2.5">
                 <ShieldAlert className="w-5 h-5 text-amber-400" />
@@ -1218,13 +1044,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               </div>
               <button
                 onClick={() => setShowAddStaffModal(false)}
-                className="text-slate-400 hover:text-white"
+                className="text-slate-400 hover:text-white cursor-pointer"
               >
                 ✕
               </button>
             </div>
 
-            <form onSubmit={handleSaveStaff} className="p-6 space-y-4">
+            <form onSubmit={handleSaveStaff} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   Full Name (e.g. Mr. Olawale Benson)
@@ -1235,7 +1061,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   placeholder="Mr. Olawale Benson"
                   value={staffForm.fullName}
                   onChange={(e) => setStaffForm({ ...staffForm, fullName: e.target.value })}
-                  className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                  className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900"
                 />
               </div>
 
@@ -1249,43 +1075,82 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   placeholder="benson@primeedutech.ng"
                   value={staffForm.email}
                   onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })}
-                  className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                  className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900"
                 />
               </div>
 
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-bold text-slate-700">
-                    Unique Staff Login ID
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const next = generateStaffUniqueId(staffList.map(s => s.uniqueId));
-                      setStaffForm({ ...staffForm, uniqueId: next });
-                    }}
-                    className="text-[11px] text-blue-900 hover:underline font-semibold"
-                  >
-                    Regenerate Code
-                  </button>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-bold text-slate-700">
+                      Unique Staff Login ID
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = generateStaffUniqueId(staffList.map(s => s.uniqueId));
+                        setStaffForm({ ...staffForm, uniqueId: next });
+                      }}
+                      className="text-[10px] text-blue-900 hover:underline font-semibold cursor-pointer"
+                    >
+                      Regenerate
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    required
+                    value={staffForm.uniqueId}
+                    onChange={(e) => setStaffForm({ ...staffForm, uniqueId: e.target.value.toUpperCase() })}
+                    className="w-full px-3 py-2 text-sm bg-slate-900 text-amber-300 font-mono font-black border border-slate-700 rounded-xl uppercase"
+                  />
                 </div>
-                <input
-                  type="text"
-                  required
-                  value={staffForm.uniqueId}
-                  onChange={(e) => setStaffForm({ ...staffForm, uniqueId: e.target.value.toUpperCase() })}
-                  className="w-full px-3.5 py-2.5 text-sm bg-slate-900 text-amber-300 font-mono font-black border border-slate-700 rounded-xl uppercase tracking-wider focus:outline-none focus:ring-2 focus:ring-amber-500"
-                />
-                <p className="text-[10px] text-slate-500 mt-1">
-                  Teachers enter this ID at the staff login page. Only authorized IDs in database can enter.
-                </p>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Custom Password (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Optional login password"
+                    value={staffForm.password}
+                    onChange={(e) => setStaffForm({ ...staffForm, password: e.target.value })}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Educational Qualification
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="B.Sc (Ed), PGDE, M.Ed"
+                    value={staffForm.qualification}
+                    onChange={(e) => setStaffForm({ ...staffForm, qualification: e.target.value })}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Course of Study / Discipline
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Computer Science, Mathematics"
+                    value={staffForm.courseOfStudy}
+                    onChange={(e) => setStaffForm({ ...staffForm, courseOfStudy: e.target.value })}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
               </div>
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                  Assigned Teaching Subjects (Teacher will only access these)
+                  Assigned Teaching Subjects
                 </label>
-                <div className="grid grid-cols-2 gap-2 max-h-36 overflow-y-auto p-2 bg-slate-50 border border-slate-200 rounded-xl">
+                <div className="grid grid-cols-2 gap-2 max-h-32 overflow-y-auto p-2 bg-slate-50 border border-slate-200 rounded-xl">
                   {subjects.map(sub => {
                     const checked = staffForm.assignedSubjectIds.includes(sub.id);
                     return (
@@ -1317,7 +1182,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                  Assigned Classes (e.g. SS 1, SS 2)
+                  Assigned Classes
                 </label>
                 <div className="flex flex-wrap gap-2">
                   {classes.map(cls => {
@@ -1364,7 +1229,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   <select
                     value={staffForm.role}
                     onChange={(e) => setStaffForm({ ...staffForm, role: e.target.value as 'teacher' | 'hod' })}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold"
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold cursor-pointer"
                   >
                     <option value="teacher">Class Teacher</option>
                     <option value="hod">Head of Department (HOD)</option>
@@ -1378,7 +1243,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   <select
                     value={staffForm.status}
                     onChange={(e) => setStaffForm({ ...staffForm, status: e.target.value as 'active' | 'suspended' })}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold"
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold cursor-pointer"
                   >
                     <option value="active">Active (Access Allowed)</option>
                     <option value="suspended">Suspended (Access Blocked)</option>
@@ -1390,15 +1255,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowAddStaffModal(false)}
-                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl"
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 text-xs font-bold bg-slate-900 text-white rounded-xl shadow-md hover:bg-slate-800"
+                  className="px-5 py-2.5 text-xs font-bold bg-slate-900 text-white rounded-xl shadow-md hover:bg-slate-800 cursor-pointer"
                 >
-                  {editingStaff ? 'Update Staff Member' : 'Save & Issue Staff ID'}
+                  {editingStaff ? 'Update Staff Member' : 'Save Faculty Staff'}
                 </button>
               </div>
             </form>
@@ -1409,7 +1274,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       {/* Add / Edit Student Modal */}
       {showAddStudentModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden my-6">
             <div className="bg-slate-900 text-white p-5 flex items-center justify-between">
               <div className="flex items-center gap-2.5">
                 <GraduationCap className="w-5 h-5 text-blue-400" />
@@ -1419,18 +1284,16 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               </div>
               <button
                 onClick={() => setShowAddStudentModal(false)}
-                className="text-slate-400 hover:text-white"
+                className="text-slate-400 hover:text-white cursor-pointer"
               >
                 ✕
               </button>
             </div>
 
-            <form onSubmit={handleSaveStudent} className="p-6 space-y-4">
+            <form onSubmit={handleSaveStudent} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    First Name
-                  </label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">First Name</label>
                   <input
                     type="text"
                     required
@@ -1441,9 +1304,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Surname
-                  </label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Surname</label>
                   <input
                     type="text"
                     required
@@ -1456,9 +1317,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Admission Number
-                </label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Admission Number</label>
                 <input
                   type="text"
                   required
@@ -1470,13 +1329,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Class Form
-                  </label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Class Cohort</label>
                   <select
                     value={studentForm.classGrade}
                     onChange={(e) => setStudentForm({ ...studentForm, classGrade: e.target.value })}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900"
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 cursor-pointer"
                   >
                     {classes.map(c => (
                       <option key={c.id} value={c.code}>{c.code}</option>
@@ -1484,9 +1341,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Academic Session
-                  </label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Session</label>
                   <input
                     type="text"
                     value={studentForm.academicSession}
@@ -1499,7 +1354,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <label className="block text-xs font-bold text-slate-700">
-                    Auto-Generated Student Code / User ID
+                    Unique Passcode / Login Code
                   </label>
                   <button
                     type="button"
@@ -1507,7 +1362,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                       const next = generateStudentAccessCode(students.map(s => s.accessCode || ''));
                       setStudentForm({ ...studentForm, accessCode: next });
                     }}
-                    className="text-[11px] text-blue-900 hover:underline font-semibold"
+                    className="text-[10px] text-blue-900 hover:underline font-semibold cursor-pointer"
                   >
                     Regenerate
                   </button>
@@ -1517,136 +1372,46 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   required
                   value={studentForm.accessCode}
                   onChange={(e) => setStudentForm({ ...studentForm, accessCode: e.target.value.toUpperCase() })}
-                  className="w-full px-3 py-2 text-sm bg-blue-950 text-blue-300 font-mono font-black border border-blue-800 rounded-xl uppercase tracking-wider"
+                  className="w-full px-3 py-2 text-sm bg-blue-950 text-blue-300 font-mono font-black border border-blue-800 rounded-xl uppercase"
                 />
-                <p className="text-[10px] text-slate-500 mt-1">
-                  Student logs in directly using this unique code or user ID.
-                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Connected Email (Optional)</label>
+                  <input
+                    type="email"
+                    placeholder="student@gmail.com"
+                    value={studentForm.email}
+                    onChange={(e) => setStudentForm({ ...studentForm, email: e.target.value })}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Student Password (Optional)</label>
+                  <input
+                    type="text"
+                    placeholder="Custom password"
+                    value={studentForm.password}
+                    onChange={(e) => setStudentForm({ ...studentForm, password: e.target.value })}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
               </div>
 
               <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => setShowAddStudentModal(false)}
-                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl"
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 text-xs font-bold bg-slate-900 text-white rounded-xl shadow-md hover:bg-slate-800"
+                  className="px-5 py-2.5 text-xs font-bold bg-slate-900 text-white rounded-xl shadow-md hover:bg-slate-800 cursor-pointer"
                 >
-                  {editingStudent ? 'Update Student' : 'Save Student & Issue Code'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Add Class Modal */}
-      {showAddClassModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-sm w-full shadow-2xl p-6">
-            <h3 className="font-black text-sm text-slate-900 mb-4">Add School Class</h3>
-            <form onSubmit={handleSaveClass} className="space-y-3">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Class Name</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Senior Secondary 1"
-                  value={classForm.name}
-                  onChange={(e) => setClassForm({ ...classForm, name: e.target.value })}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Code / Short Label</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. SS 1"
-                  value={classForm.code}
-                  onChange={(e) => setClassForm({ ...classForm, code: e.target.value.toUpperCase() })}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold"
-                />
-              </div>
-              <div className="flex justify-end gap-2 pt-3">
-                <button
-                  type="button"
-                  onClick={() => setShowAddClassModal(false)}
-                  className="px-3 py-1.5 text-xs font-bold text-slate-600"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 text-xs font-bold bg-slate-900 text-white rounded-xl"
-                >
-                  Save Class
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Add Subject Modal */}
-      {showAddSubjectModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-sm w-full shadow-2xl p-6">
-            <h3 className="font-black text-sm text-slate-900 mb-4">Add Curriculum Subject</h3>
-            <form onSubmit={handleSaveSubject} className="space-y-3">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Subject Name</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Computer Studies"
-                  value={subjectForm.name}
-                  onChange={(e) => setSubjectForm({ ...subjectForm, name: e.target.value })}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Short Code</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. CSC"
-                  value={subjectForm.code}
-                  onChange={(e) => setSubjectForm({ ...subjectForm, code: e.target.value.toUpperCase() })}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Department</label>
-                <select
-                  value={subjectForm.department}
-                  onChange={(e) => setSubjectForm({ ...subjectForm, department: e.target.value })}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold"
-                >
-                  <option value="Science & Tech">Science & Tech</option>
-                  <option value="General Mathematics">General Mathematics</option>
-                  <option value="Languages & Humanities">Languages & Humanities</option>
-                  <option value="Pure Sciences">Pure Sciences</option>
-                  <option value="Commercial Studies">Commercial Studies</option>
-                </select>
-              </div>
-              <div className="flex justify-end gap-2 pt-3">
-                <button
-                  type="button"
-                  onClick={() => setShowAddSubjectModal(false)}
-                  className="px-3 py-1.5 text-xs font-bold text-slate-600"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 text-xs font-bold bg-slate-900 text-white rounded-xl"
-                >
-                  Save Subject
+                  {editingStudent ? 'Update Student' : 'Save Student'}
                 </button>
               </div>
             </form>
@@ -1659,7 +1424,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         isOpen={showStaffSlipsModal}
         onClose={() => setShowStaffSlipsModal(false)}
         staffList={staffList}
-        schoolName={settings.schoolName}
+        schoolName={settings.schoolName || "Honey's World High School"}
       />
 
       {/* Student Slips Modal */}
@@ -1667,23 +1432,22 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         isOpen={showStudentSlipsModal}
         onClose={() => setShowStudentSlipsModal(false)}
         students={students}
-        schoolName={settings.schoolName}
-        currentSession={settings.academicSession}
-        currentTerm={settings.currentTerm}
+        schoolName={settings.schoolName || "Honey's World High School"}
+        currentSession={settings.academicSession || '2025/2026'}
+        currentTerm={settings.currentTerm || '1st Term'}
       />
 
       {/* Student Batch Upload Modal */}
       <StudentBatchUploadModal
         isOpen={showBatchStudentModal}
         onClose={() => setShowBatchStudentModal(false)}
-        classes={classes}
-        currentSession={settings.academicSession}
-        existingStudents={students}
-        onUploadSuccess={(newStudents) => {
-          setStudents(prev => [...newStudents, ...prev]);
-          setShowBatchStudentModal(false);
-          showNotification(`Successfully enrolled and generated unique IDs for ${newStudents.length} students!`);
+        onUploadSuccess={() => {
+          loadData();
+          showNotification('Batch student upload processed successfully!');
         }}
+        classes={classes}
+        currentSession={settings.academicSession || '2025/2026'}
+        existingStudents={students}
       />
     </div>
   );
