@@ -80,7 +80,7 @@ export default function App() {
   };
 
   // Determine portal context from route
-  const isAdminRoute = currentRoute.startsWith('/admin');
+  const isAdminRoute = currentRoute.startsWith('/admin') || currentRoute.startsWith('/admin.honeysworld');
   const isTeacherRoute = currentRoute.startsWith('/teacher');
   const isStudentRoute = currentRoute.startsWith('/student');
   const isExamActive = currentRoute.startsWith('/student/examination') && activeExam !== null;
@@ -99,7 +99,7 @@ export default function App() {
     try {
       sessionStorage.setItem('prime_edutech_active_admin', email);
     } catch {}
-    navigate('/admin/dashboard');
+    navigate('/admin.honeysworld');
   };
 
   const handleAdminLogout = () => {
@@ -319,6 +319,8 @@ export default function App() {
                   submission={activeSubmission}
                   allowReview={activeExam?.resultVisibility !== 'teacher_publish'}
                   onReturnToDashboard={() => navigate('/student/dashboard')}
+                  settings={schoolSettings}
+                  student={studentSession}
                 />
               )}
 

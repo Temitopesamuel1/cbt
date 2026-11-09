@@ -10,7 +10,6 @@ import {
   CheckCircle,
   ArrowRight,
   Megaphone,
-  ShieldAlert,
   Lock
 } from 'lucide-react';
 import { SchoolSettings } from '../../types/cbt';
@@ -169,34 +168,6 @@ export const LandingGateway: React.FC<LandingGatewayProps> = ({ onNavigate, sett
               )}
             </div>
           </div>
-        </div>
-
-        {/* Institutional Administration Entry Gate */}
-        <div className="bg-slate-900 rounded-2xl p-6 text-white flex flex-col sm:flex-row items-center justify-between gap-4 border border-slate-800 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
-              <ShieldAlert className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="text-xs uppercase font-black text-amber-400 tracking-wider">
-                Institutional Authority
-              </div>
-              <div className="text-sm font-bold text-white">
-                School Administrators & Governance Console
-              </div>
-              <div className="text-[11px] text-slate-400">
-                Total authority over curriculum, grading scales, multi-admin management, staff provisioning, and CBT papers.
-              </div>
-            </div>
-          </div>
-
-          <button
-            onClick={() => onNavigate('/admin')}
-            className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl shadow-md transition-colors flex items-center gap-2 shrink-0 cursor-pointer"
-          >
-            <span>Admin Console Access</span>
-            <ArrowRight className="w-4 h-4" />
-          </button>
         </div>
 
         {/* School Examination Standards Overview */}

@@ -136,9 +136,12 @@ export const StudentSlipsModal: React.FC<StudentSlipsModalProps> = ({
                   {/* Institutional Header Strip */}
                   <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
                     <div className="flex items-center gap-2">
-                      <div className="w-6 h-6 rounded bg-slate-900 text-white flex items-center justify-center font-bold text-[10px]">
-                        PE
-                      </div>
+                      <img
+                        src="/school-logo.png"
+                        alt="HWHS"
+                        className="w-6 h-6 object-contain rounded-full border border-amber-300"
+                        onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
+                      />
                       <span className="font-black text-xs text-slate-900 tracking-tight uppercase">
                         {schoolName}
                       </span>

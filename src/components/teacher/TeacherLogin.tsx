@@ -52,17 +52,17 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNa
     e.preventDefault();
     setError(null);
 
-    const cleanId = uniqueStaffId.trim().toUpperCase();
-    if (!cleanId) {
-      setError('Please provide your teacher Unique Staff ID.');
+    const cleanInput = uniqueStaffId.trim();
+    if (!cleanInput) {
+      setError('Please provide your Unique Staff ID or registered Email address.');
       return;
     }
 
     setLoading(true);
 
     try {
-      // Authenticate strictly against the database with credentials
-      const res = await authenticateStaffWithCredentials(cleanId, password);
+      // Authenticate strictly against the database with credentials (supports ID or Email)
+      const res = await authenticateStaffWithCredentials(cleanInput, password);
 
       if (!res.success) {
         setError(res.error || 'Authentication denied. Please check your credentials.');
@@ -71,7 +71,7 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNa
       }
 
       if (!res.staff) {
-        setError(`Access Denied: Staff ID "${cleanId}" does not exist in the faculty database.`);
+        setError(`Access Denied: Staff ID or Email "${cleanInput}" does not exist in the faculty database.`);
         setLoading(false);
         return;
       }
@@ -122,9 +122,9 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNa
               <div className="flex items-center justify-between mb-1.5">
                 <label className="block text-xs font-bold text-slate-700 flex items-center gap-1.5">
                   <KeyRound className="w-3.5 h-3.5 text-slate-400" />
-                  <span>Unique Teacher Login ID</span>
+                  <span>Unique Staff ID or Registered Email</span>
                 </label>
-                <span className="text-[11px] text-slate-500">Issued by Admin</span>
+                <span className="text-[11px] text-slate-500 font-medium">Faculty Access</span>
               </div>
 
               <div className="relative">
@@ -132,17 +132,17 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNa
                   type="text"
                   required
                   autoFocus
-                  placeholder="e.g. TCH-1001"
+                  placeholder="e.g. TCH-1001 or teacher@honeysworld.edu"
                   value={uniqueStaffId}
                   onChange={(e) => {
                     setUniqueStaffId(e.target.value);
                     setError(null);
                   }}
-                  className="w-full px-3.5 py-3 text-base sm:text-lg font-mono font-black tracking-widest border-2 border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-slate-900 text-slate-900 uppercase placeholder:normal-case placeholder:font-normal placeholder:text-xs placeholder:tracking-normal placeholder:text-slate-400"
+                  className="w-full px-3.5 py-3 text-sm sm:text-base font-semibold border-2 border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-slate-900 text-slate-900 placeholder:text-xs placeholder:text-slate-400"
                 />
               </div>
               <p className="text-[11px] text-slate-400 mt-1.5">
-                Only teachers whose details exist on the database are authorized to log in.
+                Log in with your official Staff ID or your connected profile email address.
               </p>
             </div>
 

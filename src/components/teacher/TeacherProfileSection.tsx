@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   User,
   GraduationCap,
@@ -8,6 +8,7 @@ import {
   Mail,
   Phone,
   Camera,
+  Upload,
   CheckCircle2,
   AlertCircle,
   Save,
@@ -20,6 +21,7 @@ import {
 } from 'lucide-react';
 import { StaffMember } from '../../types/cbt';
 import { updateTeacherProfile } from '../../services/firebase';
+import { compressImageFile } from '../../services/imageUtils';
 
 interface TeacherProfileSectionProps {
   teacherStaff?: StaffMember | null;
@@ -46,6 +48,8 @@ export const TeacherProfileSection: React.FC<TeacherProfileSectionProps> = ({
   const [phoneNumber, setPhoneNumber] = useState(teacherStaff?.phoneNumber || '');
   const [avatarUrl, setAvatarUrl] = useState(teacherStaff?.avatarUrl || '');
   const [bio, setBio] = useState(teacherStaff?.bio || '');
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Password state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -58,6 +62,21 @@ export const TeacherProfileSection: React.FC<TeacherProfileSectionProps> = ({
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [isSavingPassword, setIsSavingPassword] = useState(false);
   const [profileMessage, setProfileMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+
+  const handleImageFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingImage(true);
+    try {
+      const dataUrl = await compressImageFile(file, 320, 320, 0.85);
+      setAvatarUrl(dataUrl);
+      setProfileMessage({ text: 'Photo ready from your device! Click "Save Profile Changes" to save to your account.', type: 'success' });
+    } catch (err: any) {
+      setProfileMessage({ text: err.message || 'Failed to process selected image file.', type: 'error' });
+    } finally {
+      setUploadingImage(false);
+    }
+  };
 
   if (!teacherStaff) {
     return (
@@ -339,24 +358,60 @@ export const TeacherProfileSection: React.FC<TeacherProfileSectionProps> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center gap-1.5">
-                  <Camera className="w-3.5 h-3.5 text-slate-400" />
-                  <span>Profile Photo URL</span>
+                <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Camera className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Profile Photo</span>
+                  </span>
+                  <span className="text-[10px] text-slate-400">Phone Camera / PC</span>
                 </label>
-                <input
-                  type="url"
-                  placeholder="https://... or choose preset below"
-                  value={avatarUrl}
-                  onChange={(e) => setAvatarUrl(e.target.value)}
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 text-slate-900"
-                />
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    accept="image/*"
+                    onChange={handleImageFileSelect}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadingImage}
+                    className="flex-1 py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-amber-400" />
+                    <span>{uploadingImage ? 'Compressing Image...' : 'Upload Photo (Phone / PC)'}</span>
+                  </button>
+                  {avatarUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setAvatarUrl('')}
+                      className="py-2 px-2.5 bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 rounded-xl text-xs font-bold cursor-pointer"
+                      title="Remove current photo"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                <div className="mt-2">
+                  <input
+                    type="url"
+                    placeholder="Or enter direct photo URL..."
+                    value={avatarUrl.startsWith('data:') ? 'Custom Photo Uploaded from Device' : avatarUrl}
+                    disabled={avatarUrl.startsWith('data:')}
+                    onChange={(e) => setAvatarUrl(e.target.value)}
+                    className="w-full px-3 py-1.5 text-[11px] border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 text-slate-900 disabled:bg-emerald-50 disabled:text-emerald-900 disabled:border-emerald-300 disabled:font-bold"
+                  />
+                </div>
               </div>
             </div>
 
             {/* Quick Preset Avatars */}
             <div>
               <label className="block text-[11px] font-bold text-slate-500 mb-1.5">
-                Choose Faculty Avatar Preset:
+                Or Select Faculty Avatar Preset:
               </label>
               <div className="flex flex-wrap items-center gap-2">
                 {PRESET_AVATARS.map((url, i) => (
@@ -371,15 +426,6 @@ export const TeacherProfileSection: React.FC<TeacherProfileSectionProps> = ({
                     <img src={url} alt={`Preset ${i + 1}`} className="w-full h-full object-cover" />
                   </button>
                 ))}
-                {avatarUrl && (
-                  <button
-                    type="button"
-                    onClick={() => setAvatarUrl('')}
-                    className="text-[10px] text-slate-500 hover:text-rose-600 underline ml-2"
-                  >
-                    Clear Photo
-                  </button>
-                )}
               </div>
             </div>
 

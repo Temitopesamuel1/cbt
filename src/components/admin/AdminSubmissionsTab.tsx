@@ -12,8 +12,9 @@ import {
   GraduationCap,
   Award
 } from 'lucide-react';
-import { Submission, Examination, SchoolClass } from '../../types/cbt';
+import { Submission, Examination, SchoolClass, SchoolSettings } from '../../types/cbt';
 import { deleteSubmission } from '../../services/firebase';
+import { StudentResultView } from '../student/StudentResultView';
 
 interface AdminSubmissionsTabProps {
   submissions: Submission[];
@@ -21,6 +22,7 @@ interface AdminSubmissionsTabProps {
   classes: SchoolClass[];
   onSubmissionsUpdated: () => void;
   showNotification: (text: string, type?: 'success' | 'error') => void;
+  schoolSettings?: SchoolSettings;
 }
 
 export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
@@ -28,11 +30,13 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
   exams,
   classes,
   onSubmissionsUpdated,
-  showNotification
+  showNotification,
+  schoolSettings
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedExamFilter, setSelectedExamFilter] = useState('All');
   const [selectedClassFilter, setSelectedClassFilter] = useState('All');
+  const [viewingSlipSubmission, setViewingSlipSubmission] = useState<Submission | null>(null);
 
   const filtered = submissions.filter(sub => {
     const q = searchQuery.toLowerCase();
@@ -217,14 +221,24 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
                   </td>
 
                   <td className="py-3 px-4 text-right">
-                    <button
-                      onClick={() => handleResetSubmission(sub)}
-                      className="px-2.5 py-1 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1 cursor-pointer ml-auto transition-colors"
-                      title="Reset submission so student can retake exam"
-                    >
-                      <RotateCcw className="w-3 h-3 text-rose-600" />
-                      <span>Reset Retake</span>
-                    </button>
+                    <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        onClick={() => setViewingSlipSubmission(sub)}
+                        className="px-2.5 py-1 text-xs font-bold text-blue-900 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                        title="View and print candidate's official institutional result slip"
+                      >
+                        <Eye className="w-3 h-3 text-blue-700" />
+                        <span>Official Slip</span>
+                      </button>
+                      <button
+                        onClick={() => handleResetSubmission(sub)}
+                        className="px-2 py-1 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                        title="Reset submission so student can retake exam"
+                      >
+                        <RotateCcw className="w-3 h-3 text-rose-600" />
+                        <span>Reset</span>
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))
@@ -232,6 +246,20 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
           </tbody>
         </table>
       </div>
+
+      {/* Official Result Slip Modal for Admin Inspection & Printing */}
+      {viewingSlipSubmission && (
+        <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
+          <div className="relative w-full max-w-5xl max-h-[95vh] overflow-y-auto bg-slate-100 rounded-2xl shadow-2xl border border-slate-300 p-2 sm:p-4">
+            <StudentResultView
+              submission={viewingSlipSubmission}
+              allowReview={true}
+              onReturnToDashboard={() => setViewingSlipSubmission(null)}
+              settings={schoolSettings}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -198,6 +198,7 @@ export interface SchoolSettings {
   allowImmediateResultViewing: boolean;
   studentIdPrefix?: string;
   announcementBanner?: string;
+  schoolLogo?: string;
   isStudentPortalActive?: boolean;
   isTeacherPortalActive?: boolean;
   caWeights?: CaWeightsConfig;

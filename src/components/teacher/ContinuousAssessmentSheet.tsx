@@ -409,11 +409,24 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     <div className="space-y-6 pb-20">
       {/* Printable Institutional Letterhead (Hidden on screen, visible on print) */}
       <div className="hidden print:block border-b-2 border-slate-900 pb-4 mb-6 text-center">
-        <h1 className="text-2xl font-black uppercase tracking-wider">{schoolName || "HONEY'S WORLD HIGH SCHOOL"}</h1>
-        <p className="text-xs font-bold text-slate-800 uppercase tracking-widest mt-0.5">
-          Gaa Ajanaku, Ilorin, Kwara State
-        </p>
-        <h2 className="text-sm font-bold text-slate-700 uppercase tracking-widest mt-1">
+        <div className="flex items-center justify-center gap-3 mb-2">
+          <img
+            src="/school-logo.png"
+            alt="Honey's World High School Crest"
+            className="w-14 h-14 object-contain rounded-full border border-amber-400"
+            onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
+          />
+          <div className="text-left">
+            <h1 className="text-xl font-black uppercase tracking-wider">{schoolName || "HONEY'S WORLD HIGH SCHOOL"}</h1>
+            <p className="text-xs font-bold text-slate-800 uppercase tracking-widest">
+              Gaa Ajanaku, Ilorin, Kwara State
+            </p>
+            <p className="text-[10px] italic text-slate-600">
+              Motto: "Knowledge, Character & Academic Excellence"
+            </p>
+          </div>
+        </div>
+        <h2 className="text-xs font-bold text-slate-700 uppercase tracking-widest mt-1 border-t border-slate-200 pt-1">
           Official Continuous Assessment & Examination Master Grade Sheet
         </h2>
         <div className="flex justify-between items-center text-xs font-mono mt-3 px-2">

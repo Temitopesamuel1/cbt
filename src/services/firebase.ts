@@ -118,64 +118,92 @@ export async function testConnection(): Promise<boolean> {
 // =========================================================================
 export async function fetchAdmins(): Promise<AdminUser[]> {
   const path = 'admins';
+  let admins: AdminUser[] = [];
+
+  // Read local cache first
+  try {
+    const local = localStorage.getItem('prime_edutech_saved_admins');
+    if (local) {
+      const parsed: AdminUser[] = JSON.parse(local);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        admins = [...parsed];
+      }
+    }
+  } catch {}
+
+  // Fetch live from Firestore
   try {
     const snapshot = await getDocs(collection(db, path));
-    let admins: AdminUser[] = [];
     if (!snapshot.empty) {
+      const firestoreAdmins: AdminUser[] = [];
       snapshot.forEach(docSnap => {
-        admins.push({ id: docSnap.id, ...docSnap.data() } as AdminUser);
+        firestoreAdmins.push({ id: docSnap.id, ...docSnap.data() } as AdminUser);
       });
-    }
 
-    // Always ensure the primary Super Admin (fathertemitope@gmail.com) exists
-    const hasMain = admins.some(a => a.email.toLowerCase() === 'fathertemitope@gmail.com');
-    if (!hasMain) {
-      const mainAdmin = DEFAULT_ADMINS[0];
-      await saveAdmin(mainAdmin).catch(() => {});
-      admins = [mainAdmin, ...admins];
-    }
-
-    // Sync to local storage for instant offline fallback
-    try {
-      localStorage.setItem('prime_edutech_saved_admins', JSON.stringify(admins));
-    } catch {}
-
-    return admins;
-  } catch (error) {
-    console.warn('Fallback to local admins:', error);
-    try {
-      const local = localStorage.getItem('prime_edutech_saved_admins');
-      if (local) {
-        return JSON.parse(local);
+      // Merge: Firestore docs take priority, but keep any newly added local admins not yet indexed
+      for (const fAdmin of firestoreAdmins) {
+        const idx = admins.findIndex(
+          a => a.id === fAdmin.id || a.email.toLowerCase() === fAdmin.email.toLowerCase()
+        );
+        if (idx >= 0) {
+          admins[idx] = { ...admins[idx], ...fAdmin };
+        } else {
+          admins.push(fAdmin);
+        }
       }
-    } catch {}
-    return DEFAULT_ADMINS;
+    }
+  } catch (error) {
+    console.warn('Firestore fetchAdmins notice (using cache):', error);
   }
+
+  // Always ensure the primary Super Admin (fathertemitope@gmail.com) exists
+  const hasMain = admins.some(a => a.email.toLowerCase() === 'fathertemitope@gmail.com');
+  if (!hasMain) {
+    const mainAdmin = DEFAULT_ADMINS[0];
+    admins = [mainAdmin, ...admins];
+    setDoc(doc(db, 'admins', mainAdmin.id), mainAdmin, { merge: true }).catch(() => {});
+  }
+
+  // Ensure all local admins exist in Firestore
+  for (const a of admins) {
+    setDoc(doc(db, 'admins', a.id), a, { merge: true }).catch(() => {});
+  }
+
+  // Update persistent local cache
+  try {
+    localStorage.setItem('prime_edutech_saved_admins', JSON.stringify(admins));
+  } catch {}
+
+  return admins;
 }
 
 export async function saveAdmin(admin: AdminUser): Promise<void> {
-  const adminId = admin.id || `admin_${admin.email.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-  const path = `admins/${adminId}`;
+  const cleanEmail = admin.email.trim().toLowerCase();
+  const adminId = admin.id || `admin_${cleanEmail.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
   const dataToSave: AdminUser = {
     ...admin,
     id: adminId,
-    email: admin.email.trim().toLowerCase(),
+    email: cleanEmail,
     passcode: admin.passcode || 'admin2025'
   };
 
-  try {
-    await setDoc(doc(db, 'admins', adminId), dataToSave, { merge: true });
-  } catch (error) {
-    console.warn('Firestore write warning for admin:', error);
-  }
-
-  // Always update local cache
+  // 1. Immediately update localStorage so state reflects without delay
   try {
     const stored = localStorage.getItem('prime_edutech_saved_admins');
     const list: AdminUser[] = stored ? JSON.parse(stored) : [...DEFAULT_ADMINS];
-    const filtered = list.filter(a => a.id !== adminId && a.email.toLowerCase() !== dataToSave.email.toLowerCase());
-    localStorage.setItem('prime_edutech_saved_admins', JSON.stringify([dataToSave, ...filtered]));
+    const filtered = list.filter(
+      a => a.id !== adminId && a.email.toLowerCase() !== dataToSave.email.toLowerCase()
+    );
+    const updated = [dataToSave, ...filtered];
+    localStorage.setItem('prime_edutech_saved_admins', JSON.stringify(updated));
   } catch {}
+
+  // 2. Persist directly to Firestore
+  try {
+    await setDoc(doc(db, 'admins', adminId), dataToSave, { merge: true });
+  } catch (error) {
+    console.warn('Firestore setDoc warning for admin:', error);
+  }
 }
 
 export async function deleteAdmin(adminId: string): Promise<void> {
@@ -186,13 +214,7 @@ export async function deleteAdmin(adminId: string): Promise<void> {
     throw new Error('The Chief Super Administrator (fathertemitope@gmail.com) is permanently protected and cannot be deleted.');
   }
 
-  const path = `admins/${adminId}`;
-  try {
-    await deleteDoc(doc(db, 'admins', adminId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
-  }
-
+  // Update localStorage immediately
   try {
     const stored = localStorage.getItem('prime_edutech_saved_admins');
     if (stored) {
@@ -200,6 +222,13 @@ export async function deleteAdmin(adminId: string): Promise<void> {
       localStorage.setItem('prime_edutech_saved_admins', JSON.stringify(list.filter(a => a.id !== adminId)));
     }
   } catch {}
+
+  // Delete from Firestore
+  try {
+    await deleteDoc(doc(db, 'admins', adminId));
+  } catch (error) {
+    console.warn('Firestore delete warning for admin:', error);
+  }
 }
 
 export async function verifyAdminLogin(
@@ -266,20 +295,55 @@ export async function verifyAdminLogin(
 // Faculty & Staff Management
 export async function fetchStaffMembers(): Promise<StaffMember[]> {
   const path = 'teachers';
+  let staff: StaffMember[] = [];
+
+  // Read local cache first
+  try {
+    const local = localStorage.getItem('prime_edutech_saved_teachers');
+    if (local) {
+      const parsed = JSON.parse(local);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        staff = [...parsed];
+      }
+    }
+  } catch {}
+
+  // Fetch from Firestore
   try {
     const snapshot = await getDocs(collection(db, path));
-    if (snapshot.empty) {
-      return DEFAULT_STAFF;
+    if (!snapshot.empty) {
+      const firestoreStaff: StaffMember[] = [];
+      snapshot.forEach(docSnap => {
+        firestoreStaff.push({ id: docSnap.id, ...docSnap.data() } as StaffMember);
+      });
+
+      // Merge: Firestore takes precedence, but keep local additions not yet indexed
+      for (const fStaff of firestoreStaff) {
+        const idx = staff.findIndex(
+          s => s.id === fStaff.id || (s.uniqueId && s.uniqueId.toUpperCase() === fStaff.uniqueId?.toUpperCase())
+        );
+        if (idx >= 0) {
+          staff[idx] = { ...staff[idx], ...fStaff };
+        } else {
+          staff.push(fStaff);
+        }
+      }
+    } else if (staff.length === 0) {
+      staff = [...DEFAULT_STAFF];
     }
-    const staff: StaffMember[] = [];
-    snapshot.forEach(docSnap => {
-      staff.push({ id: docSnap.id, ...docSnap.data() } as StaffMember);
-    });
-    return staff;
   } catch (error) {
     console.warn('Fallback to default staff roster:', error);
-    return DEFAULT_STAFF;
+    if (staff.length === 0) {
+      staff = [...DEFAULT_STAFF];
+    }
   }
+
+  // Update local cache
+  try {
+    localStorage.setItem('prime_edutech_saved_teachers', JSON.stringify(staff));
+  } catch {}
+
+  return staff;
 }
 
 export async function saveStaffMember(staff: StaffMember): Promise<void> {
@@ -287,6 +351,21 @@ export async function saveStaffMember(staff: StaffMember): Promise<void> {
   if (!staff.uniqueId || staff.uniqueId.trim() === '') {
     staff.uniqueId = generateStaffUniqueId();
   }
+
+  // Save to local cache immediately
+  try {
+    const local = localStorage.getItem('prime_edutech_saved_teachers');
+    let list: StaffMember[] = local ? JSON.parse(local) : [...DEFAULT_STAFF];
+    const idx = list.findIndex(s => s.id === staff.id || s.uniqueId === staff.uniqueId);
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...staff };
+    } else {
+      list.push(staff);
+    }
+    localStorage.setItem('prime_edutech_saved_teachers', JSON.stringify(list));
+  } catch {}
+
+  // Persist to Firestore
   try {
     await setDoc(doc(db, 'teachers', staff.id), staff, { merge: true });
   } catch (error) {
@@ -296,6 +375,15 @@ export async function saveStaffMember(staff: StaffMember): Promise<void> {
 
 export async function deleteStaffMember(staffId: string): Promise<void> {
   const path = `teachers/${staffId}`;
+  try {
+    const local = localStorage.getItem('prime_edutech_saved_teachers');
+    if (local) {
+      const list: StaffMember[] = JSON.parse(local);
+      const filtered = list.filter(s => s.id !== staffId);
+      localStorage.setItem('prime_edutech_saved_teachers', JSON.stringify(filtered));
+    }
+  } catch {}
+
   try {
     await deleteDoc(doc(db, 'teachers', staffId));
   } catch (error) {
@@ -311,27 +399,43 @@ export interface StaffAuthResult {
   isFirstTime?: boolean;
 }
 
-// Teacher Authentication via Unique Staff ID & Optional Password
+// Teacher Authentication via Unique Staff ID or Registered Email & Optional Password
 export async function authenticateStaffWithCredentials(
-  rawUniqueId: string,
+  rawInput: string,
   providedPassword?: string
 ): Promise<StaffAuthResult> {
-  const cleanId = rawUniqueId.trim().toUpperCase();
-  if (!cleanId) {
-    return { success: false, error: 'Please enter your unique Staff ID.' };
+  const trimmed = rawInput.trim();
+  if (!trimmed) {
+    return { success: false, error: 'Please enter your unique Staff ID or registered Email address.' };
   }
+
+  const cleanUpper = trimmed.toUpperCase();
+  const cleanLower = trimmed.toLowerCase();
 
   let matchedStaff: StaffMember | null = null;
   const path = 'teachers';
 
+  // 1. Check local cache first for fast response
   try {
-    const qCode = query(collection(db, path), where('uniqueId', '==', cleanId));
+    const local = localStorage.getItem('prime_edutech_saved_teachers');
+    if (local) {
+      const list: StaffMember[] = JSON.parse(local);
+      matchedStaff = list.find(
+        s => (s.uniqueId && s.uniqueId.toUpperCase() === cleanUpper) ||
+             (s.email && s.email.toLowerCase() === cleanLower)
+      ) || null;
+    }
+  } catch {}
+
+  // 2. Query Firestore if not found or to get most up to date password
+  try {
+    const qCode = query(collection(db, path), where('uniqueId', '==', cleanUpper));
     const snapCode = await getDocs(qCode);
     if (!snapCode.empty) {
       const docSnap = snapCode.docs[0];
       matchedStaff = { ...(docSnap.data() as StaffMember), id: docSnap.id };
     } else {
-      const qEmail = query(collection(db, path), where('email', '==', rawUniqueId.trim().toLowerCase()));
+      const qEmail = query(collection(db, path), where('email', '==', cleanLower));
       const snapEmail = await getDocs(qEmail);
       if (!snapEmail.empty) {
         const docSnap = snapEmail.docs[0];
@@ -342,10 +446,11 @@ export async function authenticateStaffWithCredentials(
     console.warn('Teacher lookup from Firestore failed, checking local default staff:', err);
   }
 
+  // 3. Fallback to default staff roster
   if (!matchedStaff) {
     const local = DEFAULT_STAFF.find(
-      s => (s.uniqueId && s.uniqueId.toUpperCase() === cleanId) ||
-           s.email.toLowerCase() === rawUniqueId.trim().toLowerCase()
+      s => (s.uniqueId && s.uniqueId.toUpperCase() === cleanUpper) ||
+           (s.email && s.email.toLowerCase() === cleanLower)
     );
     if (local) {
       matchedStaff = { ...local };
@@ -355,7 +460,7 @@ export async function authenticateStaffWithCredentials(
   if (!matchedStaff) {
     return {
       success: false,
-      error: `Access Denied: Staff ID "${cleanId}" does not exist in the faculty database. Only registered teachers created by the Administrator can log in.`
+      error: `Access Denied: Staff ID or Email "${trimmed}" was not found in the faculty database. Please verify your credentials with the Administrator.`
     };
   }
 
@@ -633,6 +738,20 @@ export async function deleteQuestion(examId: string, questionId: string): Promis
 // Student Management methods
 export async function fetchStudents(classGrade?: string): Promise<Student[]> {
   const path = 'students';
+  let students: Student[] = [];
+
+  // Read local cache first
+  try {
+    const local = localStorage.getItem('prime_edutech_saved_students_roster');
+    if (local) {
+      const parsed = JSON.parse(local);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        students = [...parsed];
+      }
+    }
+  } catch {}
+
+  // Fetch from Firestore
   try {
     let q;
     if (classGrade) {
@@ -641,29 +760,64 @@ export async function fetchStudents(classGrade?: string): Promise<Student[]> {
       q = collection(db, path);
     }
     const snapshot = await getDocs(q);
-    if (snapshot.empty) {
-      return classGrade ? DEFAULT_STUDENTS.filter(s => s.classGrade === classGrade) : DEFAULT_STUDENTS;
+    if (!snapshot.empty) {
+      const firestoreStudents: Student[] = [];
+      snapshot.forEach(docSnap => {
+        const data = docSnap.data() as Student;
+        const accessCode = data.accessCode || `PRM-${docSnap.id.slice(-4).toUpperCase()}`;
+        firestoreStudents.push({ ...data, id: docSnap.id, accessCode });
+      });
+
+      // Merge: Firestore docs take priority, but retain local additions
+      for (const fStu of firestoreStudents) {
+        const idx = students.findIndex(s => s.id === fStu.id || s.admissionNumber.toUpperCase() === fStu.admissionNumber.toUpperCase());
+        if (idx >= 0) {
+          students[idx] = { ...students[idx], ...fStu };
+        } else {
+          students.push(fStu);
+        }
+      }
+    } else if (students.length === 0) {
+      students = [...DEFAULT_STUDENTS];
     }
-    const students: Student[] = [];
-    snapshot.forEach(docSnap => {
-      const data = docSnap.data() as Student;
-      // Ensure accessCode is present
-      const accessCode = data.accessCode || `PRM-${docSnap.id.slice(-4).toUpperCase()}`;
-      students.push({ ...data, id: docSnap.id, accessCode });
-    });
-    return students;
   } catch (error) {
     console.warn('Fallback to default students directory:', error);
-    return classGrade ? DEFAULT_STUDENTS.filter(s => s.classGrade === classGrade) : DEFAULT_STUDENTS;
+    if (students.length === 0) {
+      students = [...DEFAULT_STUDENTS];
+    }
   }
+
+  // Update local cache
+  try {
+    localStorage.setItem('prime_edutech_saved_students_roster', JSON.stringify(students));
+  } catch {}
+
+  if (classGrade) {
+    return students.filter(s => s.classGrade === classGrade);
+  }
+  return students;
 }
 
 export async function saveStudent(student: Student): Promise<void> {
   const path = `students/${student.id}`;
-  // Automatically generate unique student access code if absent
   if (!student.accessCode || student.accessCode.trim() === '') {
     student.accessCode = generateStudentAccessCode();
   }
+
+  // Save to local cache immediately
+  try {
+    const local = localStorage.getItem('prime_edutech_saved_students_roster');
+    let list: Student[] = local ? JSON.parse(local) : [...DEFAULT_STUDENTS];
+    const idx = list.findIndex(s => s.id === student.id || s.admissionNumber.toUpperCase() === student.admissionNumber.toUpperCase());
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...student };
+    } else {
+      list.push(student);
+    }
+    localStorage.setItem('prime_edutech_saved_students_roster', JSON.stringify(list));
+  } catch {}
+
+  // Persist to Firestore
   try {
     await setDoc(doc(db, 'students', student.id), student, { merge: true });
   } catch (error) {
@@ -673,6 +827,15 @@ export async function saveStudent(student: Student): Promise<void> {
 
 export async function deleteStudent(studentId: string): Promise<void> {
   const path = `students/${studentId}`;
+  try {
+    const local = localStorage.getItem('prime_edutech_saved_students_roster');
+    if (local) {
+      const list: Student[] = JSON.parse(local);
+      const filtered = list.filter(s => s.id !== studentId);
+      localStorage.setItem('prime_edutech_saved_students_roster', JSON.stringify(filtered));
+    }
+  } catch {}
+
   try {
     await deleteDoc(doc(db, 'students', studentId));
   } catch (error) {

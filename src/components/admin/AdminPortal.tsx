@@ -27,7 +27,8 @@ import {
   Sparkles,
   ShieldCheck,
   Sliders,
-  CheckSquare
+  CheckSquare,
+  Camera
 } from 'lucide-react';
 import {
   StaffMember,
@@ -56,6 +57,7 @@ import {
   fetchSubmissions,
   fetchAdmins
 } from '../../services/firebase';
+import { compressImageFile } from '../../services/imageUtils';
 import { StaffSlipsModal } from './StaffSlipsModal';
 import { StudentSlipsModal } from '../teacher/StudentSlipsModal';
 import { StudentBatchUploadModal } from '../teacher/StudentBatchUploadModal';
@@ -140,6 +142,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     courseOfStudy: '',
     phoneNumber: '',
     password: '',
+    avatarUrl: '',
     assignedSubjectIds: [] as string[],
     assignedClasses: [] as string[]
   });
@@ -153,7 +156,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     accessCode: '',
     academicSession: '2025/2026',
     email: '',
-    password: ''
+    password: '',
+    passportUrl: ''
   });
 
   // Load all institutional data
@@ -214,6 +218,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       courseOfStudy: '',
       phoneNumber: '',
       password: '',
+      avatarUrl: '',
       assignedSubjectIds: subjects.length > 0 ? [subjects[0].id] : [],
       assignedClasses: classes.length > 0 ? [classes[0].code] : ['SS 1']
     });
@@ -233,6 +238,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       courseOfStudy: staff.courseOfStudy || '',
       phoneNumber: staff.phoneNumber || '',
       password: staff.password || '',
+      avatarUrl: staff.avatarUrl || '',
       assignedSubjectIds: staff.assignedSubjectIds || [],
       assignedClasses: staff.assignedClasses || []
     });
@@ -265,6 +271,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       courseOfStudy: staffForm.courseOfStudy.trim(),
       phoneNumber: staffForm.phoneNumber.trim(),
       password: staffForm.password.trim() || undefined,
+      avatarUrl: staffForm.avatarUrl.trim() || undefined,
       createdAt: editingStaff ? editingStaff.createdAt : new Date().toISOString()
     };
 
@@ -309,7 +316,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       accessCode: generateStudentAccessCode(existing),
       academicSession: settings.academicSession,
       email: '',
-      password: ''
+      password: '',
+      passportUrl: ''
     });
     setEditingStudent(null);
     setShowAddStudentModal(true);
@@ -325,7 +333,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       accessCode: student.accessCode || '',
       academicSession: student.academicSession || settings.academicSession,
       email: student.email || '',
-      password: student.password || ''
+      password: student.password || '',
+      passportUrl: student.passportUrl || ''
     });
     setShowAddStudentModal(true);
   };
@@ -351,6 +360,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       status: 'active',
       email: studentForm.email.trim().toLowerCase() || undefined,
       password: studentForm.password.trim() || undefined,
+      passportUrl: studentForm.passportUrl.trim() || undefined,
       registeredAt: editingStudent ? editingStudent.registeredAt : new Date().toISOString(),
       accessCode: code
     };
@@ -758,9 +768,24 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     ) : (
                       filteredStaff.map((staff) => (
                         <tr key={staff.id} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="py-3.5 px-4 font-bold text-slate-900">
-                            <div>{staff.fullName}</div>
-                            <div className="text-[11px] text-slate-400 font-mono font-normal">{staff.email}</div>
+                          <td className="py-3 px-4 font-bold text-slate-900">
+                            <div className="flex items-center gap-3">
+                              {staff.avatarUrl ? (
+                                <img
+                                  src={staff.avatarUrl}
+                                  alt={staff.fullName}
+                                  className="w-9 h-9 rounded-xl object-cover border border-slate-300 shadow-xs shrink-0"
+                                />
+                              ) : (
+                                <div className="w-9 h-9 rounded-xl bg-slate-900 text-amber-300 font-bold text-xs flex items-center justify-center shrink-0">
+                                  {staff.fullName.charAt(0)}
+                                </div>
+                              )}
+                              <div>
+                                <div className="leading-tight">{staff.fullName}</div>
+                                <div className="text-[11px] text-slate-400 font-mono font-normal">{staff.email}</div>
+                              </div>
+                            </div>
                           </td>
                           <td className="py-3.5 px-4">
                             <div className="inline-flex items-center gap-1.5 bg-slate-900 text-amber-300 font-mono font-black text-xs px-2.5 py-1 rounded-lg shadow-xs border border-slate-800">
@@ -933,9 +958,24 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     ) : (
                       filteredStudents.map((stu) => (
                         <tr key={stu.id} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="py-3.5 px-4 font-bold text-slate-900">
-                            <div>{stu.fullName}</div>
-                            {stu.email && <div className="text-[10px] text-slate-400 font-mono">{stu.email}</div>}
+                          <td className="py-3 px-4 font-bold text-slate-900">
+                            <div className="flex items-center gap-3">
+                              {stu.passportUrl ? (
+                                <img
+                                  src={stu.passportUrl}
+                                  alt={stu.fullName}
+                                  className="w-9 h-9 rounded-xl object-cover border border-slate-300 shadow-xs shrink-0"
+                                />
+                              ) : (
+                                <div className="w-9 h-9 rounded-xl bg-blue-900 text-white font-bold text-xs flex items-center justify-center shrink-0">
+                                  {stu.firstName.charAt(0)}{stu.surname.charAt(0)}
+                                </div>
+                              )}
+                              <div>
+                                <div className="leading-tight">{stu.fullName}</div>
+                                {stu.email && <div className="text-[10px] text-slate-400 font-mono">{stu.email}</div>}
+                              </div>
+                            </div>
                           </td>
                           <td className="py-3.5 px-4">
                             <div className="inline-flex items-center gap-1.5 bg-blue-950 text-blue-300 font-mono font-black text-xs px-2.5 py-1 rounded-lg border border-blue-800">
@@ -1016,6 +1056,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             classes={classes}
             settings={settings}
             showNotification={showNotification}
+            onRefreshData={loadData}
           />
         )}
 
@@ -1027,6 +1068,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             classes={classes}
             onSubmissionsUpdated={loadData}
             showNotification={showNotification}
+            schoolSettings={settings}
           />
         )}
       </main>
@@ -1077,6 +1119,58 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })}
                   className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900"
                 />
+              </div>
+
+              {/* Staff Photo Upload */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Camera className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Staff Photograph (Phone / Computer)</span>
+                  </span>
+                  {staffForm.avatarUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setStaffForm({ ...staffForm, avatarUrl: '' })}
+                      className="text-[10px] text-rose-600 hover:underline cursor-pointer"
+                    >
+                      Remove Photo
+                    </button>
+                  )}
+                </label>
+                <div className="flex items-center gap-3">
+                  {staffForm.avatarUrl ? (
+                    <img
+                      src={staffForm.avatarUrl}
+                      alt="Staff Preview"
+                      className="w-12 h-12 rounded-xl object-cover border border-slate-300 shadow-xs shrink-0"
+                    />
+                  ) : (
+                    <div className="w-12 h-12 rounded-xl bg-slate-100 border border-dashed border-slate-300 flex items-center justify-center text-slate-400 shrink-0">
+                      <Camera className="w-5 h-5" />
+                    </div>
+                  )}
+                  <label className="flex-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-xs">
+                    <Upload className="w-3.5 h-3.5 text-blue-900" />
+                    <span>{staffForm.avatarUrl ? 'Change Photo (Phone / PC)' : 'Upload Picture (Phone / PC)'}</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          try {
+                            const compressed = await compressImageFile(file, 320, 320, 0.85);
+                            setStaffForm(prev => ({ ...prev, avatarUrl: compressed }));
+                          } catch (err: any) {
+                            showNotification(err.message || 'Image processing failed', 'error');
+                          }
+                        }
+                      }}
+                    />
+                  </label>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -1325,6 +1419,58 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   onChange={(e) => setStudentForm({ ...studentForm, admissionNumber: e.target.value.toUpperCase() })}
                   className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-mono font-bold text-slate-900"
                 />
+              </div>
+
+              {/* Student Passport Photo Upload */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Camera className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Candidate Passport (Phone / Computer)</span>
+                  </span>
+                  {studentForm.passportUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setStudentForm({ ...studentForm, passportUrl: '' })}
+                      className="text-[10px] text-rose-600 hover:underline cursor-pointer"
+                    >
+                      Remove Photo
+                    </button>
+                  )}
+                </label>
+                <div className="flex items-center gap-3">
+                  {studentForm.passportUrl ? (
+                    <img
+                      src={studentForm.passportUrl}
+                      alt="Student Preview"
+                      className="w-12 h-12 rounded-xl object-cover border border-slate-300 shadow-xs shrink-0"
+                    />
+                  ) : (
+                    <div className="w-12 h-12 rounded-xl bg-slate-100 border border-dashed border-slate-300 flex items-center justify-center text-slate-400 shrink-0">
+                      <Camera className="w-5 h-5" />
+                    </div>
+                  )}
+                  <label className="flex-1 px-3 py-2 bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-950 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-xs">
+                    <Upload className="w-3.5 h-3.5 text-blue-800" />
+                    <span>{studentForm.passportUrl ? 'Change Passport (Phone / PC)' : 'Upload Passport (Phone / PC)'}</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          try {
+                            const compressed = await compressImageFile(file, 320, 320, 0.85);
+                            setStudentForm(prev => ({ ...prev, passportUrl: compressed }));
+                          } catch (err: any) {
+                            showNotification(err.message || 'Image processing failed', 'error');
+                          }
+                        }
+                      }}
+                    />
+                  </label>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">

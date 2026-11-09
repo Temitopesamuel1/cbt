@@ -221,10 +221,16 @@ export const StudentCumulativeTranscript: React.FC<StudentCumulativeTranscriptPr
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-10 space-y-8 print:p-0 print:border-none print:shadow-none">
         {/* University Header for Transcript */}
         <div className="border-b-2 border-slate-900 pb-6 text-center space-y-2">
-          <div className="flex items-center justify-center gap-3">
-            <div className="w-12 h-12 rounded-xl bg-blue-900 text-white flex items-center justify-center font-black text-xl shadow-xs">
-              HW
-            </div>
+          <div className="flex items-center justify-center gap-4">
+            <img
+              src="/school-logo.png"
+              alt="Honey's World High School Crest"
+              className="w-16 h-16 object-contain rounded-full shadow-xs border border-amber-300/40 shrink-0 bg-white p-0.5"
+              onError={(e) => {
+                // fallback to styled initials if image fails
+                (e.currentTarget as HTMLElement).style.display = 'none';
+              }}
+            />
             <div className="text-left">
               <h1 className="text-lg sm:text-xl font-black uppercase tracking-wider text-slate-900">
                 HONEY'S WORLD HIGH SCHOOL

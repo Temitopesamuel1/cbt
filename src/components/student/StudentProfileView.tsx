@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { Student } from '../../types/cbt';
 import { updateStudentProfile } from '../../services/firebase';
+import { compressImageFile } from '../../services/imageUtils';
 
 interface StudentProfileViewProps {
   student: Student;
@@ -67,23 +68,17 @@ export const StudentProfileView: React.FC<StudentProfileViewProps> = ({
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedAdm, setCopiedAdm] = useState(false);
 
-  // File upload handler for custom passport
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // File upload handler for custom passport from phone or computer
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 2 * 1024 * 1024) {
-      alert('Passport image must be less than 2MB.');
-      return;
+    try {
+      const dataUrl = await compressImageFile(file, 320, 320, 0.85);
+      setPassportUrl(dataUrl);
+    } catch (err: any) {
+      alert(err.message || 'Unable to process passport image file.');
     }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setPassportUrl(reader.result);
-      }
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleCopy = (text: string, type: 'code' | 'adm') => {
