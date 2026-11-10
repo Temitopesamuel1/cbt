@@ -35,7 +35,9 @@ import {
   StaffMember,
   generateStaffUniqueId,
   StudentAssessmentRecord,
-  AdminUser
+  AdminUser,
+  ChatMessage,
+  LessonNote
 } from '../types/cbt';
 import {
   DEFAULT_SCHOOL_CLASSES,
@@ -639,6 +641,17 @@ export async function saveSchoolSettings(settings: SchoolSettings): Promise<void
 // Examination Service methods
 export async function fetchExaminations(filterPublishedOnly = false): Promise<Examination[]> {
   const path = 'examinations';
+  // Read local cache first for instant speed
+  let cached: Examination[] = [];
+  try {
+    const raw = localStorage.getItem('prime_cbt_saved_examinations');
+    if (raw) {
+      cached = JSON.parse(raw);
+    }
+  } catch (e) {
+    // ignore
+  }
+
   try {
     let q;
     if (filterPublishedOnly) {
@@ -647,91 +660,402 @@ export async function fetchExaminations(filterPublishedOnly = false): Promise<Ex
       q = collection(db, path);
     }
     const snapshot = await getDocs(q);
-    if (snapshot.empty) {
-      return filterPublishedOnly
-        ? DEFAULT_EXAMINATIONS.filter(e => e.status === 'published')
-        : DEFAULT_EXAMINATIONS;
+    if (!snapshot.empty) {
+      const exams: Examination[] = [];
+      snapshot.forEach(docSnap => {
+        exams.push({ id: docSnap.id, ...docSnap.data() } as Examination);
+      });
+      // Merge with local cache
+      const mergedMap: Record<string, Examination> = {};
+      DEFAULT_EXAMINATIONS.forEach(e => { mergedMap[e.id] = e; });
+      cached.forEach(e => { mergedMap[e.id] = e; });
+      exams.forEach(e => { mergedMap[e.id] = e; });
+      const finalExams = Object.values(mergedMap).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(finalExams));
+      return filterPublishedOnly ? finalExams.filter(e => e.status === 'published') : finalExams;
     }
-    const exams: Examination[] = [];
-    snapshot.forEach(docSnap => {
-      exams.push({ id: docSnap.id, ...docSnap.data() } as Examination);
-    });
-    return exams.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   } catch (error) {
-    console.warn('Fallback to default examinations:', error);
-    return filterPublishedOnly
-      ? DEFAULT_EXAMINATIONS.filter(e => e.status === 'published')
-      : DEFAULT_EXAMINATIONS;
+    console.warn('Network fallback for examinations:', error);
   }
+
+  // Fallback to cache + defaults
+  const mergedMap: Record<string, Examination> = {};
+  DEFAULT_EXAMINATIONS.forEach(e => { mergedMap[e.id] = e; });
+  cached.forEach(e => { mergedMap[e.id] = e; });
+  const finalExams = Object.values(mergedMap).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  return filterPublishedOnly ? finalExams.filter(e => e.status === 'published') : finalExams;
 }
 
 export async function getExaminationById(examId: string): Promise<Examination | null> {
   const path = `examinations/${examId}`;
   try {
+    const raw = localStorage.getItem('prime_cbt_saved_examinations');
+    if (raw) {
+      const list: Examination[] = JSON.parse(raw);
+      const match = list.find(e => e.id === examId);
+      if (match) return match;
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  try {
     const snap = await getDoc(doc(db, 'examinations', examId));
     if (snap.exists()) {
       return { id: snap.id, ...snap.data() } as Examination;
     }
-    const defaultMatch = DEFAULT_EXAMINATIONS.find(e => e.id === examId);
-    return defaultMatch || null;
   } catch (error) {
-    const defaultMatch = DEFAULT_EXAMINATIONS.find(e => e.id === examId);
-    return defaultMatch || null;
+    // ignore
   }
+
+  return DEFAULT_EXAMINATIONS.find(e => e.id === examId) || null;
 }
 
 export async function saveExamination(exam: Examination): Promise<void> {
+  // 1. Immediately mirror to localStorage so UI never blocks or fails
+  try {
+    const raw = localStorage.getItem('prime_cbt_saved_examinations');
+    const list: Examination[] = raw ? JSON.parse(raw) : [...DEFAULT_EXAMINATIONS];
+    const filtered = list.filter(e => e.id !== exam.id);
+    const updated = [exam, ...filtered];
+    localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(updated));
+  } catch (err) {
+    console.warn('LocalStorage exam cache error:', err);
+  }
+
+  // 2. Sync to Firestore in background
   const path = `examinations/${exam.id}`;
   try {
     await setDoc(doc(db, 'examinations', exam.id), exam, { merge: true });
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    console.warn('Firestore examination write fallback:', error);
   }
 }
 
 export async function deleteExamination(examId: string): Promise<void> {
+  // Update localStorage immediately
+  try {
+    const raw = localStorage.getItem('prime_cbt_saved_examinations');
+    if (raw) {
+      const list: Examination[] = JSON.parse(raw);
+      localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(list.filter(e => e.id !== examId)));
+    }
+  } catch (e) {
+    // ignore
+  }
+
   const path = `examinations/${examId}`;
   try {
     await deleteDoc(doc(db, 'examinations', examId));
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    console.warn('Firestore examination delete error:', error);
   }
+}
+
+// Mass Delete Examinations
+export async function deleteExaminationsBatch(examIds: string[]): Promise<void> {
+  if (!examIds || examIds.length === 0) return;
+  const idSet = new Set(examIds);
+  try {
+    const raw = localStorage.getItem('prime_cbt_saved_examinations');
+    if (raw) {
+      const list: Examination[] = JSON.parse(raw);
+      localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(list.filter(e => !idSet.has(e.id))));
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  await Promise.all(
+    examIds.map(async (id) => {
+      try {
+        await deleteDoc(doc(db, 'examinations', id));
+      } catch (e) {
+        console.warn('Batch delete error for exam:', id, e);
+      }
+    })
+  );
 }
 
 // Question Service methods
 export async function fetchQuestions(examId: string): Promise<Question[]> {
   const path = `examinations/${examId}/questions`;
+  // Read local cache first
+  try {
+    const raw = localStorage.getItem(`prime_cbt_questions_${examId}`);
+    if (raw) {
+      const parsed: Question[] = JSON.parse(raw);
+      if (parsed.length > 0) return parsed.sort((a, b) => a.questionNumber - b.questionNumber);
+    }
+  } catch (e) {
+    // ignore
+  }
+
   try {
     const snapshot = await getDocs(collection(db, 'examinations', examId, 'questions'));
-    if (snapshot.empty) {
-      return DEFAULT_QUESTIONS_MAP[examId] || [];
+    if (!snapshot.empty) {
+      const questions: Question[] = [];
+      snapshot.forEach(docSnap => {
+        questions.push({ id: docSnap.id, ...docSnap.data() } as Question);
+      });
+      const sorted = questions.sort((a, b) => a.questionNumber - b.questionNumber);
+      localStorage.setItem(`prime_cbt_questions_${examId}`, JSON.stringify(sorted));
+      return sorted;
     }
-    const questions: Question[] = [];
-    snapshot.forEach(docSnap => {
-      questions.push({ id: docSnap.id, ...docSnap.data() } as Question);
-    });
-    return questions.sort((a, b) => a.questionNumber - b.questionNumber);
   } catch (error) {
     console.warn('Fallback to default questions for exam:', examId);
-    return DEFAULT_QUESTIONS_MAP[examId] || [];
   }
+
+  const defaults = DEFAULT_QUESTIONS_MAP[examId] || [];
+  return defaults;
 }
 
 export async function saveQuestion(examId: string, question: Question): Promise<void> {
+  // Update local cache
+  try {
+    const raw = localStorage.getItem(`prime_cbt_questions_${examId}`);
+    const list: Question[] = raw ? JSON.parse(raw) : (DEFAULT_QUESTIONS_MAP[examId] || []);
+    const filtered = list.filter(q => q.id !== question.id);
+    const updated = [...filtered, question].sort((a, b) => a.questionNumber - b.questionNumber);
+    localStorage.setItem(`prime_cbt_questions_${examId}`, JSON.stringify(updated));
+  } catch (e) {
+    // ignore
+  }
+
   const path = `examinations/${examId}/questions/${question.id}`;
   try {
     await setDoc(doc(db, 'examinations', examId, 'questions', question.id), question, { merge: true });
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    console.warn('Firestore question write fallback:', error);
   }
 }
 
+// Batch save questions with explicit Replace vs Append control
+export async function saveQuestionsBatch(examId: string, newQuestions: Question[], replaceExisting = true): Promise<void> {
+  let finalList: Question[] = [];
+  try {
+    if (replaceExisting) {
+      finalList = [...newQuestions];
+    } else {
+      const raw = localStorage.getItem(`prime_cbt_questions_${examId}`);
+      const list: Question[] = raw ? JSON.parse(raw) : (DEFAULT_QUESTIONS_MAP[examId] || []);
+      finalList = [...list, ...newQuestions];
+    }
+    finalList.sort((a, b) => a.questionNumber - b.questionNumber);
+    localStorage.setItem(`prime_cbt_questions_${examId}`, JSON.stringify(finalList));
+  } catch (e) {
+    // ignore
+  }
+
+  // Update exam's totalQuestions in examination record
+  try {
+    const rawExams = localStorage.getItem('prime_cbt_saved_examinations');
+    if (rawExams) {
+      const exams: Examination[] = JSON.parse(rawExams);
+      const target = exams.find(e => e.id === examId);
+      if (target) {
+        target.totalQuestions = finalList.length;
+        localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(exams));
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // Parallel write to Firestore
+  await Promise.all(
+    newQuestions.map(async (q) => {
+      try {
+        await setDoc(doc(db, 'examinations', examId, 'questions', q.id), q, { merge: true });
+      } catch (err) {
+        console.warn('Firestore batch question write error:', err);
+      }
+    })
+  );
+}
+
 export async function deleteQuestion(examId: string, questionId: string): Promise<void> {
+  try {
+    const raw = localStorage.getItem(`prime_cbt_questions_${examId}`);
+    if (raw) {
+      const list: Question[] = JSON.parse(raw);
+      localStorage.setItem(`prime_cbt_questions_${examId}`, JSON.stringify(list.filter(q => q.id !== questionId)));
+    }
+  } catch (e) {
+    // ignore
+  }
+
   const path = `examinations/${examId}/questions/${questionId}`;
   try {
     await deleteDoc(doc(db, 'examinations', examId, 'questions', questionId));
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    console.warn('Firestore question delete error:', error);
+  }
+}
+
+// -------------------------------------------------------------
+// Campus Communications & Chat Group Services
+// -------------------------------------------------------------
+export async function fetchChatMessages(channelId: string): Promise<ChatMessage[]> {
+  const localKey = `prime_cbt_chat_${channelId}`;
+  let cached: ChatMessage[] = [];
+  try {
+    const raw = localStorage.getItem(localKey);
+    if (raw) cached = JSON.parse(raw);
+  } catch (e) {
+    // ignore
+  }
+
+  try {
+    const q = query(collection(db, 'chat_messages'), where('channelId', '==', channelId));
+    const snapshot = await getDocs(q);
+    if (!snapshot.empty) {
+      const msgs: ChatMessage[] = [];
+      snapshot.forEach(docSnap => {
+        msgs.push({ id: docSnap.id, ...docSnap.data() } as ChatMessage);
+      });
+      const mergedMap: Record<string, ChatMessage> = {};
+      cached.forEach(m => { mergedMap[m.id] = m; });
+      msgs.forEach(m => { mergedMap[m.id] = m; });
+      const sorted = Object.values(mergedMap).sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      localStorage.setItem(localKey, JSON.stringify(sorted));
+      return sorted;
+    }
+  } catch (e) {
+    console.warn('Chat fetch fallback:', e);
+  }
+
+  return cached;
+}
+
+export async function sendChatMessage(message: ChatMessage): Promise<void> {
+  const localKey = `prime_cbt_chat_${message.channelId}`;
+  // 1. Immediately update localStorage for instant bubble display
+  try {
+    const raw = localStorage.getItem(localKey);
+    const list: ChatMessage[] = raw ? JSON.parse(raw) : [];
+    list.push(message);
+    localStorage.setItem(localKey, JSON.stringify(list));
+
+    // Also update super admin master chat log
+    const masterRaw = localStorage.getItem('prime_cbt_all_campus_chats');
+    const masterList: ChatMessage[] = masterRaw ? JSON.parse(masterRaw) : [];
+    masterList.unshift(message);
+    if (masterList.length > 500) masterList.pop();
+    localStorage.setItem('prime_cbt_all_campus_chats', JSON.stringify(masterList));
+  } catch (e) {
+    // ignore
+  }
+
+  // 2. Write to Firestore
+  try {
+    await setDoc(doc(db, 'chat_messages', message.id), message, { merge: true });
+  } catch (e) {
+    console.warn('Firestore chat write error:', e);
+  }
+}
+
+// Super Admin Chat Oversight
+export async function fetchAllChatMessagesForAdmin(): Promise<ChatMessage[]> {
+  try {
+    const masterRaw = localStorage.getItem('prime_cbt_all_campus_chats');
+    if (masterRaw) {
+      return JSON.parse(masterRaw);
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  try {
+    const snapshot = await getDocs(collection(db, 'chat_messages'));
+    if (!snapshot.empty) {
+      const msgs: ChatMessage[] = [];
+      snapshot.forEach(docSnap => {
+        msgs.push({ id: docSnap.id, ...docSnap.data() } as ChatMessage);
+      });
+      const sorted = msgs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      localStorage.setItem('prime_cbt_all_campus_chats', JSON.stringify(sorted));
+      return sorted;
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  return [];
+}
+
+// -------------------------------------------------------------
+// Teacher Lesson Notes & Scheme of Work Studio Services
+// -------------------------------------------------------------
+export async function fetchLessonNotes(teacherId?: string): Promise<LessonNote[]> {
+  let list: LessonNote[] = [];
+  try {
+    const raw = localStorage.getItem('prime_cbt_saved_lesson_notes');
+    if (raw) list = JSON.parse(raw);
+  } catch (e) {
+    // ignore
+  }
+
+  try {
+    let q;
+    if (teacherId) {
+      q = query(collection(db, 'lesson_notes'), where('teacherId', '==', teacherId));
+    } else {
+      q = collection(db, 'lesson_notes');
+    }
+    const snapshot = await getDocs(q);
+    if (!snapshot.empty) {
+      const notes: LessonNote[] = [];
+      snapshot.forEach(docSnap => {
+        notes.push({ id: docSnap.id, ...docSnap.data() } as LessonNote);
+      });
+      const mergedMap: Record<string, LessonNote> = {};
+      list.forEach(n => { mergedMap[n.id] = n; });
+      notes.forEach(n => { mergedMap[n.id] = n; });
+      const finalNotes = Object.values(mergedMap).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      localStorage.setItem('prime_cbt_saved_lesson_notes', JSON.stringify(finalNotes));
+      return teacherId ? finalNotes.filter(n => n.teacherId === teacherId) : finalNotes;
+    }
+  } catch (e) {
+    console.warn('Lesson notes fetch fallback:', e);
+  }
+
+  return teacherId ? list.filter(n => n.teacherId === teacherId) : list;
+}
+
+export async function saveLessonNote(note: LessonNote): Promise<void> {
+  try {
+    const raw = localStorage.getItem('prime_cbt_saved_lesson_notes');
+    const list: LessonNote[] = raw ? JSON.parse(raw) : [];
+    const filtered = list.filter(n => n.id !== note.id);
+    const updated = [note, ...filtered];
+    localStorage.setItem('prime_cbt_saved_lesson_notes', JSON.stringify(updated));
+  } catch (e) {
+    // ignore
+  }
+
+  try {
+    await setDoc(doc(db, 'lesson_notes', note.id), note, { merge: true });
+  } catch (e) {
+    console.warn('Firestore lesson note write fallback:', e);
+  }
+}
+
+export async function deleteLessonNote(noteId: string): Promise<void> {
+  try {
+    const raw = localStorage.getItem('prime_cbt_saved_lesson_notes');
+    if (raw) {
+      const list: LessonNote[] = JSON.parse(raw);
+      localStorage.setItem('prime_cbt_saved_lesson_notes', JSON.stringify(list.filter(n => n.id !== noteId)));
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  try {
+    await deleteDoc(doc(db, 'lesson_notes', noteId));
+  } catch (e) {
+    console.warn('Firestore lesson note delete fallback:', e);
   }
 }
 

@@ -16,7 +16,10 @@ import {
   ArrowRight,
   TrendingUp,
   Percent,
-  Check
+  Check,
+  Eye,
+  EyeOff,
+  ShieldAlert
 } from 'lucide-react';
 import {
   Student,
@@ -30,8 +33,10 @@ import {
 import {
   fetchAssessmentRecords,
   saveAssessmentBatch,
-  saveAssessmentRecord
+  saveAssessmentRecord,
+  saveStudent
 } from '../../services/firebase';
+import { BatchResultSlipsModal } from '../common/BatchResultSlipsModal';
 
 interface ContinuousAssessmentSheetProps {
   teacherStaff?: StaffMember | null;
@@ -69,6 +74,14 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   const [savingStudentId, setSavingStudentId] = useState<string | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [saveStatus, setSaveStatus] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  const [showBatchSlipsModal, setShowBatchSlipsModal] = useState(false);
+  const [withheldStudentsMap, setWithheldStudentsMap] = useState<Record<string, boolean>>(() => {
+    const map: Record<string, boolean> = {};
+    students.forEach(s => {
+      if (s.resultWithheld) map[s.id] = true;
+    });
+    return map;
+  });
 
   // Sync selected subject if available
   useEffect(() => {
@@ -122,13 +135,41 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       .catch(err => console.warn('Error loading assessment records:', err));
   }, [selectedSubjectId, selectedClassCode, academicSession, currentTerm]);
 
-  // Helper to calculate total, grade and remark
+  // Toggle result withholding for a candidate
+  const handleToggleWithholdResult = async (student: Student) => {
+    const current = Boolean(withheldStudentsMap[student.id]);
+    const nextWithheld = !current;
+
+    setWithheldStudentsMap(prev => ({ ...prev, [student.id]: nextWithheld }));
+
+    const updatedStudent: Student = {
+      ...student,
+      resultWithheld: nextWithheld,
+      withheldReason: nextWithheld ? 'Administrative Review / Outstanding Institutional Clearance' : undefined
+    };
+
+    try {
+      await saveStudent(updatedStudent);
+      setSaveStatus({
+        text: nextWithheld
+          ? `Result viewing for ${student.fullName} is now WITHHELD. Student portal will show an administrative notice.`
+          : `Result for ${student.fullName} is now RELEASED and accessible to candidate.`,
+        type: 'success'
+      });
+      setTimeout(() => setSaveStatus(null), 4000);
+    } catch (err) {
+      setSaveStatus({ text: 'Failed to update result withholding.', type: 'error' });
+      setTimeout(() => setSaveStatus(null), 4000);
+    }
+  };
+
+  // Helper to calculate total, grade and remark: 1st CA = 20, 2nd CA = 20, Note/Assignment = 10, Exam = 50. Total = 100
   const computeScoreDetails = (assignment: number, project: number, test: number, exam: number) => {
-    const validAssignment = Math.min(10, Math.max(0, assignment || 0));
-    const validProject = Math.min(10, Math.max(0, project || 0));
-    const validTest = Math.min(20, Math.max(0, test || 0));
-    const validExam = Math.min(60, Math.max(0, exam || 0));
-    const total = validAssignment + validProject + validTest + validExam;
+    const validTest = Math.min(20, Math.max(0, test || 0));             // 1st CA Test (20)
+    const validProject = Math.min(20, Math.max(0, project || 0));       // 2nd CA / Practical (20)
+    const validAssignment = Math.min(10, Math.max(0, assignment || 0)); // Note / Assignment (10)
+    const validExam = Math.min(50, Math.max(0, exam || 0));             // Terminal Exam (50)
+    const total = validTest + validProject + validAssignment + validExam;
     const { grade, remark } = calculateGrade(total);
     return {
       assignmentScore: validAssignment,
@@ -233,8 +274,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       if (studentSubs.length > 0) {
         // Take best or latest submission
         const latest = studentSubs[0];
-        // Scale to 60 marks (e.g. percentage * 0.60)
-        const scaledExamScore = Math.round((latest.percentage / 100) * 60);
+        // Scale to 50 marks (e.g. percentage * 0.50)
+        const scaledExamScore = Math.round((latest.percentage / 100) * 50);
 
         const current = updatedMap[student.id] || getRecord(student);
         const computed = computeScoreDetails(
@@ -260,7 +301,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
     if (matchCount > 0) {
       setSaveStatus({
-        text: `Successfully synced CBT scores for ${matchCount} student(s) into the 60% exam column! Click 'Save All Scores' to commit.`,
+        text: `Successfully synced CBT scores for ${matchCount} student(s) into the 50% terminal exam column! Click 'Save All Scores' to commit.`,
         type: 'success'
       });
     } else {
@@ -488,6 +529,15 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
               <span>Print Sheet</span>
             </button>
 
+            <button
+              type="button"
+              onClick={() => setShowBatchSlipsModal(true)}
+              className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5 text-emerald-700" />
+              <span>Batch Print Slips</span>
+            </button>
+
             {/* PRIMARY SAVE BUTTON IN TOP RIBBON */}
             <button
               type="button"
@@ -625,19 +675,19 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                   <th className="py-3 px-3 w-28">Admission #</th>
                   <th className="py-3 px-4 min-w-[150px]">Student Full Name</th>
                   <th className="py-3 px-2 w-20 text-center bg-blue-50/60 border-l border-blue-100">
-                    Assgn<br /><span className="text-[9px] text-blue-700">(10)</span>
+                    1st CA<br /><span className="text-[9px] text-blue-700">(20)</span>
                   </th>
                   <th className="py-3 px-2 w-20 text-center bg-blue-50/60">
-                    Proj<br /><span className="text-[9px] text-blue-700">(10)</span>
+                    2nd CA<br /><span className="text-[9px] text-blue-700">(20)</span>
                   </th>
                   <th className="py-3 px-2 w-20 text-center bg-blue-50/60">
-                    CA Test<br /><span className="text-[9px] text-blue-700">(20)</span>
+                    Note/Asgn<br /><span className="text-[9px] text-blue-700">(10)</span>
                   </th>
                   <th className="py-3 px-2 w-20 text-center font-black bg-blue-100/70 text-blue-900 border-r border-blue-200">
-                    CA Total<br /><span className="text-[9px]">(40)</span>
+                    CA Total<br /><span className="text-[9px]">(50)</span>
                   </th>
                   <th className="py-3 px-2 w-24 text-center bg-amber-50/60">
-                    Exam<br /><span className="text-[9px] text-amber-700">(60)</span>
+                    Exam<br /><span className="text-[9px] text-amber-700">(50)</span>
                   </th>
                   <th className="py-3 px-3 w-20 text-center font-black bg-slate-200/80 text-slate-900">
                     Total<br /><span className="text-[9px]">(100)</span>
@@ -645,14 +695,16 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                   <th className="py-3 px-2 w-16 text-center">Grade</th>
                   <th className="py-3 px-3 w-24 text-center">Remark</th>
                   <th className="py-3 px-4 min-w-[160px]">Teacher Assessment Comment</th>
+                  <th className="py-3 px-3 w-24 text-center no-print">Result Gate</th>
                   <th className="py-3 px-3 w-16 text-center no-print">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {displayedStudents.map((student, idx) => {
                   const rec = getRecord(student);
-                  const totalCa = rec.assignmentScore + rec.projectScore + rec.testScore;
+                  const totalCa = rec.testScore + rec.projectScore + rec.assignmentScore;
                   const isRowSaving = savingStudentId === student.id;
+                  const isWithheld = Boolean(withheldStudentsMap[student.id]);
 
                   return (
                     <tr
@@ -672,34 +724,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                         <div className="text-[10px] text-slate-400 font-mono">{student.accessCode}</div>
                       </td>
 
-                      {/* Assignment Input (10) */}
+                      {/* 1st CA Input (20) */}
                       <td className="py-2 px-2 text-center bg-blue-50/30 border-l border-blue-100">
-                        <input
-                          type="number"
-                          min="0"
-                          max="10"
-                          step="1"
-                          value={rec.assignmentScore || ''}
-                          onChange={(e) => handleScoreChange(student, 'assignmentScore', e.target.value)}
-                          className="w-14 px-1.5 py-1 text-center font-mono font-bold text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-                        />
-                      </td>
-
-                      {/* Project Input (10) */}
-                      <td className="py-2 px-2 text-center bg-blue-50/30">
-                        <input
-                          type="number"
-                          min="0"
-                          max="10"
-                          step="1"
-                          value={rec.projectScore || ''}
-                          onChange={(e) => handleScoreChange(student, 'projectScore', e.target.value)}
-                          className="w-14 px-1.5 py-1 text-center font-mono font-bold text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-                        />
-                      </td>
-
-                      {/* CA Test Input (20) */}
-                      <td className="py-2 px-2 text-center bg-blue-50/30">
                         <input
                           type="number"
                           min="0"
@@ -711,18 +737,44 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                         />
                       </td>
 
-                      {/* Auto-computed Total CA (40) */}
+                      {/* 2nd CA Input (20) */}
+                      <td className="py-2 px-2 text-center bg-blue-50/30">
+                        <input
+                          type="number"
+                          min="0"
+                          max="20"
+                          step="1"
+                          value={rec.projectScore || ''}
+                          onChange={(e) => handleScoreChange(student, 'projectScore', e.target.value)}
+                          className="w-14 px-1.5 py-1 text-center font-mono font-bold text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
+                        />
+                      </td>
+
+                      {/* Note / Assignment Input (10) */}
+                      <td className="py-2 px-2 text-center bg-blue-50/30">
+                        <input
+                          type="number"
+                          min="0"
+                          max="10"
+                          step="1"
+                          value={rec.assignmentScore || ''}
+                          onChange={(e) => handleScoreChange(student, 'assignmentScore', e.target.value)}
+                          className="w-14 px-1.5 py-1 text-center font-mono font-bold text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
+                        />
+                      </td>
+
+                      {/* Auto-computed Total CA (50) */}
                       <td className="py-2.5 px-2 text-center font-mono font-black text-blue-950 bg-blue-100/40 border-r border-blue-200">
                         {totalCa}
                       </td>
 
-                      {/* Examination Input (60) */}
+                      {/* Examination Input (50) */}
                       <td className="py-2 px-2 text-center bg-amber-50/30">
                         <div className="relative inline-block">
                           <input
                             type="number"
                             min="0"
-                            max="60"
+                            max="50"
                             step="1"
                             value={rec.examScore || ''}
                             onChange={(e) => handleScoreChange(student, 'examScore', e.target.value)}
@@ -783,6 +835,32 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                           onChange={(e) => handleScoreChange(student, 'teacherComment', e.target.value)}
                           className="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-900 placeholder:text-slate-400 placeholder:italic"
                         />
+                      </td>
+
+                      {/* Result Withholding Gate Button */}
+                      <td className="py-2 px-3 text-center no-print">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleWithholdResult(student)}
+                          className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-colors inline-flex items-center gap-1 cursor-pointer border ${
+                            isWithheld
+                              ? 'bg-rose-100 text-rose-800 border-rose-300 hover:bg-rose-200'
+                              : 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                          }`}
+                          title={isWithheld ? 'Click to release result to student' : 'Click to withhold result from student'}
+                        >
+                          {isWithheld ? (
+                            <>
+                              <EyeOff className="w-3 h-3 text-rose-600" />
+                              <span>Withheld</span>
+                            </>
+                          ) : (
+                            <>
+                              <Eye className="w-3 h-3 text-emerald-600" />
+                              <span>Released</span>
+                            </>
+                          )}
+                        </button>
                       </td>
 
                       {/* Row Action Save Button */}
@@ -889,6 +967,19 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
             <span>{isSaving ? 'Saving...' : 'Save Sheet'}</span>
           </button>
         </div>
+      )}
+
+      {/* BATCH RESULT SLIPS MODAL */}
+      {showBatchSlipsModal && (
+        <BatchResultSlipsModal
+          students={classStudents}
+          classes={classes}
+          subjects={subjects}
+          submissions={submissions}
+          academicSession={academicSession}
+          currentTerm={currentTerm}
+          onClose={() => setShowBatchSlipsModal(false)}
+        />
       )}
     </div>
   );

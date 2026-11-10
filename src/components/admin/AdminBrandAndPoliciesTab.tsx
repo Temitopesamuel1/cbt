@@ -34,10 +34,15 @@ export const AdminBrandAndPoliciesTab: React.FC<AdminBrandAndPoliciesTabProps> =
     location: settings.location || 'Ilorin, Kwara State, Nigeria',
     motto: settings.motto || 'Knowledge, Character & Academic Excellence',
     principalName: settings.principalName || 'Mrs. A. B. Adeyemi (M.Ed, FSTAN)',
+    examOfficerName: settings.examOfficerName || 'Mr. O. P. Balogun (M.Sc, Exam Officer)',
+    resultTitle: settings.resultTitle || 'OFFICIAL CONTINUOUS ASSESSMENT & CBT EXAMINATION REPORT',
+    resultSubtitle: settings.resultSubtitle || 'HONEY\'S WORLD HIGH SCHOOL · ILORIN, KWARA STATE',
+    securityNotice: settings.securityNotice || 'Any alteration on this official slip renders it null and void. Generated directly from the school CBT and Assessment Cloud.',
     phone: settings.phone || '+234 803 000 0000',
     email: settings.email || 'info@honeysworldhigh.edu.ng',
     website: settings.website || 'www.honeysworldhigh.edu.ng',
     studentIdPrefix: settings.studentIdPrefix || 'HWHS',
+    schoolLogo: settings.schoolLogo || '/school-logo.png',
     academicSession: settings.academicSession || '2025/2026',
     currentTerm: settings.currentTerm || '1st Term',
     passMarkPercentage: settings.passMarkPercentage || 50,
@@ -47,7 +52,16 @@ export const AdminBrandAndPoliciesTab: React.FC<AdminBrandAndPoliciesTabProps> =
     isTeacherPortalActive: settings.isTeacherPortalActive ?? true,
     enableAiAdvisor: settings.enableAiAdvisor ?? true,
     enablePracticeCenter: settings.enablePracticeCenter ?? true,
-    caWeights: settings.caWeights,
+    enableChatHub: settings.enableChatHub ?? true,
+    enableLessonGenerator: settings.enableLessonGenerator ?? true,
+    caWeights: settings.caWeights || {
+      firstCaMax: 20,
+      secondCaMax: 20,
+      assignmentMax: 10,
+      examMax: 50,
+      testMax: 20,
+      projectMax: 20
+    },
     gradingScale: settings.gradingScale
   });
 
@@ -173,6 +187,19 @@ export const AdminBrandAndPoliciesTab: React.FC<AdminBrandAndPoliciesTabProps> =
 
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
+                Examination Officer
+              </label>
+              <input
+                type="text"
+                placeholder="Mr. O. P. Balogun (M.Sc, Exam Officer)"
+                value={form.examOfficerName || ''}
+                onChange={(e) => setForm({ ...form, examOfficerName: e.target.value })}
+                className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900 font-bold"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
                 Student Admission Number Prefix
               </label>
               <input
@@ -182,6 +209,53 @@ export const AdminBrandAndPoliciesTab: React.FC<AdminBrandAndPoliciesTabProps> =
                 onChange={(e) => setForm({ ...form, studentIdPrefix: e.target.value.toUpperCase() })}
                 className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
               />
+            </div>
+
+            {/* School Crest Logo CMS */}
+            <div className="md:col-span-2 p-4 bg-slate-50 rounded-2xl border border-slate-200 flex flex-col sm:flex-row items-center gap-4">
+              <div className="w-16 h-16 rounded-xl border-2 border-amber-400 bg-white p-1 flex items-center justify-center shrink-0 shadow-xs">
+                <img
+                  src={form.schoolLogo || '/school-logo.png'}
+                  alt="School Crest"
+                  className="w-full h-full object-contain"
+                  onError={(e) => { (e.target as any).src = '/school-logo.png'; }}
+                />
+              </div>
+              <div className="flex-1 w-full space-y-1">
+                <label className="block text-xs font-bold text-slate-900">
+                  School Crest & Official Seal Logo
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={form.schoolLogo || '/school-logo.png'}
+                    onChange={(e) => setForm({ ...form, schoolLogo: e.target.value })}
+                    className="flex-1 px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg font-mono"
+                    placeholder="/school-logo.png"
+                  />
+                  <label className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold cursor-pointer shrink-0">
+                    Upload
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onload = (ev) => {
+                            if (ev.target?.result) {
+                              setForm({ ...form, schoolLogo: ev.target.result as string });
+                            }
+                          };
+                          reader.readAsDataURL(file);
+                        }
+                      }}
+                    />
+                  </label>
+                </div>
+                <span className="text-[10px] text-slate-500">Displays on result slips, student slips, and institutional report card printouts.</span>
+              </div>
             </div>
 
             <div>
@@ -206,6 +280,55 @@ export const AdminBrandAndPoliciesTab: React.FC<AdminBrandAndPoliciesTabProps> =
                 placeholder="info@honeysworldhigh.edu.ng"
                 value={form.email || ''}
                 onChange={(e) => setForm({ ...form, email: e.target.value })}
+                className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Section 2: Official Result Slip Formatting (WordPress Style CMS) */}
+        <div className="pt-6 border-t border-slate-100 space-y-4">
+          <h3 className="text-xs font-black uppercase tracking-wider text-slate-500 flex items-center gap-2">
+            <School className="w-4 h-4 text-emerald-600" />
+            <span>2. Official Result Slip Titles & Security Notice (CMS)</span>
+          </h3>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="md:col-span-2">
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Result Slip Header Title
+              </label>
+              <input
+                type="text"
+                value={form.resultTitle || ''}
+                onChange={(e) => setForm({ ...form, resultTitle: e.target.value })}
+                placeholder="OFFICIAL CONTINUOUS ASSESSMENT & CBT EXAMINATION REPORT"
+                className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-slate-900"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Result Slip Subtitle / Location Heading
+              </label>
+              <input
+                type="text"
+                value={form.resultSubtitle || ''}
+                onChange={(e) => setForm({ ...form, resultSubtitle: e.target.value })}
+                placeholder="HONEY'S WORLD HIGH SCHOOL · ILORIN, KWARA STATE"
+                className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Security Notice on Result Slips
+              </label>
+              <input
+                type="text"
+                value={form.securityNotice || ''}
+                onChange={(e) => setForm({ ...form, securityNotice: e.target.value })}
+                placeholder="Any alteration on this official slip renders it null and void."
                 className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
               />
             </div>
@@ -309,15 +432,37 @@ export const AdminBrandAndPoliciesTab: React.FC<AdminBrandAndPoliciesTabProps> =
 
             <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 flex items-center justify-between">
               <div>
-                <div className="font-bold text-xs text-slate-900">Practice Test Center</div>
-                <div className="text-[11px] text-slate-500">Interactive Tutor Mode & Timed Exam practice for students</div>
+                <div className="font-bold text-xs text-slate-900">Campus Chat & Instant Messaging</div>
+                <div className="text-[11px] text-slate-500">Enable staff rooms, class cohorts, and peer-to-peer messaging</div>
               </div>
               <button
                 type="button"
-                onClick={() => setForm({ ...form, enablePracticeCenter: !form.enablePracticeCenter })}
+                onClick={() => setForm({ ...form, enableChatHub: !form.enableChatHub })}
                 className="cursor-pointer"
               >
-                {form.enablePracticeCenter ? (
+                {form.enableChatHub ? (
+                  <span className="text-emerald-600 font-bold text-xs flex items-center gap-1">
+                    <ToggleRight className="w-7 h-7" /> Enabled
+                  </span>
+                ) : (
+                  <span className="text-slate-400 font-bold text-xs flex items-center gap-1">
+                    <ToggleLeft className="w-7 h-7" /> Disabled
+                  </span>
+                )}
+              </button>
+            </div>
+
+            <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 flex items-center justify-between">
+              <div>
+                <div className="font-bold text-xs text-slate-900">AI Lesson Notes Studio for Teachers</div>
+                <div className="text-[11px] text-slate-500">Curriculum-aligned scheme of work & secondary school lesson generator</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setForm({ ...form, enableLessonGenerator: !form.enableLessonGenerator })}
+                className="cursor-pointer"
+              >
+                {form.enableLessonGenerator ? (
                   <span className="text-emerald-600 font-bold text-xs flex items-center gap-1">
                     <ToggleRight className="w-7 h-7" /> Enabled
                   </span>

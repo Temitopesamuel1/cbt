@@ -36,6 +36,9 @@ export interface Student {
   department?: string; // e.g. "Science & Tech", "Arts & Humanities", "Commercial"
   bio?: string;
   cgpa?: number; // Cumulative Grade Point Average (0.00 - 5.00)
+  resultWithheld?: boolean; // When true, student cannot view results across the school
+  withheldSubjectIds?: string[]; // Specific subject IDs withheld from student
+  withheldReason?: string; // e.g. "Pending bursary clearance"
 }
 
 export interface Examination {
@@ -150,10 +153,13 @@ export interface AdminUser {
 }
 
 export interface CaWeightsConfig {
-  assignmentMax: number;
-  projectMax: number;
-  testMax: number;
-  examMax: number;
+  firstCaMax: number;   // 1st CA Test (e.g. 20)
+  secondCaMax: number;  // 2nd CA / Project (e.g. 20)
+  assignmentMax: number; // Note / Assignment (e.g. 10)
+  examMax: number;      // CBT / Terminal Exam (e.g. 50)
+  // Legacy aliases for backwards compatibility
+  testMax?: number;
+  projectMax?: number;
 }
 
 export interface GradeScaleItem {
@@ -165,10 +171,12 @@ export interface GradeScaleItem {
 }
 
 export const DEFAULT_CA_WEIGHTS: CaWeightsConfig = {
+  firstCaMax: 20,
+  secondCaMax: 20,
   assignmentMax: 10,
-  projectMax: 10,
+  examMax: 50,
   testMax: 20,
-  examMax: 60
+  projectMax: 20
 };
 
 export const DEFAULT_GRADE_SCALE: GradeScaleItem[] = [
@@ -192,6 +200,10 @@ export interface SchoolSettings {
   email?: string;
   website?: string;
   principalName?: string;
+  examOfficerName?: string;
+  resultTitle?: string;
+  resultSubtitle?: string;
+  securityNotice?: string;
   academicSession: string;
   currentTerm: string;
   passMarkPercentage: number;
@@ -205,6 +217,8 @@ export interface SchoolSettings {
   gradingScale?: GradeScaleItem[];
   enableAiAdvisor?: boolean;
   enablePracticeCenter?: boolean;
+  enableChatHub?: boolean;
+  enableLessonGenerator?: boolean;
 }
 
 export interface SavedStudentLogin {
@@ -261,10 +275,12 @@ export interface StudentAssessmentRecord {
   subjectName: string;
   academicSession: string; // e.g. "2025/2026"
   term: '1st Term' | '2nd Term' | '3rd Term';
-  assignmentScore: number; // e.g. 0-10 or 0-20
-  projectScore: number;    // e.g. 0-10 or 0-20
-  testScore: number;       // Continuous Assessment test, e.g. 0-20
-  examScore: number;       // CBT exam score or manual exam score, e.g. 0-60
+  firstCaScore?: number;   // 1st CA Test (0 - 20)
+  secondCaScore?: number;  // 2nd CA Project / Test (0 - 20)
+  assignmentScore: number; // Note / Assignment (0 - 10)
+  projectScore: number;    // Compatible alias for secondCaScore
+  testScore: number;       // Compatible alias for firstCaScore
+  examScore: number;       // Terminal CBT Exam score (0 - 50)
   totalScore: number;      // 0 - 100
   grade: string;           // A1, B2, B3, C4, C5, C6, D7, E8, F9
   remark: string;          // Excellent, Very Good, Credit, Pass, Fail
@@ -272,6 +288,46 @@ export interface StudentAssessmentRecord {
   isAutoSynced?: boolean;
   teacherComment?: string;
   updatedAt: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  channelId: string; // e.g. 'staff-general', 'class-ss2', or user pair ID
+  channelType: 'staff_group' | 'student_class_group' | 'direct_teacher' | 'direct_student' | 'student_to_teacher';
+  senderId: string;
+  senderName: string;
+  senderRole: 'super_admin' | 'admin' | 'teacher' | 'student';
+  recipientId?: string;
+  recipientName?: string;
+  text: string;
+  attachmentUrl?: string;
+  attachmentType?: 'image' | 'audio' | 'document';
+  attachmentName?: string;
+  timestamp: string;
+}
+
+export interface LessonNote {
+  id: string;
+  teacherId: string;
+  teacherName: string;
+  subjectName: string;
+  classGrade: string;
+  term: string;
+  weekNumber: number;
+  topic: string;
+  subTopic?: string;
+  durationMinutes: number;
+  behavioralObjectives: string[];
+  instructionalMaterials: string[];
+  previousKnowledge: string;
+  content: string;
+  visualsAndCharts: string; // ASCII diagram / visual chart / flowchart
+  teacherActivities: string[];
+  studentActivities: string[];
+  evaluationQuestions: string[];
+  summary: string;
+  assignment: string;
+  createdAt: string;
 }
 
 export interface ExamTimeWindowStatus {

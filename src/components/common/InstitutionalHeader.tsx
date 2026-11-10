@@ -1,6 +1,7 @@
 import React from 'react';
-import { Shield, GraduationCap, UserCheck, LogOut, School } from 'lucide-react';
+import { Shield, GraduationCap, UserCheck, LogOut, School, MessageSquare } from 'lucide-react';
 import { SchoolSettings } from '../../types/cbt';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface InstitutionalHeaderProps {
   currentPortal: 'landing' | 'teacher' | 'student' | 'admin';
@@ -10,6 +11,7 @@ interface InstitutionalHeaderProps {
   onLogout?: () => void;
   settings?: SchoolSettings;
   examInProgress?: boolean;
+  onOpenChat?: () => void;
 }
 
 export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
@@ -19,7 +21,8 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
   userDisplayName,
   onLogout,
   settings,
-  examInProgress
+  examInProgress,
+  onOpenChat
 }) => {
   return (
     <header className="sticky top-0 z-40 bg-slate-900 text-white border-b border-slate-800 shadow-sm">
@@ -37,8 +40,19 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
             }}
             className={`flex items-center gap-3 shrink-0 cursor-pointer ${examInProgress ? 'pointer-events-none' : ''}`}
           >
-            <div className="w-10 h-10 rounded-lg bg-blue-700 text-white flex items-center justify-center font-bold text-lg shadow-inner border border-blue-600">
-              <School className="w-5 h-5 text-amber-300" />
+            <div className="w-10 h-10 rounded-full bg-white p-0.5 border-2 border-amber-400 shadow-xs flex items-center justify-center overflow-hidden shrink-0">
+              <img
+                src={settings?.schoolLogo || '/school-logo.png'}
+                alt="HWHS Crest"
+                className="w-full h-full object-contain rounded-full"
+                onError={(e) => {
+                  (e.currentTarget as HTMLElement).style.display = 'none';
+                  const parent = (e.currentTarget as HTMLElement).parentElement;
+                  if (parent) {
+                    parent.innerHTML = '<span class="text-blue-900 font-black text-xs font-serif">HW</span>';
+                  }
+                }}
+              />
             </div>
             <div>
               <div className="text-base sm:text-lg font-extrabold tracking-tight text-white flex items-center gap-2">
@@ -145,7 +159,24 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
           </nav>
 
           {/* Zone 3: Primary Action / User Profile */}
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            {/* Install PWA Button on PC / Mobile */}
+            {!examInProgress && (
+              <PWAInstallButton className="hidden sm:inline-flex" />
+            )}
+
+            {/* Campus Communications Button */}
+            {!examInProgress && userDisplayName && onOpenChat && (
+              <button
+                onClick={onOpenChat}
+                className="px-2.5 py-1.5 bg-blue-800 hover:bg-blue-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs border border-blue-600"
+                title="Open Campus Chat Groups & Messages"
+              >
+                <MessageSquare className="w-3.5 h-3.5 text-amber-300" />
+                <span className="hidden md:inline">Campus Chat</span>
+              </button>
+            )}
+
             {examInProgress ? (
               <div className="px-3 py-1 text-xs font-bold bg-rose-600 text-white rounded-lg animate-pulse">
                 Examination Active
@@ -163,7 +194,7 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
                 {onLogout && (
                   <button
                     onClick={onLogout}
-                    className="p-2 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors"
+                    className="p-2 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
                     title="Log Out"
                   >
                     <LogOut className="w-4 h-4" />

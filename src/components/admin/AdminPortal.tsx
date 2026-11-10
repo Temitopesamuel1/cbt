@@ -28,7 +28,8 @@ import {
   ShieldCheck,
   Sliders,
   CheckSquare,
-  Camera
+  Camera,
+  MessageSquare
 } from 'lucide-react';
 import {
   StaffMember,
@@ -68,6 +69,7 @@ import { AdminCurriculumTab } from './AdminCurriculumTab';
 import { AdminExamsTab } from './AdminExamsTab';
 import { AdminBroadsheetTab } from './AdminBroadsheetTab';
 import { AdminSubmissionsTab } from './AdminSubmissionsTab';
+import { AdminCommunicationsAuditTab } from './AdminCommunicationsAuditTab';
 
 interface AdminPortalProps {
   adminEmail: string;
@@ -84,7 +86,8 @@ export type AdminTabType =
   | 'students'
   | 'exams'
   | 'broadsheet'
-  | 'submissions';
+  | 'submissions'
+  | 'communications';
 
 export const AdminPortal: React.FC<AdminPortalProps> = ({
   adminEmail,
@@ -92,7 +95,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   onGoToHome
 }) => {
   // Navigation tabs
-  const [activeTab, setActiveTab] = useState<AdminTabType>('admins');
+  const isSuperAdmin =
+    adminEmail.toLowerCase() === 'fathertemitope@gmail.com' ||
+    false; // will also check admins state below
+
+  const [activeTab, setActiveTab] = useState<AdminTabType>(() => {
+    return adminEmail.toLowerCase() === 'fathertemitope@gmail.com' ? 'admins' : 'brand';
+  });
 
   // Core Institutional Data
   const [admins, setAdmins] = useState<AdminUser[]>([]);
@@ -189,6 +198,18 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       setLoading(false);
     }
   };
+
+  // Dynamic super admin check
+  const isSuperAdminUser =
+    adminEmail.toLowerCase() === 'fathertemitope@gmail.com' ||
+    admins.some(a => a.email.toLowerCase() === adminEmail.toLowerCase() && a.role === 'super_admin');
+
+  // If non-super-admin is currently on 'admins' tab, switch to 'brand'
+  useEffect(() => {
+    if (admins.length > 0 && !isSuperAdminUser && activeTab === 'admins') {
+      setActiveTab('brand');
+    }
+  }, [admins, isSuperAdminUser, activeTab]);
 
   useEffect(() => {
     loadData();

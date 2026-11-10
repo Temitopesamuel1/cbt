@@ -85,6 +85,39 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
     window.print();
   };
 
+  // Withholding gate: Admin can decide to withhold result for all subjects or this subject
+  if (student?.resultWithheld || (student?.withheldSubjectIds && student.withheldSubjectIds.includes(submission.subject))) {
+    return (
+      <div className="min-h-[calc(100vh-4rem)] bg-slate-100/70 py-12 px-4 flex items-center justify-center">
+        <div className="max-w-lg w-full bg-white rounded-2xl border-2 border-rose-300 p-8 shadow-xl text-center space-y-4">
+          <div className="w-16 h-16 rounded-full bg-rose-50 border-2 border-rose-300 flex items-center justify-center mx-auto text-rose-600">
+            <Lock className="w-8 h-8" />
+          </div>
+          <h2 className="text-lg font-black uppercase text-slate-900">
+            Academic Result Notice: Result Withheld
+          </h2>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            Examination and continuous assessment records for <strong>{submission.studentName}</strong> ({submission.admissionNumber}) in <strong>{submission.subject}</strong> have been temporarily withheld by school administration.
+          </p>
+          {student.withheldReason && (
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs font-semibold text-amber-900">
+              Administrative Reason: {student.withheldReason}
+            </div>
+          )}
+          <p className="text-[11px] text-slate-400">
+            Please contact the Principal's Office or Bursary Department for administrative clearance.
+          </p>
+          <button
+            onClick={onReturnToDashboard}
+            className="w-full py-2.5 bg-blue-900 text-white font-bold text-xs rounded-xl shadow-xs hover:bg-blue-950 transition-colors cursor-pointer"
+          >
+            Return to Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-[calc(100vh-4rem)] bg-slate-100/70 py-6 px-3 sm:px-6 lg:px-8">
       {/* Print Specific CSS Stylesheet */}
@@ -147,6 +180,38 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
 
         {/* OFFICIAL INSTITUTIONAL RESULT SLIP */}
         <div className="bg-white rounded-2xl border-2 border-slate-800 shadow-lg overflow-hidden printable-slip">
+          {/* Formal Header Triggered Specifically on Paper Print */}
+          <div className="hidden print:block border-b-4 border-double border-slate-900 pb-4 pt-2 mb-4 text-center">
+            <div className="flex items-center justify-center gap-4">
+              <img
+                src={schoolLogoUrl}
+                alt="Honey's World High School Crest"
+                className="w-18 h-18 object-contain rounded-full border border-amber-500 shadow-xs p-1 shrink-0"
+              />
+              <div className="text-left">
+                <h1 className="text-xl sm:text-2xl font-black uppercase tracking-wider font-serif text-slate-950">
+                  {activeSettings.schoolName || "HONEY'S WORLD HIGH SCHOOL"}
+                </h1>
+                <p className="text-xs font-bold text-slate-800 uppercase tracking-widest">
+                  {activeSettings.address || 'GAA AJANAKU, ILORIN, KWARA STATE, NIGERIA'}
+                </p>
+                <p className="text-[11px] italic font-serif text-slate-600">
+                  Motto: "{activeSettings.motto || 'Knowledge, Character & Academic Excellence'}"
+                </p>
+                <p className="text-[10px] text-slate-500 font-mono">
+                  Tel: {activeSettings.phone || '+234 803 000 0000'} · Email: {activeSettings.email || 'info@honeysworldhigh.edu.ng'}
+                </p>
+              </div>
+            </div>
+            <div className="mt-3 pt-2 border-t border-slate-300 flex items-center justify-between text-xs font-bold uppercase tracking-wider px-2">
+              <span className="text-blue-950">
+                {activeSettings.resultTitle || 'OFFICIAL CANDIDATE EXAMINATION RESULT SLIP & EVALUATION SHEET'}
+              </span>
+              <span className="font-mono text-slate-700">
+                SESSION: {submission.academicSession} ({submission.term})
+              </span>
+            </div>
+          </div>
           {/* Top Institutional Header / Letterhead */}
           <div className="bg-gradient-to-b from-blue-950 via-slate-900 to-blue-950 text-white p-5 sm:p-7 border-b-4 border-amber-500 relative">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-5 text-center sm:text-left">

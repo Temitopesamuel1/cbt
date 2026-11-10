@@ -54,6 +54,10 @@ export const DEFAULT_SCHOOL_SETTINGS: SchoolSettings = {
   email: 'info@honeysworldhigh.edu.ng',
   website: 'www.honeysworldhigh.edu.ng',
   principalName: 'Mrs. A. B. Adeyemi (M.Ed, FSTAN)',
+  examOfficerName: 'Mr. Olawale Benson (B.Sc. Ed, CBT Officer)',
+  resultTitle: 'OFFICIAL CANDIDATE EXAMINATION RESULT SLIP & EVALUATION SHEET',
+  resultSubtitle: 'Senior Secondary & Junior Secondary Academic Evaluation',
+  securityNotice: 'This computerized examination result slip is an official academic transcript of Honey\'s World High School, Gaa Ajanaku, Ilorin, Kwara State. Any erasure, alteration, or falsification renders this document void.',
   academicSession: '2025/2026',
   currentTerm: '1st Term',
   passMarkPercentage: 50,
@@ -65,6 +69,8 @@ export const DEFAULT_SCHOOL_SETTINGS: SchoolSettings = {
   isTeacherPortalActive: true,
   enableAiAdvisor: true,
   enablePracticeCenter: true,
+  enableChatHub: true,
+  enableLessonGenerator: true,
   caWeights: DEFAULT_CA_WEIGHTS,
   gradingScale: DEFAULT_GRADE_SCALE
 };

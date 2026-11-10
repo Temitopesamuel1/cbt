@@ -31,12 +31,19 @@ import {
   User,
   Clock,
   Lock,
-  ShieldCheck
+  ShieldCheck,
+  MessageSquare,
+  Layers,
+  Archive,
+  CheckSquare
 } from 'lucide-react';
 import { StudentBatchUploadModal } from './StudentBatchUploadModal';
 import { StudentSlipsModal } from './StudentSlipsModal';
 import { ContinuousAssessmentSheet } from './ContinuousAssessmentSheet';
 import { TeacherProfileSection } from './TeacherProfileSection';
+import { TeacherLessonNotesTab } from './TeacherLessonNotesTab';
+import { BatchResultSlipsModal } from '../common/BatchResultSlipsModal';
+import { CampusChatModal } from '../common/CampusChatModal';
 import {
   Examination,
   Question,
@@ -54,6 +61,8 @@ import {
   fetchExaminations,
   saveExamination,
   deleteExamination,
+  deleteExaminationsBatch,
+  saveQuestionsBatch,
   fetchQuestions,
   saveQuestion,
   deleteQuestion,
@@ -108,6 +117,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   // Determine active tab from subroute
   const getTabFromRoute = (route: string) => {
     if (route.includes('/assessment-sheet') || route.includes('/assessment') || route.includes('/gradebook')) return 'assessment-sheet';
+    if (route.includes('/lesson-notes') || route.includes('/notes') || route.includes('/scheme')) return 'lesson-notes';
     if (route.includes('/profile') || route.includes('/security') || route.includes('/credentials')) return 'profile';
     if (route.includes('/examinations')) return 'examinations';
     if (route.includes('/questions')) return 'questions';
@@ -137,7 +147,10 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   // State
   const [exams, setExams] = useState<Examination[]>([]);
   const [selectedExamId, setSelectedExamId] = useState<string>('');
+  const [selectedExamIds, setSelectedExamIds] = useState<Set<string>>(new Set());
+  const [isSavingExam, setIsSavingExam] = useState(false);
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [replaceQuestionsOnUpload, setReplaceQuestionsOnUpload] = useState(true);
   const [students, setStudents] = useState<Student[]>([]);
   const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -150,6 +163,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     allowImmediateResultViewing: true
   });
   const [loading, setLoading] = useState(false);
+  const [showBatchResultSlipsModal, setShowBatchResultSlipsModal] = useState(false);
+  const [showCampusChat, setShowCampusChat] = useState(false);
 
   // Filter and Inspection States
   const [resultClassFilter, setResultClassFilter] = useState<string>('all');
@@ -340,37 +355,113 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   // Exam actions
   const handleSaveExam = async (e: React.FormEvent) => {
     e.preventDefault();
-    const newExamId = `exam-${Date.now()}`;
-    const subjectObj = authorizedSubjects.find(s => s.id === examForm.subjectId) || authorizedSubjects[0] || subjects[0];
+    if (isSavingExam) return;
+    setIsSavingExam(true);
 
-    const examData: Examination = {
-      id: newExamId,
-      title: examForm.title || `${examForm.classGrade} ${subjectObj?.name || 'Examination'}`,
-      subjectId: subjectObj?.id || 'sub-gen',
-      subjectName: subjectObj?.name || 'General Subject',
-      classGrade: examForm.classGrade || 'SS 2',
-      academicSession: examForm.academicSession || settings.academicSession,
-      term: ((examForm.term || settings.currentTerm) as '1st Term' | '2nd Term' | '3rd Term') || '1st Term',
-      examType: examForm.examType || 'Mid-Term Test',
-      durationMinutes: Number(examForm.durationMinutes) || 15,
-      totalQuestions: Number(examForm.totalQuestions) || 10,
-      instructions: examForm.instructions || 'Answer all objective questions.',
-      teacherId: activeStaff?.uniqueId || teacherEmail,
-      teacherName: activeStaff?.fullName || teacherEmail.split('@')[0],
-      status: (examForm.status as 'draft' | 'published' | 'archived') || 'published',
-      startDate: examForm.startDate ? examForm.startDate : undefined,
-      endDate: examForm.endDate ? examForm.endDate : undefined,
-      shuffleQuestions: Boolean(examForm.shuffleQuestions),
-      shuffleOptions: Boolean(examForm.shuffleOptions),
-      resultVisibility: (examForm.resultVisibility as 'immediate' | 'teacher_publish') || 'immediate',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
+    try {
+      const newExamId = `exam-${Date.now()}`;
+      const subjectObj = authorizedSubjects.find(s => s.id === examForm.subjectId) || authorizedSubjects[0] || subjects[0];
+      const targetClass = examForm.classGrade || authorizedClasses[0]?.code || 'SS 2';
 
-    await saveExamination(examData);
-    setExams(prev => [examData, ...prev]);
-    setSelectedExamId(examData.id);
-    setShowCreateExamModal(false);
+      const examData: Examination = {
+        id: newExamId,
+        title: examForm.title?.trim() || `${targetClass} ${subjectObj?.name || 'Examination'}`,
+        subjectId: subjectObj?.id || 'sub-gen',
+        subjectName: subjectObj?.name || 'General Subject',
+        classGrade: targetClass,
+        academicSession: examForm.academicSession || settings.academicSession,
+        term: ((examForm.term || settings.currentTerm) as '1st Term' | '2nd Term' | '3rd Term') || '1st Term',
+        examType: examForm.examType || 'Mid-Term Test',
+        durationMinutes: Number(examForm.durationMinutes) || 15,
+        totalQuestions: Number(examForm.totalQuestions) || 10,
+        instructions: examForm.instructions || 'Answer all objective questions.',
+        teacherId: activeStaff?.uniqueId || teacherEmail,
+        teacherName: activeStaff?.fullName || teacherEmail.split('@')[0],
+        status: (examForm.status as 'draft' | 'published' | 'archived') || 'published',
+        startDate: examForm.startDate ? examForm.startDate : undefined,
+        endDate: examForm.endDate ? examForm.endDate : undefined,
+        shuffleQuestions: Boolean(examForm.shuffleQuestions),
+        shuffleOptions: Boolean(examForm.shuffleOptions),
+        resultVisibility: (examForm.resultVisibility as 'immediate' | 'teacher_publish') || 'immediate',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      await saveExamination(examData);
+      setExams(prev => [examData, ...prev]);
+      setSelectedExamId(examData.id);
+      setShowCreateExamModal(false);
+      // Reset form
+      setExamForm({
+        title: '',
+        subjectId: authorizedSubjects[0]?.id || '',
+        subjectName: authorizedSubjects[0]?.name || '',
+        classGrade: authorizedClasses[0]?.code || 'SS 2',
+        academicSession: settings.academicSession,
+        term: settings.currentTerm,
+        examType: 'Mid-Term Test',
+        durationMinutes: 15,
+        totalQuestions: 10,
+        instructions: 'Select the most accurate option from A to D. Ensure you conclude your paper before the countdown timer reaches zero.',
+        status: 'published',
+        startDate: '',
+        endDate: '',
+        shuffleQuestions: true,
+        shuffleOptions: false,
+        resultVisibility: 'immediate'
+      });
+    } catch (err) {
+      console.error('Failed to create examination:', err);
+      alert('Unable to save examination. Please try again.');
+    } finally {
+      setIsSavingExam(false);
+    }
+  };
+
+  // Mass actions for examinations
+  const handleToggleExamSelection = (examId: string) => {
+    setSelectedExamIds(prev => {
+      const next = new Set(prev);
+      if (next.has(examId)) next.delete(examId);
+      else next.add(examId);
+      return next;
+    });
+  };
+
+  const handleSelectAllExams = () => {
+    if (selectedExamIds.size === authorizedExams.length) {
+      setSelectedExamIds(new Set());
+    } else {
+      setSelectedExamIds(new Set(authorizedExams.map(e => e.id)));
+    }
+  };
+
+  const handleMassDeleteExams = async () => {
+    if (selectedExamIds.size === 0) return;
+    if (confirm(`Permanently delete ${selectedExamIds.size} selected examination(s) and all their questions?`)) {
+      const ids = Array.from(selectedExamIds);
+      await deleteExaminationsBatch(ids);
+      setExams(prev => prev.filter(e => !selectedExamIds.has(e.id)));
+      if (selectedExamIds.has(selectedExamId)) {
+        const remaining = exams.filter(e => !selectedExamIds.has(e.id));
+        setSelectedExamId(remaining[0]?.id || '');
+      }
+      setSelectedExamIds(new Set());
+    }
+  };
+
+  const handleMassPublishExams = async (publish: boolean) => {
+    if (selectedExamIds.size === 0) return;
+    const targetStatus = publish ? 'published' : 'draft';
+    for (const id of Array.from(selectedExamIds)) {
+      const exam = exams.find(e => e.id === id);
+      if (exam) {
+        const updated: Examination = { ...exam, status: targetStatus, updatedAt: new Date().toISOString() };
+        await saveExamination(updated);
+      }
+    }
+    setExams(prev => prev.map(e => selectedExamIds.has(e.id) ? { ...e, status: targetStatus } : e));
+    setSelectedExamIds(new Set());
   };
 
   const handleOpenTimeframeModal = (exam: Examination) => {
@@ -526,24 +617,22 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     if (!selectedExamId || csvPreview.length === 0) return;
     const targetExam = exams.find(e => e.id === selectedExamId);
 
-    for (const item of csvPreview) {
-      const qId = `q-csv-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-      const q: Question = {
-        id: qId,
-        examId: selectedExamId,
-        questionNumber: item.questionNumber || 1,
-        text: item.text || '',
-        optionA: item.optionA || '',
-        optionB: item.optionB || '',
-        optionC: item.optionC || '',
-        optionD: item.optionD || '',
-        correctOption: item.correctOption || 'A',
-        explanation: item.explanation || '',
-        subject: item.subject || targetExam?.subjectName || 'General',
-        topic: item.topic || 'General Concepts'
-      };
-      await saveQuestion(selectedExamId, q);
-    }
+    const questionsToSave: Question[] = csvPreview.map((item, idx) => ({
+      id: `q-csv-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 5)}`,
+      examId: selectedExamId,
+      questionNumber: item.questionNumber || (idx + 1),
+      text: item.text || '',
+      optionA: item.optionA || '',
+      optionB: item.optionB || '',
+      optionC: item.optionC || '',
+      optionD: item.optionD || '',
+      correctOption: item.correctOption || 'A',
+      explanation: item.explanation || '',
+      subject: item.subject || targetExam?.subjectName || 'General',
+      topic: item.topic || 'General Concepts'
+    }));
+
+    await saveQuestionsBatch(selectedExamId, questionsToSave, replaceQuestionsOnUpload);
 
     const updated = await fetchQuestions(selectedExamId);
     setQuestions(updated);
@@ -882,7 +971,20 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 }`}
               >
                 <FileSpreadsheet className="w-3.5 h-3.5 text-amber-700" />
-                <span>CA Broad Sheet (40/60)</span>
+                <span>CA Broad Sheet</span>
+              </button>
+
+              {/* Lesson Notes Studio Tab */}
+              <button
+                onClick={() => handleTabChange('lesson-notes')}
+                className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap flex items-center gap-1.5 font-bold ${
+                  activeTab === 'lesson-notes'
+                    ? 'bg-purple-900 text-white shadow-xs'
+                    : 'bg-purple-50 text-purple-900 border border-purple-200 hover:bg-purple-100'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                <span>Lesson Notes Studio</span>
               </button>
 
               <button
@@ -969,12 +1071,30 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
               </button>
             </div>
 
-            <div className="hidden lg:flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowCampusChat(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-50 text-blue-900 hover:bg-blue-100 border border-blue-200 flex items-center gap-1.5 cursor-pointer"
+                title="Open Campus Staff & Student Chat Hub"
+              >
+                <MessageSquare className="w-3.5 h-3.5 text-blue-700" />
+                <span className="hidden sm:inline">Campus Chat</span>
+              </button>
+
+              <button
+                onClick={() => setShowBatchResultSlipsModal(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-900 hover:bg-emerald-100 border border-emerald-200 flex items-center gap-1.5 cursor-pointer"
+                title="Print batch student result slips with school crest"
+              >
+                <Printer className="w-3.5 h-3.5 text-emerald-700" />
+                <span className="hidden sm:inline">Batch Print Slips</span>
+              </button>
+
               <button
                 onClick={onGoToStudentPortal}
-                className="text-xs text-blue-900 hover:underline font-semibold"
+                className="text-xs text-blue-900 hover:underline font-semibold hidden xl:block"
               >
-                Switch to Student Portal →
+                Student Portal →
               </button>
             </div>
           </div>
@@ -1286,13 +1406,44 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 </p>
               </div>
 
-              <button
-                onClick={() => setShowCreateExamModal(true)}
-                className="px-4 py-2.5 bg-blue-900 hover:bg-blue-800 text-white text-xs font-bold rounded-xl shadow-sm transition-colors flex items-center gap-1.5"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Create Examination</span>
-              </button>
+              <div className="flex items-center gap-2 flex-wrap">
+                {authorizedExams.length > 0 && (
+                  <button
+                    onClick={handleSelectAllExams}
+                    className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
+                  >
+                    <CheckSquare className="w-3.5 h-3.5 text-slate-600" />
+                    <span>{selectedExamIds.size === authorizedExams.length ? 'Deselect All' : 'Select All'}</span>
+                  </button>
+                )}
+
+                {selectedExamIds.size > 0 && (
+                  <>
+                    <button
+                      onClick={() => handleMassPublishExams(true)}
+                      className="px-3 py-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
+                      <span>Publish ({selectedExamIds.size})</span>
+                    </button>
+                    <button
+                      onClick={handleMassDeleteExams}
+                      className="px-3 py-2 bg-rose-100 hover:bg-rose-200 text-rose-900 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-rose-700" />
+                      <span>Delete ({selectedExamIds.size})</span>
+                    </button>
+                  </>
+                )}
+
+                <button
+                  onClick={() => setShowCreateExamModal(true)}
+                  className="px-4 py-2.5 bg-blue-900 hover:bg-blue-800 text-white text-xs font-bold rounded-xl shadow-sm transition-colors flex items-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Create Examination</span>
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -1309,19 +1460,29 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
               ) : (
                 authorizedExams.map(exam => {
                   const windowStatus = checkExamTimeWindow(exam);
+                  const isSelected = selectedExamIds.has(exam.id);
                   return (
                     <div
                       key={exam.id}
                       className={`bg-white rounded-2xl border p-5 shadow-sm transition-all flex flex-col justify-between ${
                         exam.id === selectedExamId ? 'border-blue-900 ring-1 ring-blue-900' : 'border-slate-200'
-                      }`}
+                      } ${isSelected ? 'bg-blue-50/20 ring-2 ring-blue-500/50' : ''}`}
                     >
                       <div>
-                        {/* Status Badges & Subject/Class Form */}
+                        {/* Status Badges, Selection & Subject/Class Form */}
                         <div className="flex items-start justify-between gap-2 mb-2">
-                          <span className="text-[11px] font-mono font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                            {exam.subjectName} · {exam.classGrade}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => handleToggleExamSelection(exam.id)}
+                              className="w-4 h-4 rounded text-blue-900 cursor-pointer"
+                              title="Select examination for mass action"
+                            />
+                            <span className="text-[11px] font-mono font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                              {exam.subjectName} · {exam.classGrade}
+                            </span>
+                          </div>
                           <button
                             onClick={() => handleTogglePublish(exam)}
                             className={`text-[10px] font-bold px-2 py-0.5 rounded border transition-colors ${
@@ -2220,6 +2381,18 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             onProfileUpdated={handleProfileUpdated}
           />
         )}
+
+        {/* SUBROUTE 12: LESSON NOTES STUDIO */}
+        {activeTab === 'lesson-notes' && (
+          <TeacherLessonNotesTab
+            teacherStaff={activeStaff}
+            subjects={authorizedSubjects}
+            classes={authorizedClasses}
+            academicSession={settings.academicSession}
+            currentTerm={settings.currentTerm}
+            schoolName={settings.schoolName}
+          />
+        )}
       </main>
 
       {/* CREATE EXAM MODAL */}
@@ -2580,6 +2753,24 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   <Download className="w-3.5 h-3.5" />
                   <span>Download Sample CSV Template</span>
                 </button>
+              </div>
+
+              <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl flex items-center justify-between gap-3">
+                <div>
+                  <div className="font-bold text-slate-800 text-xs">Separate & Unique Question Bank</div>
+                  <div className="text-[11px] text-slate-600">
+                    Replace existing questions in this exam so each question file upload is unique and separate (does not append to previous uploads).
+                  </div>
+                </div>
+                <label className="flex items-center gap-1.5 cursor-pointer font-bold text-xs text-blue-900 shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={replaceQuestionsOnUpload}
+                    onChange={(e) => setReplaceQuestionsOnUpload(e.target.checked)}
+                    className="w-4 h-4 rounded text-blue-900"
+                  />
+                  <span>Replace existing</span>
+                </label>
               </div>
 
               <div>
@@ -3172,6 +3363,37 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* BATCH RESULT SLIPS MODAL */}
+      {showBatchResultSlipsModal && (
+        <BatchResultSlipsModal
+          students={authorizedStudents.length > 0 ? authorizedStudents : students}
+          classes={authorizedClasses.length > 0 ? authorizedClasses : classes}
+          subjects={authorizedSubjects.length > 0 ? authorizedSubjects : subjects}
+          submissions={submissions}
+          academicSession={settings.academicSession}
+          currentTerm={settings.currentTerm}
+          schoolSettings={settings}
+          onClose={() => setShowBatchResultSlipsModal(false)}
+        />
+      )}
+
+      {/* CAMPUS CHAT MODAL */}
+      {showCampusChat && (
+        <CampusChatModal
+          currentUser={{
+            id: activeStaff?.uniqueId || teacherEmail,
+            name: activeStaff?.fullName || teacherEmail.split('@')[0],
+            role: 'teacher',
+            email: teacherEmail,
+            classGrade: activeStaff?.assignedClasses?.[0] || 'SS 2',
+            avatarUrl: activeStaff?.avatarUrl
+          }}
+          allStudents={students}
+          allStaff={activeStaff ? [activeStaff] : []}
+          onClose={() => setShowCampusChat(false)}
+        />
       )}
     </div>
   );
