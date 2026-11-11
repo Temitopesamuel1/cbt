@@ -209,8 +209,8 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
       } else {
         const num = Math.max(0, Number(value) || 0);
         if (field === 'assignmentScore') updated.assignmentScore = Math.min(caWeights.assignmentMax, num);
-        if (field === 'projectScore') updated.projectScore = Math.min(caWeights.projectMax, num);
-        if (field === 'testScore') updated.testScore = Math.min(caWeights.testMax, num);
+        if (field === 'projectScore') updated.projectScore = Math.min(caWeights.projectMax ?? 20, num);
+        if (field === 'testScore') updated.testScore = Math.min(caWeights.testMax ?? 20, num);
         if (field === 'examScore') updated.examScore = Math.min(caWeights.examMax, num);
 
         const total = updated.assignmentScore + updated.projectScore + updated.testScore + updated.examScore;
@@ -399,8 +399,8 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     }
 
     const asg = Math.min(caWeights.assignmentMax, Math.max(0, Number(newEntryForm.assignmentScore) || 0));
-    const proj = Math.min(caWeights.projectMax, Math.max(0, Number(newEntryForm.projectScore) || 0));
-    const tst = Math.min(caWeights.testMax, Math.max(0, Number(newEntryForm.testScore) || 0));
+    const proj = Math.min(caWeights.projectMax ?? 20, Math.max(0, Number(newEntryForm.projectScore) || 0));
+    const tst = Math.min(caWeights.testMax ?? 20, Math.max(0, Number(newEntryForm.testScore) || 0));
     const ex = Math.min(caWeights.examMax, Math.max(0, Number(newEntryForm.examScore) || 0));
     const total = Math.min(100, asg + proj + tst + ex);
     const gradeInfo = calculateGrade(total);

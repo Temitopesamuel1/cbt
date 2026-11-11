@@ -638,9 +638,59 @@ export async function saveSchoolSettings(settings: SchoolSettings): Promise<void
   }
 }
 
+// Examination Tombstones & Cross-Tab Broadcast Sync
+const DELETED_EXAMS_KEY = 'prime_cbt_deleted_exam_ids';
+
+export function getDeletedExamIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(DELETED_EXAMS_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch (e) {
+    return new Set();
+  }
+}
+
+export function markExamAsDeleted(examId: string) {
+  try {
+    const ids = getDeletedExamIds();
+    ids.add(examId);
+    localStorage.setItem(DELETED_EXAMS_KEY, JSON.stringify(Array.from(ids)));
+  } catch (e) {}
+}
+
+export function markExamsAsDeletedBatch(examIds: string[]) {
+  try {
+    const ids = getDeletedExamIds();
+    examIds.forEach(id => ids.add(id));
+    localStorage.setItem(DELETED_EXAMS_KEY, JSON.stringify(Array.from(ids)));
+  } catch (e) {}
+}
+
+export function unmarkExamAsDeleted(examId: string) {
+  try {
+    const ids = getDeletedExamIds();
+    ids.delete(examId);
+    localStorage.setItem(DELETED_EXAMS_KEY, JSON.stringify(Array.from(ids)));
+  } catch (e) {}
+}
+
+export function broadcastExamSync(type = 'EXAMS_UPDATED', payload: any = {}) {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('prime_cbt_exams_updated', { detail: { type, ...payload } }));
+    window.dispatchEvent(new Event('storage'));
+    try {
+      const bc = new BroadcastChannel('prime_cbt_sync_channel');
+      bc.postMessage({ type, ...payload, timestamp: Date.now() });
+      bc.close();
+    } catch (e) {}
+  }
+}
+
 // Examination Service methods
 export async function fetchExaminations(filterPublishedOnly = false): Promise<Examination[]> {
   const path = 'examinations';
+  const deletedIds = getDeletedExamIds();
+
   // Read local cache first for instant speed
   let cached: Examination[] = [];
   try {
@@ -652,6 +702,9 @@ export async function fetchExaminations(filterPublishedOnly = false): Promise<Ex
     // ignore
   }
 
+  // Filter out any tombstoned/deleted exams
+  cached = cached.filter(e => !deletedIds.has(e.id));
+
   try {
     let q;
     if (filterPublishedOnly) {
@@ -661,16 +714,29 @@ export async function fetchExaminations(filterPublishedOnly = false): Promise<Ex
     }
     const snapshot = await getDocs(q);
     if (!snapshot.empty) {
-      const exams: Examination[] = [];
+      const firestoreExams: Examination[] = [];
       snapshot.forEach(docSnap => {
-        exams.push({ id: docSnap.id, ...docSnap.data() } as Examination);
+        if (!deletedIds.has(docSnap.id)) {
+          firestoreExams.push({ id: docSnap.id, ...docSnap.data() } as Examination);
+        }
       });
-      // Merge with local cache
+
+      // Build authoritative map
       const mergedMap: Record<string, Examination> = {};
-      DEFAULT_EXAMINATIONS.forEach(e => { mergedMap[e.id] = e; });
-      cached.forEach(e => { mergedMap[e.id] = e; });
-      exams.forEach(e => { mergedMap[e.id] = e; });
-      const finalExams = Object.values(mergedMap).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      DEFAULT_EXAMINATIONS.forEach(e => {
+        if (!deletedIds.has(e.id)) mergedMap[e.id] = e;
+      });
+      cached.forEach(e => {
+        if (!deletedIds.has(e.id)) mergedMap[e.id] = e;
+      });
+      firestoreExams.forEach(e => {
+        if (!deletedIds.has(e.id)) mergedMap[e.id] = e;
+      });
+
+      const finalExams = Object.values(mergedMap)
+        .filter(e => !deletedIds.has(e.id))
+        .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
       localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(finalExams));
       return filterPublishedOnly ? finalExams.filter(e => e.status === 'published') : finalExams;
     }
@@ -678,22 +744,32 @@ export async function fetchExaminations(filterPublishedOnly = false): Promise<Ex
     console.warn('Network fallback for examinations:', error);
   }
 
-  // Fallback to cache + defaults
+  // Fallback to cache + non-deleted defaults
   const mergedMap: Record<string, Examination> = {};
-  DEFAULT_EXAMINATIONS.forEach(e => { mergedMap[e.id] = e; });
-  cached.forEach(e => { mergedMap[e.id] = e; });
-  const finalExams = Object.values(mergedMap).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  DEFAULT_EXAMINATIONS.forEach(e => {
+    if (!deletedIds.has(e.id)) mergedMap[e.id] = e;
+  });
+  cached.forEach(e => {
+    if (!deletedIds.has(e.id)) mergedMap[e.id] = e;
+  });
+  const finalExams = Object.values(mergedMap)
+    .filter(e => !deletedIds.has(e.id))
+    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
   return filterPublishedOnly ? finalExams.filter(e => e.status === 'published') : finalExams;
 }
 
 export async function getExaminationById(examId: string): Promise<Examination | null> {
+  const deletedIds = getDeletedExamIds();
+  if (deletedIds.has(examId)) return null;
+
   const path = `examinations/${examId}`;
   try {
     const raw = localStorage.getItem('prime_cbt_saved_examinations');
     if (raw) {
       const list: Examination[] = JSON.parse(raw);
       const match = list.find(e => e.id === examId);
-      if (match) return match;
+      if (match && !deletedIds.has(match.id)) return match;
     }
   } catch (e) {
     // ignore
@@ -701,17 +777,21 @@ export async function getExaminationById(examId: string): Promise<Examination | 
 
   try {
     const snap = await getDoc(doc(db, 'examinations', examId));
-    if (snap.exists()) {
+    if (snap.exists() && !deletedIds.has(snap.id)) {
       return { id: snap.id, ...snap.data() } as Examination;
     }
   } catch (error) {
     // ignore
   }
 
-  return DEFAULT_EXAMINATIONS.find(e => e.id === examId) || null;
+  const def = DEFAULT_EXAMINATIONS.find(e => e.id === examId);
+  return def && !deletedIds.has(def.id) ? def : null;
 }
 
 export async function saveExamination(exam: Examination): Promise<void> {
+  // Clear any tombstone for this exam ID
+  unmarkExamAsDeleted(exam.id);
+
   // 1. Immediately mirror to localStorage so UI never blocks or fails
   try {
     const raw = localStorage.getItem('prime_cbt_saved_examinations');
@@ -723,7 +803,10 @@ export async function saveExamination(exam: Examination): Promise<void> {
     console.warn('LocalStorage exam cache error:', err);
   }
 
-  // 2. Sync to Firestore in background
+  // 2. Broadcast immediately to student portals and all browser tabs
+  broadcastExamSync('EXAM_SAVED', { examId: exam.id, status: exam.status });
+
+  // 3. Sync to Firestore in background
   const path = `examinations/${exam.id}`;
   try {
     await setDoc(doc(db, 'examinations', exam.id), exam, { merge: true });
@@ -733,6 +816,9 @@ export async function saveExamination(exam: Examination): Promise<void> {
 }
 
 export async function deleteExamination(examId: string): Promise<void> {
+  // Permanently mark tombstone
+  markExamAsDeleted(examId);
+
   // Update localStorage immediately
   try {
     const raw = localStorage.getItem('prime_cbt_saved_examinations');
@@ -743,6 +829,9 @@ export async function deleteExamination(examId: string): Promise<void> {
   } catch (e) {
     // ignore
   }
+
+  // Broadcast deletion to student portals and tabs immediately
+  broadcastExamSync('EXAM_DELETED', { examId });
 
   const path = `examinations/${examId}`;
   try {
@@ -755,6 +844,8 @@ export async function deleteExamination(examId: string): Promise<void> {
 // Mass Delete Examinations
 export async function deleteExaminationsBatch(examIds: string[]): Promise<void> {
   if (!examIds || examIds.length === 0) return;
+  markExamsAsDeletedBatch(examIds);
+
   const idSet = new Set(examIds);
   try {
     const raw = localStorage.getItem('prime_cbt_saved_examinations');
@@ -766,6 +857,9 @@ export async function deleteExaminationsBatch(examIds: string[]): Promise<void> 
     // ignore
   }
 
+  // Broadcast mass deletion immediately
+  broadcastExamSync('EXAMS_BATCH_DELETED', { examIds });
+
   await Promise.all(
     examIds.map(async (id) => {
       try {
@@ -775,6 +869,64 @@ export async function deleteExaminationsBatch(examIds: string[]): Promise<void> 
       }
     })
   );
+}
+
+// Restart Student Exam Timer & Reset Attempt
+export async function restartStudentExamTimer(studentId: string, examId: string): Promise<void> {
+  const attemptId = `attempt_${studentId}_${examId}`;
+
+  // 1. Clear local attempt & timer cache
+  try {
+    localStorage.removeItem(`prime_cbt_attempt_${attemptId}`);
+    localStorage.removeItem(`cbt_timer_${attemptId}`);
+    localStorage.removeItem(`cbt_answers_${attemptId}`);
+    localStorage.removeItem(`cbt_flagged_${attemptId}`);
+    sessionStorage.removeItem(`prime_cbt_attempt_${attemptId}`);
+  } catch (e) {}
+
+  // 2. Remove submission from local cache
+  try {
+    const rawSubs = localStorage.getItem('prime_cbt_submissions');
+    if (rawSubs) {
+      const list: Submission[] = JSON.parse(rawSubs);
+      const filtered = list.filter(s => !(s.studentId === studentId && s.examId === examId));
+      localStorage.setItem('prime_cbt_submissions', JSON.stringify(filtered));
+    }
+  } catch (e) {}
+
+  // 3. Broadcast immediately so student screen/portal resets timer right now
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('prime_cbt_timer_restarted', { detail: { studentId, examId } }));
+    window.dispatchEvent(new CustomEvent('prime_cbt_exams_updated'));
+    window.dispatchEvent(new Event('storage'));
+    try {
+      const bc = new BroadcastChannel('prime_cbt_sync_channel');
+      bc.postMessage({ type: 'TIMER_RESTARTED', studentId, examId, timestamp: Date.now() });
+      bc.close();
+    } catch (e) {}
+  }
+
+  // 4. Delete attempt from Firestore 'attempts' collection
+  try {
+    await deleteDoc(doc(db, 'attempts', attemptId));
+  } catch (err) {
+    console.warn('Error deleting attempt from Firestore:', err);
+  }
+
+  // 5. Delete any submissions in Firestore
+  try {
+    const q = query(
+      collection(db, 'submissions'),
+      where('studentId', '==', studentId),
+      where('examId', '==', examId)
+    );
+    const snap = await getDocs(q);
+    const delPromises: Promise<any>[] = [];
+    snap.forEach(d => delPromises.push(deleteDoc(d.ref)));
+    await Promise.all(delPromises);
+  } catch (err) {
+    console.warn('Error deleting submission from Firestore on timer restart:', err);
+  }
 }
 
 // Question Service methods

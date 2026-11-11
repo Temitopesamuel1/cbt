@@ -11,6 +11,8 @@ import { StudentHistoryView } from './components/student/StudentHistoryView';
 import { StudentProfileView } from './components/student/StudentProfileView';
 import { AdminLogin } from './components/admin/AdminLogin';
 import { AdminPortal } from './components/admin/AdminPortal';
+import { CampusChatModal } from './components/common/CampusChatModal';
+import { Lock } from 'lucide-react';
 import { Examination, Question, Student, Submission, SchoolSettings, StaffMember, checkExamTimeWindow } from './types/cbt';
 import { DEFAULT_SCHOOL_SETTINGS } from './data/initialSchoolData';
 import { testConnection, fetchQuestions, fetchSchoolSettings, ensureInitialSchoolData } from './services/firebase';
@@ -56,6 +58,30 @@ export default function App() {
 
   // School settings
   const [schoolSettings, setSchoolSettings] = useState<SchoolSettings>(DEFAULT_SCHOOL_SETTINGS);
+
+  // Global Campus Chat Hub state
+  const [isChatModalOpen, setIsChatModalOpen] = useState(false);
+
+  const chatCurrentUser = adminEmail
+    ? {
+        id: adminEmail,
+        name: adminEmail.toLowerCase() === 'fathertemitope@gmail.com' ? 'Chief Super Admin' : 'Administrator',
+        role: (adminEmail.toLowerCase() === 'fathertemitope@gmail.com' ? 'super_admin' : 'admin') as 'super_admin' | 'admin',
+      }
+    : teacherStaff
+    ? {
+        id: teacherStaff.id,
+        name: teacherStaff.fullName,
+        role: 'teacher' as const,
+      }
+    : studentSession
+    ? {
+        id: studentSession.id,
+        name: studentSession.fullName,
+        role: 'student' as const,
+        classGrade: studentSession.classGrade,
+      }
+    : null;
 
   // Sync route with browser history
   useEffect(() => {
@@ -223,6 +249,7 @@ export default function App() {
           }
           settings={schoolSettings}
           examInProgress={false}
+          onOpenChat={() => setIsChatModalOpen(true)}
         />
       )}
 
@@ -355,15 +382,34 @@ export default function App() {
               <span className="text-slate-400">·</span>
               <span className="text-slate-600 font-normal">{schoolSettings.address || 'Gaa Ajanaku, Ilorin, Kwara State'}</span>
             </div>
-            <div className="flex items-center gap-4 text-slate-400 text-[11px] font-mono">
-              <span>Academic Session: {schoolSettings.academicSession}</span>
+            <div className="flex items-center gap-3 text-slate-400 text-[11px] font-mono">
+              <span>Session: {schoolSettings.academicSession}</span>
               <span>·</span>
               <span>{schoolSettings.currentTerm}</span>
               <span>·</span>
-              <span>Role-Protected Evaluation Architecture</span>
+              <span className="flex items-center gap-1.5">
+                <span>Role-Protected Evaluation</span>
+                <button
+                  onClick={() => navigate('/admin.honeysworld')}
+                  className="text-slate-400 hover:text-amber-500 transition-colors p-1 rounded hover:bg-slate-100 cursor-pointer"
+                  title="Institutional Administration Authority Gate"
+                  aria-label="Institutional Admin Gate"
+                >
+                  <Lock className="w-3 h-3" />
+                </button>
+              </span>
             </div>
           </div>
         </footer>
+      )}
+
+      {/* Global Campus Chat Hub Modal */}
+      {isChatModalOpen && chatCurrentUser && (
+        <CampusChatModal
+          isOpen={isChatModalOpen}
+          onClose={() => setIsChatModalOpen(false)}
+          currentUser={chatCurrentUser}
+        />
       )}
     </div>
   );

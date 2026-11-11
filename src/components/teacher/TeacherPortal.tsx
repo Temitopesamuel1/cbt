@@ -44,6 +44,7 @@ import { TeacherProfileSection } from './TeacherProfileSection';
 import { TeacherLessonNotesTab } from './TeacherLessonNotesTab';
 import { BatchResultSlipsModal } from '../common/BatchResultSlipsModal';
 import { CampusChatModal } from '../common/CampusChatModal';
+import { StudentTimerResetModal } from '../common/StudentTimerResetModal';
 import {
   Examination,
   Question,
@@ -236,6 +237,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
   // Modals
   const [showCreateExamModal, setShowCreateExamModal] = useState(false);
+  const [timerResetModalExam, setTimerResetModalExam] = useState<Examination | null>(null);
   const [showAddQuestionModal, setShowAddQuestionModal] = useState(false);
   const [showCsvImportModal, setShowCsvImportModal] = useState(false);
   const [showAddStudentModal, setShowAddStudentModal] = useState(false);
@@ -353,6 +355,30 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   }, [selectedExamId]);
 
   // Exam actions
+  const handleOpenCreateExamModal = () => {
+    const defaultSubject = authorizedSubjects[0] || subjects[0];
+    const defaultClass = authorizedClasses[0]?.code || 'SS 2';
+    setExamForm({
+      title: '',
+      subjectId: defaultSubject?.id || '',
+      subjectName: defaultSubject?.name || '',
+      classGrade: defaultClass,
+      academicSession: settings.academicSession || '2024/2025',
+      term: (settings.currentTerm as '1st Term' | '2nd Term' | '3rd Term') || '1st Term',
+      examType: 'Mid-Term Test',
+      durationMinutes: 15,
+      totalQuestions: 10,
+      instructions: 'Select the most accurate option from A to D. Ensure you conclude your paper before the countdown timer reaches zero.',
+      status: 'published',
+      startDate: '',
+      endDate: '',
+      shuffleQuestions: true,
+      shuffleOptions: false,
+      resultVisibility: 'immediate'
+    });
+    setShowCreateExamModal(true);
+  };
+
   const handleSaveExam = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSavingExam) return;
@@ -398,7 +424,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         subjectName: authorizedSubjects[0]?.name || '',
         classGrade: authorizedClasses[0]?.code || 'SS 2',
         academicSession: settings.academicSession,
-        term: settings.currentTerm,
+        term: settings.currentTerm as '1st Term' | '2nd Term' | '3rd Term',
         examType: 'Mid-Term Test',
         durationMinutes: 15,
         totalQuestions: 10,
@@ -1346,8 +1372,9 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 </button>
 
                 <button
-                  onClick={() => setShowCreateExamModal(true)}
-                  className="w-full py-2.5 px-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-colors flex items-center justify-between"
+                  type="button"
+                  onClick={handleOpenCreateExamModal}
+                  className="w-full min-h-[44px] py-2.5 px-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-colors flex items-center justify-between cursor-pointer"
                 >
                   <span>New Examination</span>
                   <Plus className="w-4 h-4" />
@@ -1437,8 +1464,9 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 )}
 
                 <button
-                  onClick={() => setShowCreateExamModal(true)}
-                  className="px-4 py-2.5 bg-blue-900 hover:bg-blue-800 text-white text-xs font-bold rounded-xl shadow-sm transition-colors flex items-center gap-1.5"
+                  type="button"
+                  onClick={handleOpenCreateExamModal}
+                  className="px-4 py-2.5 min-h-[44px] bg-blue-900 hover:bg-blue-800 text-white text-xs font-bold rounded-xl shadow-sm transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
                   <Plus className="w-4 h-4" />
                   <span>Create Examination</span>
@@ -1565,23 +1593,55 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between pt-3 border-t border-slate-100 text-xs">
-                        <button
-                          onClick={() => {
-                            setSelectedExamId(exam.id);
-                            handleTabChange('questions');
-                          }}
-                          className="text-blue-900 hover:underline font-bold"
-                        >
-                          Manage Questions ({questions.filter(q => q.examId === exam.id).length}) →
-                        </button>
-                        <button
-                          onClick={() => handleDeleteExam(exam.id)}
-                          className="p-1 text-slate-400 hover:text-rose-600 rounded"
-                          title="Delete examination"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                      <div className="pt-3 border-t border-slate-100 space-y-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedExamId(exam.id);
+                              handleTabChange('questions');
+                            }}
+                            className="flex-1 min-h-[38px] px-3 py-1.5 text-xs font-bold text-white bg-blue-900 hover:bg-blue-800 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+                          >
+                            <BookOpen className="w-3.5 h-3.5" />
+                            <span>Questions ({questions.filter(q => q.examId === exam.id).length})</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleTogglePublish(exam)}
+                            className={`min-h-[38px] px-3 py-1.5 text-xs font-bold rounded-lg border flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                              exam.status === 'published'
+                                ? 'bg-amber-50 text-amber-900 hover:bg-amber-100 border-amber-300'
+                                : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border-emerald-300'
+                            }`}
+                            title={exam.status === 'published' ? 'Pause exam to make it unavailable to students' : 'Publish exam to make it live for candidates immediately'}
+                          >
+                            {exam.status === 'published' ? 'Pause Exam' : 'Publish Exam'}
+                          </button>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setTimerResetModalExam(exam)}
+                            className="flex-1 min-h-[38px] px-3 py-1.5 text-xs font-bold bg-amber-50 text-amber-900 hover:bg-amber-100 border border-amber-300 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+                            title="Restart exam countdown timer for student(s)"
+                          >
+                            <Clock className="w-3.5 h-3.5 text-amber-700" />
+                            <span>Restart Student Timer</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteExam(exam.id)}
+                            className="min-h-[38px] px-3 py-1.5 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                            title="Permanently delete examination"
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                            <span>Delete</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
@@ -2385,12 +2445,9 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         {/* SUBROUTE 12: LESSON NOTES STUDIO */}
         {activeTab === 'lesson-notes' && (
           <TeacherLessonNotesTab
-            teacherStaff={activeStaff}
+            teacher={activeStaff}
             subjects={authorizedSubjects}
             classes={authorizedClasses}
-            academicSession={settings.academicSession}
-            currentTerm={settings.currentTerm}
-            schoolName={settings.schoolName}
           />
         )}
       </main>
@@ -2583,15 +2640,23 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowCreateExamModal(false)}
-                  className="px-4 py-2 bg-slate-100 rounded-lg font-semibold"
+                  className="px-4 py-2 min-h-[44px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-semibold transition-colors cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-blue-900 text-white font-bold rounded-lg"
+                  disabled={isSavingExam}
+                  className="px-5 py-2.5 min-h-[44px] bg-blue-900 hover:bg-blue-800 text-white font-bold rounded-lg flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 transition-colors shadow-sm"
                 >
-                  Create Examination
+                  {isSavingExam ? (
+                    <>
+                      <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>Creating Exam...</span>
+                    </>
+                  ) : (
+                    <span>Create Examination</span>
+                  )}
                 </button>
               </div>
             </form>
@@ -3368,13 +3433,11 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       {/* BATCH RESULT SLIPS MODAL */}
       {showBatchResultSlipsModal && (
         <BatchResultSlipsModal
+          isOpen={showBatchResultSlipsModal}
           students={authorizedStudents.length > 0 ? authorizedStudents : students}
           classes={authorizedClasses.length > 0 ? authorizedClasses : classes}
-          subjects={authorizedSubjects.length > 0 ? authorizedSubjects : subjects}
           submissions={submissions}
-          academicSession={settings.academicSession}
-          currentTerm={settings.currentTerm}
-          schoolSettings={settings}
+          settings={settings}
           onClose={() => setShowBatchResultSlipsModal(false)}
         />
       )}
@@ -3382,17 +3445,27 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       {/* CAMPUS CHAT MODAL */}
       {showCampusChat && (
         <CampusChatModal
+          isOpen={showCampusChat}
           currentUser={{
             id: activeStaff?.uniqueId || teacherEmail,
             name: activeStaff?.fullName || teacherEmail.split('@')[0],
             role: 'teacher',
-            email: teacherEmail,
-            classGrade: activeStaff?.assignedClasses?.[0] || 'SS 2',
-            avatarUrl: activeStaff?.avatarUrl
+            classGrade: activeStaff?.assignedClasses?.[0] || 'SS 2'
           }}
-          allStudents={students}
-          allStaff={activeStaff ? [activeStaff] : []}
+          availableStudents={students}
+          availableStaff={activeStaff ? [activeStaff] : []}
           onClose={() => setShowCampusChat(false)}
+        />
+      )}
+
+      {/* STUDENT TIMER RESET MODAL */}
+      {timerResetModalExam && (
+        <StudentTimerResetModal
+          isOpen={Boolean(timerResetModalExam)}
+          onClose={() => setTimerResetModalExam(null)}
+          exam={timerResetModalExam}
+          students={students}
+          onTimerRestarted={loadAllData}
         />
       )}
     </div>

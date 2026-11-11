@@ -13,7 +13,7 @@ import {
   Award
 } from 'lucide-react';
 import { Submission, Examination, SchoolClass, SchoolSettings } from '../../types/cbt';
-import { deleteSubmission } from '../../services/firebase';
+import { deleteSubmission, restartStudentExamTimer } from '../../services/firebase';
 import { StudentResultView } from '../student/StudentResultView';
 
 interface AdminSubmissionsTabProps {
@@ -51,13 +51,13 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
 
   const handleResetSubmission = async (sub: Submission) => {
     if (!sub.id) return;
-    if (confirm(`Reset examination attempt for "${sub.studentName}" (${sub.examTitle})?\n\nThis will delete their submitted result and permit the student to log back in and retake the exam.`)) {
+    if (confirm(`Restart timer & clear attempt for "${sub.studentName}" on "${sub.examTitle}"?\n\nThis will reset the candidate's countdown timer to the full duration, wipe any expired timer lock, delete the previous submission, and allow the student to retake the exam immediately.`)) {
       try {
-        await deleteSubmission(sub.id);
+        await restartStudentExamTimer(sub.studentId, sub.examId);
         onSubmissionsUpdated();
-        showNotification(`Examination attempt for ${sub.studentName} has been cleared. Student may retake the paper.`);
+        showNotification(`Timer restarted for ${sub.studentName}! Candidate can retake "${sub.examTitle}" with full time.`);
       } catch (err: any) {
-        showNotification(err.message || 'Failed to reset submission.', 'error');
+        showNotification(err.message || 'Failed to restart student timer.', 'error');
       }
     }
   };

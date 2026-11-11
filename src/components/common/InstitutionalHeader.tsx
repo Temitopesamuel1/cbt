@@ -160,9 +160,9 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
 
           {/* Zone 3: Primary Action / User Profile */}
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {/* Install PWA Button on PC / Mobile */}
+            {/* Install PWA Button on PC & Mobile Phones */}
             {!examInProgress && (
-              <PWAInstallButton className="hidden sm:inline-flex" />
+              <PWAInstallButton className="inline-flex" />
             )}
 
             {/* Campus Communications Button */}

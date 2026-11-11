@@ -112,9 +112,36 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
     window.addEventListener('online', handleOnlineStatus);
     window.addEventListener('offline', handleOnlineStatus);
 
+    const handleTimerRestarted = (e: any) => {
+      const detail = e?.detail;
+      if (!detail || (detail.studentId === student.id && detail.examId === exam.id)) {
+        startTimeRef.current = Date.now();
+        setSecondsRemaining((exam.durationMinutes || 15) * 60);
+        hasSubmittedRef.current = false;
+        setIsSubmitting(false);
+      }
+    };
+    window.addEventListener('prime_cbt_timer_restarted', handleTimerRestarted);
+
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('prime_cbt_sync_channel');
+      bc.onmessage = (event) => {
+        if (event.data?.type === 'TIMER_RESTARTED') {
+          if (event.data.studentId === student.id && event.data.examId === exam.id) {
+            handleTimerRestarted({ detail: event.data });
+          }
+        }
+      };
+    } catch (e) {}
+
     return () => {
       window.removeEventListener('online', handleOnlineStatus);
       window.removeEventListener('offline', handleOnlineStatus);
+      window.removeEventListener('prime_cbt_timer_restarted', handleTimerRestarted);
+      if (bc) {
+        try { bc.close(); } catch (e) {}
+      }
     };
   }, [attemptId, exam, student]);
 

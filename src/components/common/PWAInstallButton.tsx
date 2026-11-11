@@ -23,8 +23,9 @@ export const PWAInstallButton: React.FC<{ className?: string; label?: string }> 
         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-black shadow-xs transition-all cursor-pointer active:scale-95 ${className}`}
         title="Download and install Honey's World CBT App on your PC or Phone"
       >
-        <Download className="w-3.5 h-3.5 text-slate-950" />
-        <span>{label}</span>
+        <Download className="w-3.5 h-3.5 text-slate-950 shrink-0" />
+        <span className="hidden sm:inline">{label}</span>
+        <span className="sm:hidden">Install</span>
       </button>
     );
   }
@@ -38,8 +39,9 @@ export const PWAInstallButton: React.FC<{ className?: string; label?: string }> 
           className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-black shadow-xs transition-all cursor-pointer active:scale-95 ${className}`}
           title="Add Honey's World CBT App to your iPhone / iPad Home Screen"
         >
-          <Smartphone className="w-3.5 h-3.5 text-slate-950" />
-          <span>Install on iOS</span>
+          <Smartphone className="w-3.5 h-3.5 text-slate-950 shrink-0" />
+          <span className="hidden sm:inline">Install on iOS</span>
+          <span className="sm:hidden">Install</span>
         </button>
 
         {showIOSModal && (
@@ -98,8 +100,9 @@ export const PWAInstallButton: React.FC<{ className?: string; label?: string }> 
         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-black shadow-xs transition-all cursor-pointer active:scale-95 ${className}`}
         title="Download / Install CBT Application on PC & Mobile"
       >
-        <Download className="w-3.5 h-3.5 text-slate-950" />
-        <span>Download App</span>
+        <Download className="w-3.5 h-3.5 text-slate-950 shrink-0" />
+        <span className="hidden sm:inline">Download App</span>
+        <span className="sm:hidden">Install</span>
       </button>
 
       {showInstructions && (

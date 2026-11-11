@@ -15,7 +15,7 @@ import {
   Eye,
   Settings
 } from 'lucide-react';
-import { Examination, Question, SchoolClass, Subject } from '../../types/cbt';
+import { Examination, Question, SchoolClass, Subject, Student } from '../../types/cbt';
 import {
   saveExamination,
   deleteExamination,
@@ -23,9 +23,11 @@ import {
   saveQuestion,
   deleteQuestion
 } from '../../services/firebase';
+import { StudentTimerResetModal } from '../common/StudentTimerResetModal';
 
 interface AdminExamsTabProps {
   exams: Examination[];
+  students?: Student[];
   classes: SchoolClass[];
   subjects: Subject[];
   academicSession: string;
@@ -36,6 +38,7 @@ interface AdminExamsTabProps {
 
 export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
   exams,
+  students = [],
   classes,
   subjects,
   academicSession,
@@ -43,6 +46,7 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
   onExamsUpdated,
   showNotification
 }) => {
+  const [timerResetModalExam, setTimerResetModalExam] = useState<Examination | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedClassFilter, setSelectedClassFilter] = useState('All');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState('All');
@@ -218,6 +222,21 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
       } catch (err: any) {
         showNotification(err.message || 'Failed to delete exam.', 'error');
       }
+    }
+  };
+
+  const handleTogglePublish = async (exam: Examination) => {
+    const nextStatus: 'draft' | 'published' = exam.status === 'published' ? 'draft' : 'published';
+    try {
+      await saveExamination({
+        ...exam,
+        status: nextStatus,
+        updatedAt: new Date().toISOString()
+      });
+      onExamsUpdated();
+      showNotification(`Exam "${exam.title}" is now ${nextStatus === 'published' ? 'PUBLISHED (live for students)' : 'PAUSED (hidden as draft)'}.`);
+    } catch (err: any) {
+      showNotification(err.message || 'Failed to toggle exam status.', 'error');
     }
   };
 
@@ -463,7 +482,26 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
                     </td>
 
                     <td className="py-3.5 px-4 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
+                      <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                        <button
+                          onClick={() => setTimerResetModalExam(exam)}
+                          className="px-2.5 py-1 text-xs font-bold bg-amber-50 text-amber-900 hover:bg-amber-100 border border-amber-300 rounded-lg flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                          title="Restart exam countdown timer for any student or entire class"
+                        >
+                          <Clock className="w-3.5 h-3.5 text-amber-700" />
+                          <span>Reset Timer</span>
+                        </button>
+                        <button
+                          onClick={() => handleTogglePublish(exam)}
+                          className={`px-2 py-1 text-xs font-bold rounded-lg border cursor-pointer transition-colors ${
+                            exam.status === 'published'
+                              ? 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-300'
+                              : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border-emerald-300'
+                          }`}
+                          title={exam.status === 'published' ? 'Pause exam (hide from students)' : 'Publish exam (make live)'}
+                        >
+                          {exam.status === 'published' ? 'Pause' : 'Publish'}
+                        </button>
                         <button
                           onClick={() => handleOpenQuestions(exam)}
                           className="px-2.5 py-1 text-xs font-bold bg-blue-50 text-blue-900 hover:bg-blue-100 border border-blue-200 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
@@ -912,6 +950,20 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {/* Student Timer Reset Modal */}
+      {timerResetModalExam && (
+        <StudentTimerResetModal
+          isOpen={Boolean(timerResetModalExam)}
+          onClose={() => setTimerResetModalExam(null)}
+          exam={timerResetModalExam}
+          students={students}
+          onTimerRestarted={() => {
+            onExamsUpdated();
+            showNotification(`Student timers successfully reset for "${timerResetModalExam.title}".`);
+          }}
+        />
       )}
     </div>
   );

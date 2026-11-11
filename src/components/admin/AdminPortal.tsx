@@ -566,17 +566,19 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       {/* Main Admin Tabbed Navigation */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-1.5 flex flex-wrap items-center gap-1.5">
-          <button
-            onClick={() => setActiveTab('admins')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'admins'
-                ? 'bg-amber-500 text-slate-950 shadow-md font-black'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-            }`}
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Admins Authority ({admins.length})</span>
-          </button>
+          {isSuperAdminUser && (
+            <button
+              onClick={() => setActiveTab('admins')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                activeTab === 'admins'
+                  ? 'bg-amber-500 text-slate-950 shadow-md font-black'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Admins Authority ({admins.length})</span>
+            </button>
+          )}
 
           <button
             onClick={() => setActiveTab('brand')}
@@ -673,13 +675,25 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             <CheckSquare className="w-3.5 h-3.5 text-emerald-400" />
             <span>CBT Submissions ({submissions.length})</span>
           </button>
+
+          <button
+            onClick={() => setActiveTab('communications')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'communications'
+                ? 'bg-slate-900 text-white shadow-md'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
+            <span>Campus Chat Hub Audit</span>
+          </button>
         </div>
       </div>
 
       {/* Main Tab Panels */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full">
         {/* TAB 1: ADMINISTRATORS AUTHORITY */}
-        {activeTab === 'admins' && (
+        {activeTab === 'admins' && isSuperAdminUser && (
           <AdminUserManagementTab
             currentAdminEmail={adminEmail}
             admins={admins}
@@ -1060,6 +1074,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         {activeTab === 'exams' && (
           <AdminExamsTab
             exams={exams}
+            students={students}
             classes={classes}
             subjects={subjects}
             academicSession={settings.academicSession}
@@ -1090,6 +1105,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             onSubmissionsUpdated={loadData}
             showNotification={showNotification}
             schoolSettings={settings}
+          />
+        )}
+
+        {/* TAB 10: CAMPUS CHAT HUB AUDIT */}
+        {activeTab === 'communications' && (
+          <AdminCommunicationsAuditTab
+            students={students}
+            staff={staffList}
+            showNotification={showNotification}
           />
         )}
       </main>

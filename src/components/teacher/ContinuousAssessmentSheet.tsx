@@ -972,12 +972,11 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       {/* BATCH RESULT SLIPS MODAL */}
       {showBatchSlipsModal && (
         <BatchResultSlipsModal
+          isOpen={showBatchSlipsModal}
           students={classStudents}
           classes={classes}
-          subjects={subjects}
           submissions={submissions}
-          academicSession={academicSession}
-          currentTerm={currentTerm}
+          initialClassFilter={selectedClassCode}
           onClose={() => setShowBatchSlipsModal(false)}
         />
       )}

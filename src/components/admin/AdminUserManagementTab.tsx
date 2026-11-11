@@ -33,6 +33,15 @@ export const AdminUserManagementTab: React.FC<AdminUserManagementTabProps> = ({
   onAdminsUpdated,
   showNotification
 }) => {
+  const isCurrentSuperAdmin =
+    currentAdminEmail.toLowerCase() === 'fathertemitope@gmail.com' ||
+    admins.some(a => a.email.toLowerCase() === currentAdminEmail.toLowerCase() && a.role === 'super_admin');
+
+  // Only super admin can see other admins; regular admins can only see their own profile
+  const displayedAdmins = isCurrentSuperAdmin
+    ? admins
+    : admins.filter(a => a.email.toLowerCase() === currentAdminEmail.toLowerCase());
+
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingAdmin, setEditingAdmin] = useState<AdminUser | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -171,13 +180,15 @@ export const AdminUserManagementTab: React.FC<AdminUserManagementTabProps> = ({
             </p>
           </div>
 
-          <button
-            onClick={handleOpenAdd}
-            className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-md transition-colors flex items-center gap-2 shrink-0 cursor-pointer"
-          >
-            <UserPlus className="w-4 h-4 text-amber-400" />
-            <span>Add New Administrator</span>
-          </button>
+          {isCurrentSuperAdmin && (
+            <button
+              onClick={handleOpenAdd}
+              className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-md transition-colors flex items-center gap-2 shrink-0 cursor-pointer"
+            >
+              <UserPlus className="w-4 h-4 text-amber-400" />
+              <span>Add New Administrator</span>
+            </button>
+          )}
         </div>
 
         {/* Security Notice Card */}
@@ -202,14 +213,14 @@ export const AdminUserManagementTab: React.FC<AdminUserManagementTabProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
-              {admins.length === 0 ? (
+              {displayedAdmins.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-8 text-center text-slate-400">
                     No administrators registered yet.
                   </td>
                 </tr>
               ) : (
-                admins.map(admin => {
+                displayedAdmins.map(admin => {
                   const isChief = admin.isMainSuperAdmin || admin.email.toLowerCase() === 'fathertemitope@gmail.com';
                   const isCurrent = admin.email.toLowerCase() === currentAdminEmail.toLowerCase();
                   const showPass = visiblePasswords[admin.id];
@@ -244,29 +255,35 @@ export const AdminUserManagementTab: React.FC<AdminUserManagementTabProps> = ({
                       </td>
 
                       <td className="py-3.5 px-4">
-                        <div className="inline-flex items-center gap-1.5 bg-slate-900 text-amber-300 font-mono text-xs px-2.5 py-1 rounded-lg border border-slate-800">
-                          <span>{showPass ? admin.passcode : '••••••••'}</span>
-                          <button
-                            type="button"
-                            onClick={() => togglePasswordVisibility(admin.id)}
-                            className="text-slate-400 hover:text-white p-0.5 cursor-pointer"
-                            title={showPass ? 'Hide passcode' : 'Show passcode'}
-                          >
-                            {showPass ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleCopy(admin.passcode, `pass_${admin.id}`)}
-                            className="text-slate-400 hover:text-white p-0.5 cursor-pointer"
-                            title="Copy passcode"
-                          >
-                            {copiedId === `pass_${admin.id}` ? (
-                              <Check className="w-3 h-3 text-emerald-400" />
-                            ) : (
-                              <Copy className="w-3 h-3" />
-                            )}
-                          </button>
-                        </div>
+                        {isCurrentSuperAdmin || isCurrent ? (
+                          <div className="inline-flex items-center gap-1.5 bg-slate-900 text-amber-300 font-mono text-xs px-2.5 py-1 rounded-lg border border-slate-800">
+                            <span>{showPass ? admin.passcode : '••••••••'}</span>
+                            <button
+                              type="button"
+                              onClick={() => togglePasswordVisibility(admin.id)}
+                              className="text-slate-400 hover:text-white p-0.5 cursor-pointer"
+                              title={showPass ? 'Hide passcode' : 'Show passcode'}
+                            >
+                              {showPass ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleCopy(admin.passcode, `pass_${admin.id}`)}
+                              className="text-slate-400 hover:text-white p-0.5 cursor-pointer"
+                              title="Copy passcode"
+                            >
+                              {copiedId === `pass_${admin.id}` ? (
+                                <Check className="w-3 h-3 text-emerald-400" />
+                              ) : (
+                                <Copy className="w-3 h-3" />
+                              )}
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="font-mono text-slate-400 text-xs tracking-widest bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
+                            ••••••••
+                          </span>
+                        )}
                       </td>
 
                       <td className="py-3.5 px-4 font-mono text-slate-600 text-[11px]">
@@ -287,14 +304,16 @@ export const AdminUserManagementTab: React.FC<AdminUserManagementTabProps> = ({
 
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => handleOpenEdit(admin)}
-                            className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-                            title="Edit Administrator"
-                          >
-                            <Edit3 className="w-4 h-4" />
-                          </button>
-                          {!isChief && (
+                          {(isCurrentSuperAdmin || isCurrent) && (
+                            <button
+                              onClick={() => handleOpenEdit(admin)}
+                              className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                              title="Edit Administrator"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                          )}
+                          {isCurrentSuperAdmin && !isChief && (
                             <button
                               onClick={() => handleDelete(admin)}
                               className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"

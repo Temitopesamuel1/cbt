@@ -45,8 +45,8 @@ export const AdminGradingScaleTab: React.FC<AdminGradingScaleTabProps> = ({
 
   const [saving, setSaving] = useState(false);
 
-  const totalCaMax = caWeights.assignmentMax + caWeights.projectMax + caWeights.testMax;
-  const grandTotal = totalCaMax + caWeights.examMax;
+  const totalCaMax = (caWeights.firstCaMax ?? 20) + (caWeights.secondCaMax ?? 20) + (caWeights.assignmentMax ?? 10);
+  const grandTotal = totalCaMax + (caWeights.examMax ?? 50);
 
   const handleResetDefaults = () => {
     if (confirm('Reset Continuous Assessment weights and Grading Scale to standard WAEC defaults?')) {
@@ -234,7 +234,37 @@ export const AdminGradingScaleTab: React.FC<AdminGradingScaleTabProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70">
               <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
-                Assignment Max
+                1st CA Max
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="50"
+                value={caWeights.firstCaMax ?? 20}
+                onChange={(e) => setCaWeights({ ...caWeights, firstCaMax: Number(e.target.value) })}
+                className="w-full px-3 py-2 text-base font-black bg-white border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-900"
+              />
+              <span className="text-[10px] text-slate-500 mt-1 block">Default: 20 marks</span>
+            </div>
+
+            <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70">
+              <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
+                2nd CA Max
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="50"
+                value={caWeights.secondCaMax ?? 20}
+                onChange={(e) => setCaWeights({ ...caWeights, secondCaMax: Number(e.target.value) })}
+                className="w-full px-3 py-2 text-base font-black bg-white border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-900"
+              />
+              <span className="text-[10px] text-slate-500 mt-1 block">Default: 20 marks</span>
+            </div>
+
+            <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70">
+              <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
+                Note / Assignment Max
               </label>
               <input
                 type="number"
@@ -245,36 +275,6 @@ export const AdminGradingScaleTab: React.FC<AdminGradingScaleTabProps> = ({
                 className="w-full px-3 py-2 text-base font-black bg-white border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-900"
               />
               <span className="text-[10px] text-slate-500 mt-1 block">Default: 10 marks</span>
-            </div>
-
-            <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70">
-              <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
-                Project Work Max
-              </label>
-              <input
-                type="number"
-                min="0"
-                max="50"
-                value={caWeights.projectMax}
-                onChange={(e) => setCaWeights({ ...caWeights, projectMax: Number(e.target.value) })}
-                className="w-full px-3 py-2 text-base font-black bg-white border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-900"
-              />
-              <span className="text-[10px] text-slate-500 mt-1 block">Default: 10 marks</span>
-            </div>
-
-            <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70">
-              <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
-                CA Test Max
-              </label>
-              <input
-                type="number"
-                min="0"
-                max="50"
-                value={caWeights.testMax}
-                onChange={(e) => setCaWeights({ ...caWeights, testMax: Number(e.target.value) })}
-                className="w-full px-3 py-2 text-base font-black bg-white border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-900"
-              />
-              <span className="text-[10px] text-slate-500 mt-1 block">Default: 20 marks</span>
             </div>
 
             <div className="p-4 rounded-xl border border-slate-200 bg-blue-50/50 border-blue-200">
@@ -289,7 +289,7 @@ export const AdminGradingScaleTab: React.FC<AdminGradingScaleTabProps> = ({
                 onChange={(e) => setCaWeights({ ...caWeights, examMax: Number(e.target.value) })}
                 className="w-full px-3 py-2 text-base font-black bg-white border border-blue-300 rounded-xl text-blue-950 focus:outline-none focus:ring-2 focus:ring-blue-900"
               />
-              <span className="text-[10px] text-blue-700 mt-1 block">Default: 60 marks</span>
+              <span className="text-[10px] text-blue-700 mt-1 block">Default: 50 marks</span>
             </div>
           </div>
         </div>

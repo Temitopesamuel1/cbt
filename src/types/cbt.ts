@@ -293,6 +293,7 @@ export interface StudentAssessmentRecord {
 export interface ChatMessage {
   id: string;
   channelId: string; // e.g. 'staff-general', 'class-ss2', or user pair ID
+  channelName?: string;
   channelType: 'staff_group' | 'student_class_group' | 'direct_teacher' | 'direct_student' | 'student_to_teacher';
   senderId: string;
   senderName: string;

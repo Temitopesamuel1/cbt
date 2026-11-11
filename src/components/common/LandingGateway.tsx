@@ -10,9 +10,11 @@ import {
   CheckCircle,
   ArrowRight,
   Megaphone,
-  Lock
+  Lock,
+  Smartphone
 } from 'lucide-react';
 import { SchoolSettings } from '../../types/cbt';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface LandingGatewayProps {
   onNavigate: (route: string) => void;
@@ -70,6 +72,24 @@ export const LandingGateway: React.FC<LandingGatewayProps> = ({ onNavigate, sett
                 Computer-Based Examination, Continuous Assessment Master Broadsheet, and Student Information System.
               </p>
             </div>
+          </div>
+
+          {/* Mobile Phone & PC App Download Banner */}
+          <div className="bg-amber-400 text-slate-950 px-6 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-amber-500/40">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-slate-950 text-amber-300 flex items-center justify-center font-bold shrink-0 shadow-xs">
+                <Smartphone className="w-5 h-5" />
+              </div>
+              <div className="leading-tight">
+                <span className="font-black text-xs uppercase tracking-wide block text-slate-950">
+                  Install Honey's World CBT on Your Phone or PC
+                </span>
+                <span className="text-[11px] text-slate-800 font-medium">
+                  Add to home screen for ultra-fast startup, offline practice, and real-time exam alerts.
+                </span>
+              </div>
+            </div>
+            <PWAInstallButton className="bg-slate-950 text-amber-300 hover:bg-slate-900 border border-slate-800 self-start sm:self-auto shrink-0 shadow-md" label="Download App on Phone" />
           </div>
 
           {/* Dual Portal Selection Cards */}

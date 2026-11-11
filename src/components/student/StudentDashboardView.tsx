@@ -81,32 +81,67 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
     setCurrentStudent(initialStudent);
   }, [initialStudent]);
 
-  // Load Examinations and Submissions
+  // Load Examinations and Submissions with instant real-time sync
   useEffect(() => {
-    const loadStudentData = async () => {
-      setLoading(true);
+    let isMounted = true;
+
+    const loadStudentData = async (silent = false) => {
+      if (!silent) setLoading(true);
       try {
         const [allExams, allSubs] = await Promise.all([
           fetchExaminations(true), // published only
           fetchSubmissions(undefined, currentStudent.id)
         ]);
 
-        if (allExams) {
+        if (isMounted && allExams) {
           const classPeculiar = allExams.filter(e => isClassMatch(currentStudent.classGrade, e.classGrade));
           setAvailableExams(classPeculiar);
         }
 
-        if (allSubs) {
+        if (isMounted && allSubs) {
           setStudentSubmissions(allSubs);
         }
       } catch (err) {
         console.warn('Error loading student dashboard papers:', err);
       } finally {
-        setLoading(false);
+        if (isMounted && !silent) {
+          setLoading(false);
+        }
       }
     };
 
     loadStudentData();
+
+    // 1. Cross-tab & local custom event listener
+    const handleSync = () => {
+      loadStudentData(true);
+    };
+    window.addEventListener('prime_cbt_exams_updated', handleSync);
+    window.addEventListener('storage', handleSync);
+
+    // 2. BroadcastChannel for cross-window instantaneous sync
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('prime_cbt_sync_channel');
+      bc.onmessage = () => {
+        loadStudentData(true);
+      };
+    } catch (e) {}
+
+    // 3. Fast 4-second polling interval so changes from teacher devices reflect immediately
+    const pollInterval = window.setInterval(() => {
+      loadStudentData(true);
+    }, 4000);
+
+    return () => {
+      isMounted = false;
+      window.removeEventListener('prime_cbt_exams_updated', handleSync);
+      window.removeEventListener('storage', handleSync);
+      window.clearInterval(pollInterval);
+      if (bc) {
+        try { bc.close(); } catch (e) {}
+      }
+    };
   }, [currentStudent]);
 
   // Real-time live subscription to Continuous Assessment & Broad Sheet records
