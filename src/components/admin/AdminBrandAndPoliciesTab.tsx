@@ -14,7 +14,7 @@ import {
   CheckCircle2,
   AlertCircle
 } from 'lucide-react';
-import { SchoolSettings } from '../../types/cbt';
+import { SchoolSettings, resolveCaWeights } from '../../types/cbt';
 import { saveSchoolSettings } from '../../services/firebase';
 
 interface AdminBrandAndPoliciesTabProps {
@@ -54,14 +54,7 @@ export const AdminBrandAndPoliciesTab: React.FC<AdminBrandAndPoliciesTabProps> =
     enablePracticeCenter: settings.enablePracticeCenter ?? true,
     enableChatHub: settings.enableChatHub ?? true,
     enableLessonGenerator: settings.enableLessonGenerator ?? true,
-    caWeights: settings.caWeights || {
-      firstCaMax: 20,
-      secondCaMax: 20,
-      assignmentMax: 10,
-      examMax: 50,
-      testMax: 20,
-      projectMax: 20
-    },
+    caWeights: resolveCaWeights(settings.caWeights),
     gradingScale: settings.gradingScale
   });
 

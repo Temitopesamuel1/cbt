@@ -18,13 +18,18 @@ import {
   User,
   Radio,
   HelpCircle,
-  ExternalLink
+  ExternalLink,
+  Printer,
+  Lock
 } from 'lucide-react';
 import {
   Student,
   Examination,
   Submission,
   StudentAssessmentRecord,
+  SchoolSettings,
+  CaWeightsConfig,
+  resolveCaWeights,
   checkExamTimeWindow,
   calculateGradePoint,
   getAcademicStanding
@@ -32,12 +37,14 @@ import {
 import {
   fetchExaminations,
   fetchSubmissions,
-  subscribeStudentAssessmentRecords
+  subscribeStudentAssessmentRecords,
+  fetchSchoolSettings
 } from '../../services/firebase';
 import { StudentPracticeQuiz } from './StudentPracticeQuiz';
 import { StudentCumulativeTranscript } from './StudentCumulativeTranscript';
 import { StudentAiAdvisorView } from './StudentAiAdvisorView';
 import { StudentProfileView } from './StudentProfileView';
+import { HwsOfficialResultSlip } from '../common/HwsOfficialResultSlip';
 
 interface StudentDashboardViewProps {
   student: Student;
@@ -75,6 +82,27 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
   const [loading, setLoading] = useState(true);
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>('All');
   const [recentSyncNotice, setRecentSyncNotice] = useState<string | null>(null);
+  const [showOfficialReportSheet, setShowOfficialReportSheet] = useState<boolean>(false);
+  const [schoolSettings, setSchoolSettings] = useState<SchoolSettings | undefined>(undefined);
+  const [caMeta, setCaMeta] = useState<Required<CaWeightsConfig>>(() => resolveCaWeights(undefined));
+
+  // Sync school settings & CA weights live
+  useEffect(() => {
+    fetchSchoolSettings().then(st => {
+      setSchoolSettings(st);
+      setCaMeta(resolveCaWeights(st.caWeights));
+    }).catch(() => {});
+
+    const onSettingsUpdate = (e: Event) => {
+      const detail = (e as CustomEvent<SchoolSettings>).detail;
+      if (detail) {
+        setSchoolSettings(detail);
+        setCaMeta(resolveCaWeights(detail.caWeights));
+      }
+    };
+    window.addEventListener('schoolSettingsUpdated', onSettingsUpdate);
+    return () => window.removeEventListener('schoolSettingsUpdated', onSettingsUpdate);
+  }, []);
 
   // Sync internal student state if prop updates
   useEffect(() => {
@@ -562,18 +590,49 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                   Continuous Assessment & Examination Scores
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Scores update dynamically as teachers input Assignment (10), Project (10), Test (20), and Exam (60) marks.
+                  Scores synchronize live as teachers update {caMeta.assignmentLabel} ({caMeta.assignmentMax}), {caMeta.firstCaLabel} ({caMeta.firstCaMax}), {caMeta.secondCaLabel} ({caMeta.secondCaMax}), and {caMeta.examLabel} ({caMeta.examMax}).
                 </p>
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs font-mono font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
-                  Academic Session: {currentStudent.academicSession}
+                  Session: {currentStudent.academicSession}
                 </span>
+                {!currentStudent.resultWithheld && (
+                  <button
+                    type="button"
+                    onClick={() => setShowOfficialReportSheet(prev => !prev)}
+                    className="px-4 py-2 bg-blue-900 hover:bg-blue-950 text-white font-bold text-xs rounded-xl shadow-sm flex items-center gap-1.5 cursor-pointer transition-all"
+                  >
+                    <Printer className="w-4 h-4 text-amber-300" />
+                    <span>{showOfficialReportSheet ? 'Show Table View' : 'View / Print Official 2-Page Report Sheet'}</span>
+                  </button>
+                )}
               </div>
             </div>
 
-            {caRecords.length === 0 ? (
+            {currentStudent.resultWithheld ? (
+              <div className="text-center py-12 border-2 border-rose-200 bg-rose-50/40 rounded-2xl space-y-3 p-6">
+                <Lock className="w-10 h-10 mx-auto text-rose-500" />
+                <h3 className="text-base font-black text-slate-900 uppercase">Terminal Result Withheld</h3>
+                <p className="text-xs text-slate-600 max-w-md mx-auto">
+                  Your Continuous Assessment broadsheet and End of Term Report Sheet are currently withheld by School Administration.
+                  {currentStudent.withheldReason ? ` Reason: ${currentStudent.withheldReason}` : ''}
+                </p>
+              </div>
+            ) : showOfficialReportSheet ? (
+              <div className="pt-2">
+                <HwsOfficialResultSlip
+                  student={currentStudent}
+                  settings={schoolSettings}
+                  academicSession={currentStudent.academicSession || '2024/2025'}
+                  term="1st Term"
+                  isEditable={false}
+                  usePrintPortal={true}
+                  onClose={() => setShowOfficialReportSheet(false)}
+                />
+              </div>
+            ) : caRecords.length === 0 ? (
               <div className="text-center py-12 border border-dashed border-slate-200 rounded-xl space-y-3">
                 <FileText className="w-10 h-10 mx-auto text-slate-300" />
                 <h3 className="text-sm font-bold text-slate-800">No Assessment Records Recorded Yet</h3>
@@ -587,11 +646,11 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                   <thead className="bg-slate-100 text-slate-700 font-bold uppercase tracking-wider text-[10px]">
                     <tr>
                       <th className="py-3 px-4">Subject</th>
-                      <th className="py-3 px-3 text-center">Assignment (10)</th>
-                      <th className="py-3 px-3 text-center">Project (10)</th>
-                      <th className="py-3 px-3 text-center">CA Test (20)</th>
-                      <th className="py-3 px-3 text-center">CBT Exam (60)</th>
-                      <th className="py-3 px-3 text-center">Total (100)</th>
+                      <th className="py-3 px-3 text-center">{caMeta.assignmentLabel} ({caMeta.assignmentMax})</th>
+                      <th className="py-3 px-3 text-center">{caMeta.firstCaLabel} ({caMeta.firstCaMax})</th>
+                      <th className="py-3 px-3 text-center">{caMeta.secondCaLabel} ({caMeta.secondCaMax})</th>
+                      <th className="py-3 px-3 text-center">{caMeta.examLabel} ({caMeta.examMax})</th>
+                      <th className="py-3 px-3 text-center">Total ({caMeta.assignmentMax + caMeta.firstCaMax + caMeta.secondCaMax + caMeta.examMax})</th>
                       <th className="py-3 px-3 text-center">Grade</th>
                       <th className="py-3 px-3 text-center">Point</th>
                       <th className="py-3 px-4">Teacher Remark</th>
@@ -599,34 +658,47 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {caRecords.map(r => {
+                      const isWithheld = currentStudent.withheldSubjectIds?.some(
+                        w => w.trim().toLowerCase() === r.subjectName.trim().toLowerCase()
+                      );
                       const gp = calculateGradePoint(r.totalScore);
+                      const firstSummary = (typeof r.firstCaScore === 'number' && r.firstCaScore > 0) ? r.firstCaScore : (r.testScore ?? r.firstCaScore ?? 0);
+                      const secondSummary = (typeof r.secondCaScore === 'number' && r.secondCaScore > 0) ? r.secondCaScore : (r.projectScore ?? r.secondCaScore ?? 0);
                       return (
                         <tr key={r.id} className="hover:bg-slate-50 transition-colors">
                           <td className="py-3 px-4 font-bold text-slate-900">
                             {r.subjectName}
                             <span className="block text-[10px] text-slate-400 font-normal">{r.term}</span>
                           </td>
-                          <td className="py-3 px-3 text-center font-mono text-slate-600">{r.assignmentScore ?? '-'}</td>
-                          <td className="py-3 px-3 text-center font-mono text-slate-600">{r.projectScore ?? '-'}</td>
-                          <td className="py-3 px-3 text-center font-mono text-slate-600">{r.testScore ?? '-'}</td>
-                          <td className="py-3 px-3 text-center font-mono text-slate-600">{r.examScore ?? '-'}</td>
-                          <td className="py-3 px-3 text-center font-mono font-black text-slate-900 text-sm">
-                            {r.totalScore}
-                          </td>
-                          <td className="py-3 px-3 text-center">
-                            <span className="font-mono font-bold text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-900 border border-slate-200">
-                              {r.grade}
-                            </span>
-                          </td>
-                          <td className="py-3 px-3 text-center font-mono font-bold text-blue-900">
-                            {gp.toFixed(1)}
-                          </td>
-                          <td className="py-3 px-4 text-slate-600">
-                            <span className="font-medium">{r.remark}</span>
-                            {r.teacherComment && (
-                              <span className="text-[10px] text-slate-400 italic block">"{r.teacherComment}"</span>
-                            )}
-                          </td>
+                          {isWithheld ? (
+                            <td colSpan={8} className="py-3 px-4 text-center text-rose-700 font-bold text-[11px] bg-rose-50/50">
+                              Subject Result Temporarily Withheld by Administration
+                            </td>
+                          ) : (
+                            <>
+                              <td className="py-3 px-3 text-center font-mono text-slate-600">{r.assignmentScore ?? '-'}</td>
+                              <td className="py-3 px-3 text-center font-mono text-slate-600">{firstSummary ?? '-'}</td>
+                              <td className="py-3 px-3 text-center font-mono text-slate-600">{secondSummary ?? '-'}</td>
+                              <td className="py-3 px-3 text-center font-mono text-slate-600">{r.examScore ?? '-'}</td>
+                              <td className="py-3 px-3 text-center font-mono font-black text-slate-900 text-sm">
+                                {r.totalScore}
+                              </td>
+                              <td className="py-3 px-3 text-center">
+                                <span className="font-mono font-bold text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-900 border border-slate-200">
+                                  {r.grade}
+                                </span>
+                              </td>
+                              <td className="py-3 px-3 text-center font-mono font-bold text-blue-900">
+                                {gp.toFixed(1)}
+                              </td>
+                              <td className="py-3 px-4 text-slate-600">
+                                <span className="font-medium">{r.remark}</span>
+                                {r.teacherComment && (
+                                  <span className="text-[10px] text-slate-400 italic block">"{r.teacherComment}"</span>
+                                )}
+                              </td>
+                            </>
+                          )}
                         </tr>
                       );
                     })}
@@ -639,7 +711,7 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
 
         {/* TAB 3: CUMULATIVE TRANSCRIPT (5.0 SCALE) */}
         {activeTab === 'transcript' && (
-          <StudentCumulativeTranscript student={currentStudent} records={caRecords} />
+          <StudentCumulativeTranscript student={currentStudent} records={caRecords} settings={schoolSettings} />
         )}
 
         {/* TAB 4: PRACTICE TESTS ENGINE */}

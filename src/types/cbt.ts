@@ -153,10 +153,15 @@ export interface AdminUser {
 }
 
 export interface CaWeightsConfig {
-  firstCaMax: number;   // 1st CA Test (e.g. 20)
-  secondCaMax: number;  // 2nd CA / Project (e.g. 20)
-  assignmentMax: number; // Note / Assignment (e.g. 10)
-  examMax: number;      // CBT / Terminal Exam (e.g. 50)
+  firstCaMax: number;      // 1st CA Test (default 20)
+  secondCaMax: number;     // 2nd CA Test (default 20)
+  assignmentMax: number;   // Note / Assignment (default 10)
+  examMax: number;         // CBT / Terminal Exam (default 50)
+  firstCaLabel?: string;   // Editable heading (default '1st CA')
+  secondCaLabel?: string;  // Editable heading (default '2nd CA')
+  assignmentLabel?: string;// Editable heading (default 'Assignment/Note')
+  examLabel?: string;      // Editable heading (default "Term's Exam")
+  version?: number;
   // Legacy aliases for backwards compatibility
   testMax?: number;
   projectMax?: number;
@@ -171,13 +176,77 @@ export interface GradeScaleItem {
 }
 
 export const DEFAULT_CA_WEIGHTS: CaWeightsConfig = {
+  assignmentMax: 10,
   firstCaMax: 20,
   secondCaMax: 20,
-  assignmentMax: 10,
   examMax: 50,
+  assignmentLabel: 'Assignment/Note',
+  firstCaLabel: '1st CA',
+  secondCaLabel: '2nd CA',
+  examLabel: "Term's Exam",
+  version: 2,
   testMax: 20,
   projectMax: 20
 };
+
+export function resolveCaWeights(raw?: Partial<CaWeightsConfig> | null): Required<CaWeightsConfig> {
+  if (!raw) {
+    return {
+      ...DEFAULT_CA_WEIGHTS,
+      firstCaLabel: DEFAULT_CA_WEIGHTS.firstCaLabel!,
+      secondCaLabel: DEFAULT_CA_WEIGHTS.secondCaLabel!,
+      assignmentLabel: DEFAULT_CA_WEIGHTS.assignmentLabel!,
+      examLabel: DEFAULT_CA_WEIGHTS.examLabel!,
+      version: 2,
+      testMax: DEFAULT_CA_WEIGHTS.firstCaMax,
+      projectMax: DEFAULT_CA_WEIGHTS.secondCaMax
+    };
+  }
+
+  // Upgrade unversioned legacy 15/15/10/60 defaults automatically to 20/20/10/50
+  const isLegacyDefault =
+    !raw.version &&
+    (raw.firstCaMax === 15 || raw.testMax === 15) &&
+    (raw.secondCaMax === 15 || raw.projectMax === 15) &&
+    raw.assignmentMax === 10 &&
+    raw.examMax === 60;
+
+  if (isLegacyDefault) {
+    return {
+      ...DEFAULT_CA_WEIGHTS,
+      assignmentLabel: raw.assignmentLabel || DEFAULT_CA_WEIGHTS.assignmentLabel!,
+      firstCaLabel: raw.firstCaLabel || DEFAULT_CA_WEIGHTS.firstCaLabel!,
+      secondCaLabel: raw.secondCaLabel || DEFAULT_CA_WEIGHTS.secondCaLabel!,
+      examLabel: raw.examLabel || DEFAULT_CA_WEIGHTS.examLabel!,
+      version: 2,
+      testMax: 20,
+      projectMax: 20
+    };
+  }
+
+  const assignmentMax = typeof raw.assignmentMax === 'number' ? raw.assignmentMax : DEFAULT_CA_WEIGHTS.assignmentMax;
+  const firstCaMax = typeof raw.firstCaMax === 'number'
+    ? raw.firstCaMax
+    : (typeof raw.testMax === 'number' ? raw.testMax : DEFAULT_CA_WEIGHTS.firstCaMax);
+  const secondCaMax = typeof raw.secondCaMax === 'number'
+    ? raw.secondCaMax
+    : (typeof raw.projectMax === 'number' ? raw.projectMax : DEFAULT_CA_WEIGHTS.secondCaMax);
+  const examMax = typeof raw.examMax === 'number' ? raw.examMax : DEFAULT_CA_WEIGHTS.examMax;
+
+  return {
+    assignmentMax,
+    firstCaMax,
+    secondCaMax,
+    examMax,
+    assignmentLabel: raw.assignmentLabel || DEFAULT_CA_WEIGHTS.assignmentLabel!,
+    firstCaLabel: raw.firstCaLabel || DEFAULT_CA_WEIGHTS.firstCaLabel!,
+    secondCaLabel: raw.secondCaLabel || DEFAULT_CA_WEIGHTS.secondCaLabel!,
+    examLabel: raw.examLabel || DEFAULT_CA_WEIGHTS.examLabel!,
+    version: raw.version || 2,
+    testMax: firstCaMax,
+    projectMax: secondCaMax
+  };
+}
 
 export const DEFAULT_GRADE_SCALE: GradeScaleItem[] = [
   { grade: 'A1', minScore: 75, maxScore: 100, gradePoint: 5.0, remark: 'Excellent' },
@@ -275,26 +344,107 @@ export interface StudentAssessmentRecord {
   subjectName: string;
   academicSession: string; // e.g. "2025/2026"
   term: '1st Term' | '2nd Term' | '3rd Term';
-  firstCaScore?: number;   // 1st CA Test (0 - 20)
-  secondCaScore?: number;  // 2nd CA Project / Test (0 - 20)
-  assignmentScore: number; // Note / Assignment (0 - 10)
+  assignmentScore: number; // Assignment (0 - 10)
+  firstCaScore?: number;   // 1st CA Summary (0 - 15)
+  secondCaScore?: number;  // 2nd CA Summary (0 - 15)
   projectScore: number;    // Compatible alias for secondCaScore
   testScore: number;       // Compatible alias for firstCaScore
-  examScore: number;       // Terminal CBT Exam score (0 - 50)
+  examScore: number;       // Term's Exam (0 - 60)
   totalScore: number;      // 0 - 100
-  grade: string;           // A1, B2, B3, C4, C5, C6, D7, E8, F9
-  remark: string;          // Excellent, Very Good, Credit, Pass, Fail
+  grade: string;           // A, B, C, D, E, F9
+  remark: string;          // EXCELLENT, V.GOOD, GOOD, FAIR, FAIL
+  classAverage?: number;   // e.g. 62.6%
+  teacherSignature?: string; // e.g. "Signed"
   cbtSubmissionId?: string;
   isAutoSynced?: boolean;
   teacherComment?: string;
   updatedAt: string;
 }
 
+export interface PsychomotorRating {
+  punctuality: number;       // 1 - 5
+  classAttendance: number;   // 1 - 5
+  personalHygiene: number;   // 1 - 5
+  attentiveness: number;     // 1 - 5
+  honesty: number;           // 1 - 5
+  neatness: number;          // 1 - 5
+  participationAtWork: number; // 1 - 5
+  selfControl: number;       // 1 - 5
+  initiative: number;        // 1 - 5
+}
+
+export interface SkillsRating {
+  handwriting: number;       // 1 - 5
+  drawingPainting: number;   // 1 - 5
+  gamesSports: number;       // 1 - 5
+  readingFluency: number;    // 1 - 5
+  handlingOfTools: number;   // 1 - 5
+}
+
+export interface StudentTermReportData {
+  id: string; // report_${studentId}_${session}_${term}
+  studentId: string;
+  studentName: string;
+  admissionNumber: string;
+  classGrade: string;
+  academicSession: string;
+  term: '1st Term' | '2nd Term' | '3rd Term';
+  // Student bio parameters from official sample
+  age?: number | string;
+  house?: string; // e.g. "BLUE", "RED", "GREEN", "YELLOW"
+  sex?: string; // e.g. "MALE", "FEMALE"
+  noInClass?: number | string; // e.g. 13
+  department?: string; // e.g. "SENIOR SECONDARY", "SCIENCE", "ARTS", "COMMERCIAL"
+  category?: string; // e.g. "SENIOR SECONDARY", "JUNIOR SECONDARY"
+  classAverage?: number | string; // e.g. "62.6%"
+  // Psychomotor Behaviours (1-5)
+  behaviours: PsychomotorRating;
+  // Skills Assessment (1-5)
+  skills: SkillsRating;
+  // Comments & Administrative Remarks
+  classTeacherRemarks?: string; // e.g. "STAY FOCUS AND YOU'LL REACH YOUR GOALS."
+  principalRemarks?: string;    // e.g. "GOOD PROGRESS! BUT MORE EFFORT ARE NEEDED."
+  nextTermBegins?: string;      // e.g. "5TH JANUARY, 2026"
+  nextTermFees?: string;        // e.g. "26,000"
+  principalSignature?: string;
+  proprietressSignature?: string;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
+export const DEFAULT_PSYCHOMOTOR: PsychomotorRating = {
+  punctuality: 5,
+  classAttendance: 5,
+  personalHygiene: 5,
+  attentiveness: 5,
+  honesty: 5,
+  neatness: 5,
+  participationAtWork: 4,
+  selfControl: 5,
+  initiative: 5
+};
+
+export const DEFAULT_SKILLS: SkillsRating = {
+  handwriting: 4,
+  drawingPainting: 5,
+  gamesSports: 5,
+  readingFluency: 5,
+  handlingOfTools: 5
+};
+
+export const KEY_RATING_LABELS: Record<number, string> = {
+  5: 'EXCELLENT',
+  4: 'GOOD',
+  3: 'FAIR',
+  2: 'POOR',
+  1: 'VERY POOR'
+};
+
 export interface ChatMessage {
   id: string;
-  channelId: string; // e.g. 'staff-general', 'class-ss2', or user pair ID
+  channelId: string; // e.g. 'staff-general', 'class-ss2', 'campus-students', or 'dm_a__b'
   channelName?: string;
-  channelType: 'staff_group' | 'student_class_group' | 'direct_teacher' | 'direct_student' | 'student_to_teacher';
+  channelType: 'staff_group' | 'student_class_group' | 'campus_group' | 'direct_teacher' | 'direct_student' | 'student_to_teacher';
   senderId: string;
   senderName: string;
   senderRole: 'super_admin' | 'admin' | 'teacher' | 'student';
@@ -304,6 +454,12 @@ export interface ChatMessage {
   attachmentUrl?: string;
   attachmentType?: 'image' | 'audio' | 'document';
   attachmentName?: string;
+  attachmentSize?: string;
+  voiceDurationSeconds?: number;
+  replyToId?: string;
+  replyToSender?: string;
+  replyToText?: string;
+  deleted?: boolean;
   timestamp: string;
 }
 

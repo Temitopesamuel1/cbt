@@ -19,7 +19,9 @@ import {
   Check,
   Eye,
   EyeOff,
-  ShieldAlert
+  ShieldAlert,
+  Edit3,
+  SlidersHorizontal
 } from 'lucide-react';
 import {
   Student,
@@ -28,15 +30,22 @@ import {
   StaffMember,
   Submission,
   StudentAssessmentRecord,
+  SchoolSettings,
+  CaWeightsConfig,
+  resolveCaWeights,
   calculateGrade
 } from '../../types/cbt';
 import {
   fetchAssessmentRecords,
   saveAssessmentBatch,
   saveAssessmentRecord,
-  saveStudent
+  saveStudent,
+  fetchSchoolSettings,
+  saveSchoolSettings
 } from '../../services/firebase';
 import { BatchResultSlipsModal } from '../common/BatchResultSlipsModal';
+import { HwsOfficialResultSlip } from '../common/HwsOfficialResultSlip';
+import { StudentEvaluationEditorModal } from '../common/StudentEvaluationEditorModal';
 
 interface ContinuousAssessmentSheetProps {
   teacherStaff?: StaffMember | null;
@@ -47,6 +56,7 @@ interface ContinuousAssessmentSheetProps {
   academicSession: string;
   currentTerm: '1st Term' | '2nd Term' | '3rd Term';
   schoolName: string;
+  settings?: SchoolSettings;
 }
 
 export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps> = ({
@@ -57,7 +67,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   submissions,
   academicSession,
   currentTerm,
-  schoolName
+  schoolName,
+  settings
 }) => {
   // Selected Subject & Class
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>(() => {
@@ -75,6 +86,12 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [saveStatus, setSaveStatus] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [showBatchSlipsModal, setShowBatchSlipsModal] = useState(false);
+  const [viewingOfficialSlipStudent, setViewingOfficialSlipStudent] = useState<Student | null>(null);
+  const [editingEvaluationStudent, setEditingEvaluationStudent] = useState<Student | null>(null);
+  const [liveSettings, setLiveSettings] = useState<SchoolSettings | null>(settings || null);
+  const [caWeights, setCaWeights] = useState<Required<CaWeightsConfig>>(() => resolveCaWeights(settings?.caWeights));
+  const [showCustomizeColumns, setShowCustomizeColumns] = useState(false);
+  const [savingWeights, setSavingWeights] = useState(false);
   const [withheldStudentsMap, setWithheldStudentsMap] = useState<Record<string, boolean>>(() => {
     const map: Record<string, boolean> = {};
     students.forEach(s => {
@@ -82,6 +99,53 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     });
     return map;
   });
+
+  useEffect(() => {
+    const apply = (st: SchoolSettings) => {
+      setLiveSettings(st);
+      setCaWeights(resolveCaWeights(st.caWeights));
+    };
+    if (settings) {
+      apply(settings);
+    } else {
+      fetchSchoolSettings().then(apply).catch(() => {});
+    }
+    const onSettingsUpdate = (e: Event) => {
+      const detail = (e as CustomEvent<SchoolSettings>).detail;
+      if (detail) apply(detail);
+    };
+    window.addEventListener('schoolSettingsUpdated', onSettingsUpdate);
+    return () => window.removeEventListener('schoolSettingsUpdated', onSettingsUpdate);
+  }, [settings]);
+
+  const totalCaMax = caWeights.assignmentMax + caWeights.firstCaMax + caWeights.secondCaMax;
+  const totalOverallMax = totalCaMax + caWeights.examMax;
+
+  const handleSaveCaConfig = async () => {
+    setSavingWeights(true);
+    try {
+      const base = liveSettings || (await fetchSchoolSettings());
+      await saveSchoolSettings({
+        ...base,
+        caWeights: {
+          ...caWeights,
+          version: 2,
+          testMax: caWeights.firstCaMax,
+          projectMax: caWeights.secondCaMax
+        }
+      });
+      setSaveStatus({
+        text: `Updated assessment structure: ${caWeights.assignmentLabel} (${caWeights.assignmentMax}), ${caWeights.firstCaLabel} (${caWeights.firstCaMax}), ${caWeights.secondCaLabel} (${caWeights.secondCaMax}), ${caWeights.examLabel} (${caWeights.examMax}).`,
+        type: 'success'
+      });
+      setShowCustomizeColumns(false);
+    } catch {
+      setSaveStatus({ text: 'Failed to save assessment column settings.', type: 'error' });
+    } finally {
+      setSavingWeights(false);
+      setTimeout(() => setSaveStatus(null), 4000);
+    }
+  };
 
   // Sync selected subject if available
   useEffect(() => {
@@ -163,18 +227,37 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     }
   };
 
-  // Helper to calculate total, grade and remark: 1st CA = 20, 2nd CA = 20, Note/Assignment = 10, Exam = 50. Total = 100
-  const computeScoreDetails = (assignment: number, project: number, test: number, exam: number) => {
-    const validTest = Math.min(20, Math.max(0, test || 0));             // 1st CA Test (20)
-    const validProject = Math.min(20, Math.max(0, project || 0));       // 2nd CA / Practical (20)
-    const validAssignment = Math.min(10, Math.max(0, assignment || 0)); // Note / Assignment (10)
-    const validExam = Math.min(50, Math.max(0, exam || 0));             // Terminal Exam (50)
-    const total = validTest + validProject + validAssignment + validExam;
-    const { grade, remark } = calculateGrade(total);
+  // Helper to calculate total, grade and remark using active editable weights (default 10/20/20/50)
+  const computeScoreDetails = (assignment: number, secondCa: number, firstCa: number, exam: number) => {
+    const validAssignment = Math.min(caWeights.assignmentMax, Math.max(0, assignment || 0));
+    const validFirstCa = Math.min(caWeights.firstCaMax, Math.max(0, firstCa || 0));
+    const validSecondCa = Math.min(caWeights.secondCaMax, Math.max(0, secondCa || 0));
+    const validExam = Math.min(caWeights.examMax, Math.max(0, exam || 0));
+    const total = validAssignment + validFirstCa + validSecondCa + validExam;
+
+    // Exact grading matching official sample:
+    let grade = 'F9';
+    let remark = 'FAIL';
+    if (total >= 75) {
+      grade = 'A';
+      remark = 'EXCELLENT';
+    } else if (total >= 60) {
+      grade = 'B';
+      remark = 'V.GOOD';
+    } else if (total >= 50) {
+      grade = 'C';
+      remark = 'GOOD';
+    } else if (total >= 40) {
+      grade = 'D';
+      remark = 'FAIR';
+    }
+
     return {
       assignmentScore: validAssignment,
-      projectScore: validProject,
-      testScore: validTest,
+      firstCaScore: validFirstCa,
+      secondCaScore: validSecondCa,
+      projectScore: validSecondCa, // backward-compat alias
+      testScore: validFirstCa,     // backward-compat alias
       examScore: validExam,
       totalScore: total,
       grade,
@@ -191,7 +274,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     const initialDetails = computeScoreDetails(0, 0, 0, cleanExam);
     const cleanStudentId = (student.id || student.admissionNumber || 'stu').replace(/[^a-zA-Z0-9_-]/g, '_');
     const cleanSubjId = (selectedSubjectId || 'sub').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const cleanSession = (academicSession || '2025-2026').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const cleanSession = (academicSession || '2024-2025').replace(/[^a-zA-Z0-9_-]/g, '_');
     const cleanTerm = (currentTerm || '1stTerm').replace(/[^a-zA-Z0-9_-]/g, '_');
 
     return {
@@ -205,6 +288,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       academicSession,
       term: currentTerm,
       assignmentScore: initialDetails.assignmentScore,
+      firstCaScore: initialDetails.firstCaScore,
+      secondCaScore: initialDetails.secondCaScore,
       projectScore: initialDetails.projectScore,
       testScore: initialDetails.testScore,
       examScore: initialDetails.examScore,
@@ -218,7 +303,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   // Handle score change for student
   const handleScoreChange = (
     student: Student,
-    field: 'assignmentScore' | 'projectScore' | 'testScore' | 'examScore' | 'teacherComment',
+    field: 'assignmentScore' | 'secondCaScore' | 'firstCaScore' | 'projectScore' | 'testScore' | 'examScore' | 'teacherComment',
     value: string | number
   ) => {
     const current = getRecord(student);
@@ -236,11 +321,11 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
     const numValue = Number(value) || 0;
     const assignment = field === 'assignmentScore' ? numValue : current.assignmentScore;
-    const project = field === 'projectScore' ? numValue : current.projectScore;
-    const test = field === 'testScore' ? numValue : current.testScore;
+    const secondCa = (field === 'secondCaScore' || field === 'projectScore') ? numValue : (current.secondCaScore ?? current.projectScore ?? 0);
+    const firstCa = (field === 'firstCaScore' || field === 'testScore') ? numValue : (current.firstCaScore ?? current.testScore ?? 0);
     const exam = field === 'examScore' ? numValue : current.examScore;
 
-    const computed = computeScoreDetails(assignment, project, test, exam);
+    const computed = computeScoreDetails(assignment, secondCa, firstCa, exam);
 
     const updated: StudentAssessmentRecord = {
       ...current,
@@ -274,14 +359,14 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       if (studentSubs.length > 0) {
         // Take best or latest submission
         const latest = studentSubs[0];
-        // Scale to 50 marks (e.g. percentage * 0.50)
-        const scaledExamScore = Math.round((latest.percentage / 100) * 50);
+        // Scale to configured Exam Max (default 50 marks)
+        const scaledExamScore = Math.round((latest.percentage / 100) * caWeights.examMax);
 
         const current = updatedMap[student.id] || getRecord(student);
         const computed = computeScoreDetails(
           current.assignmentScore,
-          current.projectScore,
-          current.testScore,
+          current.secondCaScore ?? current.projectScore ?? 0,
+          current.firstCaScore ?? current.testScore ?? 0,
           scaledExamScore
         );
 
@@ -301,7 +386,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
     if (matchCount > 0) {
       setSaveStatus({
-        text: `Successfully synced CBT scores for ${matchCount} student(s) into the 50% terminal exam column! Click 'Save All Scores' to commit.`,
+        text: `Successfully synced CBT scores for ${matchCount} student(s) into the ${caWeights.examMax} marks terminal exam column! Click 'Save All Scores' to commit.`,
         type: 'success'
       });
     } else {
@@ -383,12 +468,12 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       'Subject',
       'Academic Session',
       'Term',
-      'Assignment (10)',
-      'Project (10)',
-      'CA Test (20)',
-      'Total CA (40)',
-      'Examination (60)',
-      'Total Score (100)',
+      `${caWeights.assignmentLabel} (${caWeights.assignmentMax})`,
+      `${caWeights.firstCaLabel} (${caWeights.firstCaMax})`,
+      `${caWeights.secondCaLabel} (${caWeights.secondCaMax})`,
+      `Total CA (${totalCaMax})`,
+      `${caWeights.examLabel} (${caWeights.examMax})`,
+      `Total Score (${totalOverallMax})`,
       'Grade',
       'Remark',
       'Teacher Comment'
@@ -396,7 +481,9 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
     const rows = classStudents.map((student, idx) => {
       const rec = getRecord(student);
-      const totalCa = rec.assignmentScore + rec.projectScore + rec.testScore;
+      const firstCa = rec.firstCaScore ?? rec.testScore ?? 0;
+      const secondCa = rec.secondCaScore ?? rec.projectScore ?? 0;
+      const totalCa = rec.assignmentScore + firstCa + secondCa;
       return [
         idx + 1,
         `"${student.admissionNumber}"`,
@@ -406,8 +493,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
         `"${academicSession}"`,
         `"${currentTerm}"`,
         rec.assignmentScore,
-        rec.projectScore,
-        rec.testScore,
+        firstCa,
+        secondCa,
         totalCa,
         rec.examScore,
         rec.totalScore,
@@ -503,9 +590,19 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
             <button
               type="button"
+              onClick={() => setShowCustomizeColumns(prev => !prev)}
+              className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+              title="Edit assessment column headings and mark distributions"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5 text-slate-600" />
+              <span>Customize Marks & Headings</span>
+            </button>
+
+            <button
+              type="button"
               onClick={handleAutoFillCbtScores}
               className="px-3.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-950 border border-blue-200 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-              title="Automatically sync CBT objective test scores into the Exam (60%) column"
+              title={`Automatically sync CBT objective test scores into the ${caWeights.examLabel} (${caWeights.examMax}) column`}
             >
               <Sparkles className="w-4 h-4 text-blue-700" />
               <span>Auto-Fill CBT Scores</span>
@@ -550,6 +647,118 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
             </button>
           </div>
         </div>
+
+        {/* Editable Column Headings & Max Marks Customizer */}
+        {showCustomizeColumns && (
+          <div className="p-4 rounded-xl bg-blue-50/70 border border-blue-200 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h4 className="text-xs font-black text-blue-950 uppercase">
+                  Customize Assessment Headings & Max Marks
+                </h4>
+                <p className="text-[11px] text-blue-800">
+                  Changes sync across the Teacher Broadsheet, Admin Broadsheet, and Student Report Slip (Default: 10 / 20 / 20 / 50).
+                </p>
+              </div>
+              <span className={`text-xs font-mono font-bold px-2.5 py-1 rounded-lg ${totalOverallMax === 100 ? 'bg-emerald-100 text-emerald-900' : 'bg-amber-100 text-amber-900'}`}>
+                CA: {totalCaMax} · Total: {totalOverallMax}/100
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="bg-white p-2.5 rounded-lg border border-blue-200 space-y-1.5">
+                <input
+                  type="text"
+                  value={caWeights.assignmentLabel}
+                  onChange={(e) => setCaWeights({ ...caWeights, assignmentLabel: e.target.value })}
+                  className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded"
+                  placeholder="Assignment/Note"
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="50"
+                  value={caWeights.assignmentMax}
+                  onChange={(e) => setCaWeights({ ...caWeights, assignmentMax: Math.max(0, Number(e.target.value) || 0) })}
+                  className="w-full px-2 py-1 text-sm font-black border border-slate-300 rounded text-center"
+                />
+              </div>
+              <div className="bg-white p-2.5 rounded-lg border border-blue-200 space-y-1.5">
+                <input
+                  type="text"
+                  value={caWeights.firstCaLabel}
+                  onChange={(e) => setCaWeights({ ...caWeights, firstCaLabel: e.target.value })}
+                  className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded"
+                  placeholder="1st CA"
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="50"
+                  value={caWeights.firstCaMax}
+                  onChange={(e) => {
+                    const v = Math.max(0, Number(e.target.value) || 0);
+                    setCaWeights({ ...caWeights, firstCaMax: v, testMax: v });
+                  }}
+                  className="w-full px-2 py-1 text-sm font-black border border-slate-300 rounded text-center"
+                />
+              </div>
+              <div className="bg-white p-2.5 rounded-lg border border-blue-200 space-y-1.5">
+                <input
+                  type="text"
+                  value={caWeights.secondCaLabel}
+                  onChange={(e) => setCaWeights({ ...caWeights, secondCaLabel: e.target.value })}
+                  className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded"
+                  placeholder="2nd CA"
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="50"
+                  value={caWeights.secondCaMax}
+                  onChange={(e) => {
+                    const v = Math.max(0, Number(e.target.value) || 0);
+                    setCaWeights({ ...caWeights, secondCaMax: v, projectMax: v });
+                  }}
+                  className="w-full px-2 py-1 text-sm font-black border border-slate-300 rounded text-center"
+                />
+              </div>
+              <div className="bg-white p-2.5 rounded-lg border border-amber-300 space-y-1.5">
+                <input
+                  type="text"
+                  value={caWeights.examLabel}
+                  onChange={(e) => setCaWeights({ ...caWeights, examLabel: e.target.value })}
+                  className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded"
+                  placeholder="Term's Exam"
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={caWeights.examMax}
+                  onChange={(e) => setCaWeights({ ...caWeights, examMax: Math.max(0, Number(e.target.value) || 0) })}
+                  className="w-full px-2 py-1 text-sm font-black border border-slate-300 rounded text-center"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowCustomizeColumns(false)}
+                className="px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-white rounded-lg cursor-pointer"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveCaConfig}
+                disabled={savingWeights}
+                className="px-4 py-1.5 bg-blue-900 hover:bg-blue-950 text-white text-xs font-bold rounded-lg cursor-pointer"
+              >
+                {savingWeights ? 'Saving...' : 'Save Headings & Weights'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Status Notification */}
         {saveStatus && (
@@ -674,35 +883,36 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                   <th className="py-3 px-3 w-10 text-center">S/N</th>
                   <th className="py-3 px-3 w-28">Admission #</th>
                   <th className="py-3 px-4 min-w-[150px]">Student Full Name</th>
-                  <th className="py-3 px-2 w-20 text-center bg-blue-50/60 border-l border-blue-100">
-                    1st CA<br /><span className="text-[9px] text-blue-700">(20)</span>
+                  <th className="py-3 px-2 w-24 text-center bg-blue-50/60 border-l border-blue-100">
+                    {caWeights.assignmentLabel}<br /><span className="text-[9px] text-blue-700">({caWeights.assignmentMax})</span>
                   </th>
                   <th className="py-3 px-2 w-20 text-center bg-blue-50/60">
-                    2nd CA<br /><span className="text-[9px] text-blue-700">(20)</span>
+                    {caWeights.firstCaLabel}<br /><span className="text-[9px] text-blue-700">({caWeights.firstCaMax})</span>
                   </th>
                   <th className="py-3 px-2 w-20 text-center bg-blue-50/60">
-                    Note/Asgn<br /><span className="text-[9px] text-blue-700">(10)</span>
+                    {caWeights.secondCaLabel}<br /><span className="text-[9px] text-blue-700">({caWeights.secondCaMax})</span>
                   </th>
                   <th className="py-3 px-2 w-20 text-center font-black bg-blue-100/70 text-blue-900 border-r border-blue-200">
-                    CA Total<br /><span className="text-[9px]">(50)</span>
+                    CA Total<br /><span className="text-[9px]">({totalCaMax})</span>
                   </th>
                   <th className="py-3 px-2 w-24 text-center bg-amber-50/60">
-                    Exam<br /><span className="text-[9px] text-amber-700">(50)</span>
+                    {caWeights.examLabel}<br /><span className="text-[9px] text-amber-700">({caWeights.examMax})</span>
                   </th>
                   <th className="py-3 px-3 w-20 text-center font-black bg-slate-200/80 text-slate-900">
-                    Total<br /><span className="text-[9px]">(100)</span>
+                    Total<br /><span className="text-[9px]">({totalOverallMax})</span>
                   </th>
                   <th className="py-3 px-2 w-16 text-center">Grade</th>
                   <th className="py-3 px-3 w-24 text-center">Remark</th>
-                  <th className="py-3 px-4 min-w-[160px]">Teacher Assessment Comment</th>
-                  <th className="py-3 px-3 w-24 text-center no-print">Result Gate</th>
-                  <th className="py-3 px-3 w-16 text-center no-print">Action</th>
+                  <th className="py-3 px-3 w-20 text-center no-print">Result Gate</th>
+                  <th className="py-3 px-4 min-w-[230px] text-center no-print">Official Slip & Evaluation</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {displayedStudents.map((student, idx) => {
                   const rec = getRecord(student);
-                  const totalCa = rec.testScore + rec.projectScore + rec.assignmentScore;
+                  const firstCa = rec.firstCaScore ?? rec.testScore ?? 0;
+                  const secondCa = rec.secondCaScore ?? rec.projectScore ?? 0;
+                  const totalCa = rec.assignmentScore + firstCa + secondCa;
                   const isRowSaving = savingStudentId === student.id;
                   const isWithheld = Boolean(withheldStudentsMap[student.id]);
 
@@ -724,38 +934,12 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                         <div className="text-[10px] text-slate-400 font-mono">{student.accessCode}</div>
                       </td>
 
-                      {/* 1st CA Input (20) */}
+                      {/* Assignment Input */}
                       <td className="py-2 px-2 text-center bg-blue-50/30 border-l border-blue-100">
                         <input
                           type="number"
                           min="0"
-                          max="20"
-                          step="1"
-                          value={rec.testScore || ''}
-                          onChange={(e) => handleScoreChange(student, 'testScore', e.target.value)}
-                          className="w-14 px-1.5 py-1 text-center font-mono font-bold text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-                        />
-                      </td>
-
-                      {/* 2nd CA Input (20) */}
-                      <td className="py-2 px-2 text-center bg-blue-50/30">
-                        <input
-                          type="number"
-                          min="0"
-                          max="20"
-                          step="1"
-                          value={rec.projectScore || ''}
-                          onChange={(e) => handleScoreChange(student, 'projectScore', e.target.value)}
-                          className="w-14 px-1.5 py-1 text-center font-mono font-bold text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-                        />
-                      </td>
-
-                      {/* Note / Assignment Input (10) */}
-                      <td className="py-2 px-2 text-center bg-blue-50/30">
-                        <input
-                          type="number"
-                          min="0"
-                          max="10"
+                          max={caWeights.assignmentMax}
                           step="1"
                           value={rec.assignmentScore || ''}
                           onChange={(e) => handleScoreChange(student, 'assignmentScore', e.target.value)}
@@ -763,18 +947,44 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                         />
                       </td>
 
-                      {/* Auto-computed Total CA (50) */}
+                      {/* 1st CA Input */}
+                      <td className="py-2 px-2 text-center bg-blue-50/30">
+                        <input
+                          type="number"
+                          min="0"
+                          max={caWeights.firstCaMax}
+                          step="1"
+                          value={firstCa || ''}
+                          onChange={(e) => handleScoreChange(student, 'firstCaScore', e.target.value)}
+                          className="w-14 px-1.5 py-1 text-center font-mono font-bold text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
+                        />
+                      </td>
+
+                      {/* 2nd CA Input */}
+                      <td className="py-2 px-2 text-center bg-blue-50/30">
+                        <input
+                          type="number"
+                          min="0"
+                          max={caWeights.secondCaMax}
+                          step="1"
+                          value={secondCa || ''}
+                          onChange={(e) => handleScoreChange(student, 'secondCaScore', e.target.value)}
+                          className="w-14 px-1.5 py-1 text-center font-mono font-bold text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
+                        />
+                      </td>
+
+                      {/* Auto-computed Total CA */}
                       <td className="py-2.5 px-2 text-center font-mono font-black text-blue-950 bg-blue-100/40 border-r border-blue-200">
                         {totalCa}
                       </td>
 
-                      {/* Examination Input (50) */}
+                      {/* Term's Examination Input */}
                       <td className="py-2 px-2 text-center bg-amber-50/30">
                         <div className="relative inline-block">
                           <input
                             type="number"
                             min="0"
-                            max="50"
+                            max={caWeights.examMax}
                             step="1"
                             value={rec.examScore || ''}
                             onChange={(e) => handleScoreChange(student, 'examScore', e.target.value)}
@@ -826,17 +1036,6 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                         </span>
                       </td>
 
-                      {/* Teacher Comment */}
-                      <td className="py-2 px-4">
-                        <input
-                          type="text"
-                          placeholder="Commendation / academic remark..."
-                          value={rec.teacherComment || ''}
-                          onChange={(e) => handleScoreChange(student, 'teacherComment', e.target.value)}
-                          className="w-full px-2 py-1 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-900 placeholder:text-slate-400 placeholder:italic"
-                        />
-                      </td>
-
                       {/* Result Withholding Gate Button */}
                       <td className="py-2 px-3 text-center no-print">
                         <button
@@ -863,18 +1062,40 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                         </button>
                       </td>
 
-                      {/* Row Action Save Button */}
+                      {/* Action Buttons: Official Slip, Edit Evaluation, Save Row */}
                       <td className="py-2 px-3 text-center no-print">
-                        <button
-                          type="button"
-                          onClick={() => handleSaveSingleRecord(student)}
-                          disabled={isRowSaving}
-                          className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-emerald-100 text-slate-700 hover:text-emerald-800 text-[10px] font-bold transition-colors inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                          title="Save this student's score"
-                        >
-                          <Save className={`w-3 h-3 ${isRowSaving ? 'animate-spin' : ''}`} />
-                          <span>{isRowSaving ? '...' : 'Save'}</span>
-                        </button>
+                        <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => setViewingOfficialSlipStudent(student)}
+                            className="px-2 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 text-[10px] font-bold transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                            title="View and print candidate's official 2-page report sheet"
+                          >
+                            <Printer className="w-3 h-3 text-blue-700" />
+                            <span>Official Slip</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setEditingEvaluationStudent(student)}
+                            className="px-2 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                            title="Edit psychomotor behaviours, skills, remarks, fees"
+                          >
+                            <Edit3 className="w-3 h-3 text-amber-700" />
+                            <span>Evaluation</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleSaveSingleRecord(student)}
+                            disabled={isRowSaving}
+                            className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-emerald-100 text-slate-700 hover:text-emerald-800 text-[10px] font-bold transition-colors inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            title="Save this student's score"
+                          >
+                            <Save className={`w-3 h-3 ${isRowSaving ? 'animate-spin' : ''}`} />
+                            <span>{isRowSaving ? '...' : 'Save'}</span>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -977,7 +1198,55 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
           classes={classes}
           submissions={submissions}
           initialClassFilter={selectedClassCode}
+          academicSession={academicSession}
+          term={currentTerm}
           onClose={() => setShowBatchSlipsModal(false)}
+        />
+      )}
+
+      {/* INDIVIDUAL OFFICIAL 2-PAGE REPORT SLIP MODAL */}
+      {viewingOfficialSlipStudent && (
+        <div className="fixed inset-0 z-50 bg-slate-900/85 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
+          <div className="relative w-full max-w-4xl max-h-[96vh] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-slate-300 p-2 sm:p-4">
+            <HwsOfficialResultSlip
+              student={viewingOfficialSlipStudent}
+              settings={{
+                schoolName,
+                motto: "Good Education is the Best Foundation for a Better Future.",
+                address: "NO. 84 GAA-AJANAKU AIYETORO STREET, ILORIN KW/ST.",
+                phone: "08060071766, 08167355968",
+                email: "Honeysworld5@gmail.com",
+                academicSession,
+                currentTerm,
+                schoolLogo: "/school-logo.png",
+                passMarkPercentage: 50,
+                allowImmediateResultViewing: true
+              }}
+              academicSession={academicSession}
+              term={currentTerm}
+              isEditable={true}
+              usePrintPortal={true}
+              onClose={() => setViewingOfficialSlipStudent(null)}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* PSYCHOMOTOR & EVALUATION EDITOR MODAL */}
+      {editingEvaluationStudent && (
+        <StudentEvaluationEditorModal
+          isOpen={Boolean(editingEvaluationStudent)}
+          onClose={() => setEditingEvaluationStudent(null)}
+          student={editingEvaluationStudent}
+          academicSession={academicSession}
+          term={currentTerm}
+          onSaved={() => {
+            setSaveStatus({
+              text: `Terminal evaluation for ${editingEvaluationStudent.fullName} saved & synchronized!`,
+              type: 'success'
+            });
+            setTimeout(() => setSaveStatus(null), 4000);
+          }}
         />
       )}
     </div>

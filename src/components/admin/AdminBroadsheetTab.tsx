@@ -16,7 +16,10 @@ import {
   UserPlus,
   Edit3,
   BarChart2,
-  X
+  X,
+  Printer,
+  Eye,
+  SlidersHorizontal
 } from 'lucide-react';
 import {
   Student,
@@ -27,6 +30,8 @@ import {
   calculateGrade,
   calculateGradePoint,
   DEFAULT_CA_WEIGHTS,
+  CaWeightsConfig,
+  resolveCaWeights,
   generateStudentAccessCode
 } from '../../types/cbt';
 import {
@@ -35,8 +40,12 @@ import {
   saveAssessmentBatch,
   deleteAssessmentRecord,
   fetchSubmissions,
-  saveStudent
+  saveStudent,
+  saveSchoolSettings
 } from '../../services/firebase';
+import { HwsOfficialResultSlip } from '../common/HwsOfficialResultSlip';
+import { StudentEvaluationEditorModal } from '../common/StudentEvaluationEditorModal';
+import { BatchResultSlipsModal } from '../common/BatchResultSlipsModal';
 
 interface AdminBroadsheetTabProps {
   students: Student[];
@@ -45,6 +54,7 @@ interface AdminBroadsheetTabProps {
   settings: SchoolSettings;
   showNotification: (text: string, type?: 'success' | 'error') => void;
   onRefreshData?: () => void;
+  onSettingsUpdated?: (updated: SchoolSettings) => void;
 }
 
 export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
@@ -53,7 +63,8 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
   classes,
   settings,
   showNotification,
-  onRefreshData
+  onRefreshData,
+  onSettingsUpdated
 }) => {
   const [selectedClass, setSelectedClass] = useState<string>(classes[0]?.code || 'SS 1');
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>(subjects[0]?.id || '');
@@ -68,6 +79,11 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
   const [savedSuccessId, setSavedSuccessId] = useState<string | null>(null);
   const [savingAll, setSavingAll] = useState(false);
   const [searchFilter, setSearchFilter] = useState('');
+
+  // Official Slip Preview & Batch Printing Modals
+  const [viewingOfficialSlipStudent, setViewingOfficialSlipStudent] = useState<Student | null>(null);
+  const [editingEvaluationStudent, setEditingEvaluationStudent] = useState<Student | null>(null);
+  const [showBatchModal, setShowBatchModal] = useState(false);
 
   // Add New Student Entry Modal
   const [showAddEntryModal, setShowAddEntryModal] = useState(false);
@@ -84,7 +100,39 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     registerInRoster: true
   });
 
-  const caWeights = settings.caWeights || DEFAULT_CA_WEIGHTS;
+  const [caWeights, setCaWeights] = useState<Required<CaWeightsConfig>>(() => resolveCaWeights(settings.caWeights));
+  const [showCustomizeColumns, setShowCustomizeColumns] = useState(false);
+  const [savingWeights, setSavingWeights] = useState(false);
+
+  useEffect(() => {
+    setCaWeights(resolveCaWeights(settings.caWeights));
+  }, [settings.caWeights]);
+
+  const totalCaMax = caWeights.assignmentMax + caWeights.firstCaMax + caWeights.secondCaMax;
+  const totalOverallMax = totalCaMax + caWeights.examMax;
+
+  const handleSaveCaWeights = async () => {
+    setSavingWeights(true);
+    try {
+      const updatedSettings: SchoolSettings = {
+        ...settings,
+        caWeights: {
+          ...caWeights,
+          version: 2,
+          testMax: caWeights.firstCaMax,
+          projectMax: caWeights.secondCaMax
+        }
+      };
+      await saveSchoolSettings(updatedSettings);
+      if (onSettingsUpdated) onSettingsUpdated(updatedSettings);
+      setShowCustomizeColumns(false);
+      showNotification('Broadsheet column headings and mark distributions saved!');
+    } catch {
+      showNotification('Failed to update broadsheet settings.', 'error');
+    } finally {
+      setSavingWeights(false);
+    }
+  };
 
   const currentSubject = subjects.find(s => s.id === selectedSubjectId);
   const currentSubjectName = currentSubject ? currentSubject.name : 'Subject';
@@ -208,9 +256,19 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
         updated.admissionNumber = value.toUpperCase();
       } else {
         const num = Math.max(0, Number(value) || 0);
+        const firstMax = caWeights.firstCaMax;
+        const secondMax = caWeights.secondCaMax;
         if (field === 'assignmentScore') updated.assignmentScore = Math.min(caWeights.assignmentMax, num);
-        if (field === 'projectScore') updated.projectScore = Math.min(caWeights.projectMax ?? 20, num);
-        if (field === 'testScore') updated.testScore = Math.min(caWeights.testMax ?? 20, num);
+        if (field === 'projectScore') {
+          const v = Math.min(secondMax, num);
+          updated.projectScore = v;
+          updated.secondCaScore = v;
+        }
+        if (field === 'testScore') {
+          const v = Math.min(firstMax, num);
+          updated.testScore = v;
+          updated.firstCaScore = v;
+        }
         if (field === 'examScore') updated.examScore = Math.min(caWeights.examMax, num);
 
         const total = updated.assignmentScore + updated.projectScore + updated.testScore + updated.examScore;
@@ -399,8 +457,8 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     }
 
     const asg = Math.min(caWeights.assignmentMax, Math.max(0, Number(newEntryForm.assignmentScore) || 0));
-    const proj = Math.min(caWeights.projectMax ?? 20, Math.max(0, Number(newEntryForm.projectScore) || 0));
-    const tst = Math.min(caWeights.testMax ?? 20, Math.max(0, Number(newEntryForm.testScore) || 0));
+    const proj = Math.min(caWeights.secondCaMax, Math.max(0, Number(newEntryForm.projectScore) || 0));
+    const tst = Math.min(caWeights.firstCaMax, Math.max(0, Number(newEntryForm.testScore) || 0));
     const ex = Math.min(caWeights.examMax, Math.max(0, Number(newEntryForm.examScore) || 0));
     const total = Math.min(100, asg + proj + tst + ex);
     const gradeInfo = calculateGrade(total);
@@ -417,6 +475,8 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
       academicSession,
       term,
       assignmentScore: asg,
+      firstCaScore: tst,
+      secondCaScore: proj,
       projectScore: proj,
       testScore: tst,
       examScore: ex,
@@ -512,12 +572,12 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
       'Subject',
       'Session',
       'Term',
-      `Assignment (${caWeights.assignmentMax})`,
-      `Project (${caWeights.projectMax})`,
-      `Test (${caWeights.testMax})`,
-      'Total CA (40)',
-      `Exam (${caWeights.examMax})`,
-      'Total Score (100)',
+      `${caWeights.assignmentLabel} (${caWeights.assignmentMax})`,
+      `${caWeights.firstCaLabel} (${caWeights.firstCaMax})`,
+      `${caWeights.secondCaLabel} (${caWeights.secondCaMax})`,
+      `Total CA (${totalCaMax})`,
+      `${caWeights.examLabel} (${caWeights.examMax})`,
+      `Total Score (${totalOverallMax})`,
       'Grade',
       'Remark',
       'Teacher / Admin Comment'
@@ -619,6 +679,24 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
           </button>
 
           <button
+            onClick={() => setShowBatchModal(true)}
+            className="px-3.5 py-2 bg-blue-900 hover:bg-blue-800 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-sm transition-all"
+            title="Batch print official 2-page report sheets for entire class or selected students"
+          >
+            <Printer className="w-3.5 h-3.5 text-amber-300" />
+            <span>Batch Print Slips</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowCustomizeColumns(prev => !prev)}
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-slate-600" />
+            <span>Edit Headings & Marks</span>
+          </button>
+
+          <button
             onClick={handleSaveAllRows}
             disabled={savingAll || combinedEntries.length === 0}
             className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
@@ -628,6 +706,114 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Inline Editable Column Headings & Weights Customizer */}
+      {showCustomizeColumns && (
+        <div className="p-4 rounded-xl bg-blue-50/70 border border-blue-200 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h4 className="text-xs font-black text-blue-950 uppercase">
+                Customize Assessment Column Headings & Max Marks
+              </h4>
+              <p className="text-[11px] text-blue-800">
+                Applies across Admin Broadsheet, Teacher Broadsheet, and Student Report Slip (Default: 10 / 20 / 20 / 50).
+              </p>
+            </div>
+            <span className={`text-xs font-mono font-bold px-2.5 py-1 rounded-lg ${totalOverallMax === 100 ? 'bg-emerald-100 text-emerald-900' : 'bg-amber-100 text-amber-900'}`}>
+              Total CA: {totalCaMax} · Grand Total: {totalOverallMax}/100
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div className="bg-white p-2.5 rounded-lg border border-blue-200 space-y-1.5">
+              <input
+                type="text"
+                value={caWeights.assignmentLabel}
+                onChange={(e) => setCaWeights({ ...caWeights, assignmentLabel: e.target.value })}
+                className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded"
+              />
+              <input
+                type="number"
+                min="0"
+                max="50"
+                value={caWeights.assignmentMax}
+                onChange={(e) => setCaWeights({ ...caWeights, assignmentMax: Math.max(0, Number(e.target.value) || 0) })}
+                className="w-full px-2 py-1 text-sm font-black border border-slate-300 rounded text-center"
+              />
+            </div>
+            <div className="bg-white p-2.5 rounded-lg border border-blue-200 space-y-1.5">
+              <input
+                type="text"
+                value={caWeights.firstCaLabel}
+                onChange={(e) => setCaWeights({ ...caWeights, firstCaLabel: e.target.value })}
+                className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded"
+              />
+              <input
+                type="number"
+                min="0"
+                max="50"
+                value={caWeights.firstCaMax}
+                onChange={(e) => {
+                  const v = Math.max(0, Number(e.target.value) || 0);
+                  setCaWeights({ ...caWeights, firstCaMax: v, testMax: v });
+                }}
+                className="w-full px-2 py-1 text-sm font-black border border-slate-300 rounded text-center"
+              />
+            </div>
+            <div className="bg-white p-2.5 rounded-lg border border-blue-200 space-y-1.5">
+              <input
+                type="text"
+                value={caWeights.secondCaLabel}
+                onChange={(e) => setCaWeights({ ...caWeights, secondCaLabel: e.target.value })}
+                className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded"
+              />
+              <input
+                type="number"
+                min="0"
+                max="50"
+                value={caWeights.secondCaMax}
+                onChange={(e) => {
+                  const v = Math.max(0, Number(e.target.value) || 0);
+                  setCaWeights({ ...caWeights, secondCaMax: v, projectMax: v });
+                }}
+                className="w-full px-2 py-1 text-sm font-black border border-slate-300 rounded text-center"
+              />
+            </div>
+            <div className="bg-white p-2.5 rounded-lg border border-amber-300 space-y-1.5">
+              <input
+                type="text"
+                value={caWeights.examLabel}
+                onChange={(e) => setCaWeights({ ...caWeights, examLabel: e.target.value })}
+                className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded"
+              />
+              <input
+                type="number"
+                min="0"
+                max="100"
+                value={caWeights.examMax}
+                onChange={(e) => setCaWeights({ ...caWeights, examMax: Math.max(0, Number(e.target.value) || 0) })}
+                className="w-full px-2 py-1 text-sm font-black border border-slate-300 rounded text-center"
+              />
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowCustomizeColumns(false)}
+              className="px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-white rounded-lg cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSaveCaWeights}
+              disabled={savingWeights}
+              className="px-4 py-1.5 bg-blue-900 hover:bg-blue-950 text-white text-xs font-bold rounded-lg cursor-pointer"
+            >
+              {savingWeights ? 'Saving...' : 'Save Headings & Weights'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Cohort Selectors & Filters */}
       <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl grid grid-cols-1 sm:grid-cols-4 gap-3">
@@ -720,16 +906,16 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
             <tr className="bg-slate-900 text-white text-[11px] font-bold uppercase tracking-wider">
               <th className="py-3 px-3">Student Name</th>
               <th className="py-3 px-2 w-28">Admission No</th>
-              <th className="py-3 px-1 text-center w-14">Assign ({caWeights.assignmentMax})</th>
-              <th className="py-3 px-1 text-center w-14">Proj ({caWeights.projectMax})</th>
-              <th className="py-3 px-1 text-center w-14">Test ({caWeights.testMax})</th>
-              <th className="py-3 px-1 text-center w-14 bg-slate-800 text-amber-300">CA (40)</th>
-              <th className="py-3 px-1 text-center w-14 bg-blue-950 text-blue-300">Exam ({caWeights.examMax})</th>
-              <th className="py-3 px-1 text-center w-14 bg-emerald-950 text-emerald-300">Tot (100)</th>
+              <th className="py-3 px-1 text-center w-16">{caWeights.assignmentLabel} ({caWeights.assignmentMax})</th>
+              <th className="py-3 px-1 text-center w-16">{caWeights.firstCaLabel} ({caWeights.firstCaMax})</th>
+              <th className="py-3 px-1 text-center w-16">{caWeights.secondCaLabel} ({caWeights.secondCaMax})</th>
+              <th className="py-3 px-1 text-center w-14 bg-slate-800 text-amber-300">Total C.A ({totalCaMax})</th>
+              <th className="py-3 px-1 text-center w-16 bg-blue-950 text-blue-300">{caWeights.examLabel} ({caWeights.examMax})</th>
+              <th className="py-3 px-1 text-center w-14 bg-emerald-950 text-emerald-300">Total ({totalOverallMax})</th>
               <th className="py-3 px-1 text-center w-12">Grade</th>
               <th className="py-3 px-2 w-20">Remark</th>
               <th className="py-3 px-2">Teacher / Admin Comment</th>
-              <th className="py-3 px-2 text-right w-24">Action</th>
+              <th className="py-3 px-2 text-right min-w-[210px]">Action & Official Slip</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 text-slate-700">
@@ -800,26 +986,26 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                       />
                     </td>
 
-                    {/* Project */}
+                    {/* 1st CA (testScore) */}
                     <td className="py-2 px-1 text-center">
                       <input
                         type="number"
                         min="0"
-                        max={caWeights.projectMax}
-                        value={proj}
-                        onChange={(e) => handleScoreChange(entry.studentId, 'projectScore', e.target.value)}
+                        max={caWeights.firstCaMax}
+                        value={tst}
+                        onChange={(e) => handleScoreChange(entry.studentId, 'testScore', e.target.value)}
                         className="w-12 text-center py-1 bg-white border border-slate-300 rounded-lg font-bold text-slate-900 text-xs"
                       />
                     </td>
 
-                    {/* Test */}
+                    {/* 2nd CA (projectScore) */}
                     <td className="py-2 px-1 text-center">
                       <input
                         type="number"
                         min="0"
-                        max={caWeights.testMax}
-                        value={tst}
-                        onChange={(e) => handleScoreChange(entry.studentId, 'testScore', e.target.value)}
+                        max={caWeights.secondCaMax}
+                        value={proj}
+                        onChange={(e) => handleScoreChange(entry.studentId, 'projectScore', e.target.value)}
                         className="w-12 text-center py-1 bg-white border border-slate-300 rounded-lg font-bold text-slate-900 text-xs"
                       />
                     </td>
@@ -871,9 +1057,60 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                       />
                     </td>
 
-                    {/* Actions */}
+                    {/* Actions & Official Slip */}
                     <td className="py-2 px-2 text-right">
-                      <div className="flex items-center justify-end gap-1">
+                      <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                        {/* Official 2-Page Report Slip Preview/Print */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const enrolled = students.find(s => s.id === entry.studentId);
+                            const stuObj: Student = enrolled || {
+                              id: entry.studentId,
+                              admissionNumber: displayAdm,
+                              firstName: displayName.split(' ')[0] || 'Student',
+                              surname: displayName.split(' ').slice(1).join(' ') || '',
+                              fullName: displayName,
+                              classGrade: selectedClass,
+                              academicSession,
+                              status: 'active',
+                              registeredAt: new Date().toISOString()
+                            };
+                            setViewingOfficialSlipStudent(stuObj);
+                          }}
+                          className="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 text-[10px] font-bold rounded-lg flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                          title="View & print candidate's official 2-page Honey's World report sheet"
+                        >
+                          <Eye className="w-3 h-3 text-blue-700" />
+                          <span>Official Slip</span>
+                        </button>
+
+                        {/* Evaluation Modal (Psychomotor, Skills, Comments, Next Term Fees) */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const enrolled = students.find(s => s.id === entry.studentId);
+                            const stuObj: Student = enrolled || {
+                              id: entry.studentId,
+                              admissionNumber: displayAdm,
+                              firstName: displayName.split(' ')[0] || 'Student',
+                              surname: displayName.split(' ').slice(1).join(' ') || '',
+                              fullName: displayName,
+                              classGrade: selectedClass,
+                              academicSession,
+                              status: 'active',
+                              registeredAt: new Date().toISOString()
+                            };
+                            setEditingEvaluationStudent(stuObj);
+                          }}
+                          className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 text-[10px] font-bold rounded-lg flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                          title="Edit psychomotor traits, skills ratings, remarks & fees"
+                        >
+                          <SlidersHorizontal className="w-3 h-3 text-amber-700" />
+                          <span>Evaluation</span>
+                        </button>
+
+                        {/* Save Row Changes */}
                         <button
                           onClick={() => handleSaveSingleRow(entry)}
                           disabled={isCurrentlySaving}
@@ -1053,7 +1290,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   <div>
                     <label className="block text-[10px] font-bold text-slate-600 mb-1">
-                      Assign (Max {caWeights.assignmentMax})
+                      {caWeights.assignmentLabel} ({caWeights.assignmentMax})
                     </label>
                     <input
                       type="number"
@@ -1066,25 +1303,12 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold text-slate-600 mb-1">
-                      Proj (Max {caWeights.projectMax})
+                      {caWeights.firstCaLabel} ({caWeights.firstCaMax})
                     </label>
                     <input
                       type="number"
                       min="0"
-                      max={caWeights.projectMax}
-                      value={newEntryForm.projectScore}
-                      onChange={(e) => setNewEntryForm({ ...newEntryForm, projectScore: Number(e.target.value) || 0 })}
-                      className="w-full text-center py-1.5 text-xs bg-white border border-slate-300 rounded-lg font-bold"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-600 mb-1">
-                      Test (Max {caWeights.testMax})
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      max={caWeights.testMax}
+                      max={caWeights.firstCaMax}
                       value={newEntryForm.testScore}
                       onChange={(e) => setNewEntryForm({ ...newEntryForm, testScore: Number(e.target.value) || 0 })}
                       className="w-full text-center py-1.5 text-xs bg-white border border-slate-300 rounded-lg font-bold"
@@ -1092,7 +1316,20 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold text-slate-600 mb-1">
-                      Exam (Max {caWeights.examMax})
+                      {caWeights.secondCaLabel} ({caWeights.secondCaMax})
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      max={caWeights.secondCaMax}
+                      value={newEntryForm.projectScore}
+                      onChange={(e) => setNewEntryForm({ ...newEntryForm, projectScore: Number(e.target.value) || 0 })}
+                      className="w-full text-center py-1.5 text-xs bg-white border border-slate-300 rounded-lg font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                      {caWeights.examLabel} ({caWeights.examMax})
                     </label>
                     <input
                       type="number"
@@ -1150,6 +1387,71 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {/* Official 2-Page Honey's World Report Slip Preview Modal */}
+      {viewingOfficialSlipStudent && (
+        <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl w-full max-w-5xl shadow-2xl overflow-hidden my-4 max-h-[96vh] flex flex-col">
+            <div className="p-3 bg-slate-900 text-white flex items-center justify-between border-b border-slate-800 shrink-0 no-print">
+              <div className="flex items-center gap-2">
+                <Printer className="w-4 h-4 text-amber-400" />
+                <span className="font-bold text-xs uppercase tracking-wider">
+                  Official Report Slip Preview · {viewingOfficialSlipStudent.fullName} ({viewingOfficialSlipStudent.admissionNumber})
+                </span>
+              </div>
+              <button
+                onClick={() => setViewingOfficialSlipStudent(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="overflow-y-auto p-3 sm:p-5 flex-1 bg-slate-100/60">
+              <HwsOfficialResultSlip
+                student={viewingOfficialSlipStudent}
+                academicSession={academicSession}
+                term={term}
+                settings={settings}
+                isEditable={true}
+                usePrintPortal={true}
+                onSaved={() => {
+                  showNotification(`Report card details for ${viewingOfficialSlipStudent.fullName} saved!`);
+                }}
+                onClose={() => setViewingOfficialSlipStudent(null)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Student Evaluation & Psychomotor / Skills Editor Modal */}
+      {editingEvaluationStudent && (
+        <StudentEvaluationEditorModal
+          isOpen={Boolean(editingEvaluationStudent)}
+          onClose={() => setEditingEvaluationStudent(null)}
+          student={editingEvaluationStudent}
+          academicSession={academicSession}
+          term={term}
+          onSaved={() => {
+            showNotification(`Evaluation data saved for ${editingEvaluationStudent.fullName}!`);
+            setEditingEvaluationStudent(null);
+          }}
+        />
+      )}
+
+      {/* Class / Batch Result Slips Printing Modal */}
+      {showBatchModal && (
+        <BatchResultSlipsModal
+          isOpen={showBatchModal}
+          onClose={() => setShowBatchModal(false)}
+          students={students}
+          classes={classes}
+          settings={settings}
+          initialClassFilter={selectedClass}
+          academicSession={academicSession}
+          term={term}
+        />
       )}
     </div>
   );

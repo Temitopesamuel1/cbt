@@ -59,6 +59,33 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // End of Term Report Cards & Evaluation (Psychomotor, Skills, Remarks)
+    match /termReports/{reportId} {
+      allow read, write: if true;
+    }
+
+    // Campus Messaging & Chats
+    match /messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    match /chat_messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    match /chat_channels/{channelId} {
+      allow read, write: if true;
+    }
+
+    // Lesson Notes Studio
+    match /lessonNotes/{noteId} {
+      allow read, write: if true;
+    }
+
+    match /lesson_notes/{noteId} {
+      allow read, write: if true;
+    }
+
     // Default Deny Catch-All
     match /{document=**} {
       allow read, write: if false;

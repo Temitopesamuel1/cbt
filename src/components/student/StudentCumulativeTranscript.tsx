@@ -16,6 +16,8 @@ import {
 import {
   Student,
   StudentAssessmentRecord,
+  SchoolSettings,
+  resolveCaWeights,
   calculateGradePoint,
   getAcademicStanding,
   CumulativeTermRecord,
@@ -25,13 +27,16 @@ import {
 interface StudentCumulativeTranscriptProps {
   student: Student;
   records: StudentAssessmentRecord[];
+  settings?: SchoolSettings;
 }
 
 export const StudentCumulativeTranscript: React.FC<StudentCumulativeTranscriptProps> = ({
   student,
-  records
+  records,
+  settings
 }) => {
   const [selectedTermFilter, setSelectedTermFilter] = useState<string>('all');
+  const caMeta = useMemo(() => resolveCaWeights(settings?.caWeights), [settings?.caWeights]);
 
   // Group records by Academic Session and Term
   const transcriptData: CumulativeStudentTranscript = useMemo(() => {
@@ -303,11 +308,11 @@ export const StudentCumulativeTranscript: React.FC<StudentCumulativeTranscriptPr
                   <thead className="bg-slate-100 text-slate-700 font-bold uppercase tracking-wider text-[10px]">
                     <tr>
                       <th className="py-2.5 px-3">Subject / Course</th>
-                      <th className="py-2.5 px-2 text-center">Assgn (10)</th>
-                      <th className="py-2.5 px-2 text-center">Proj (10)</th>
-                      <th className="py-2.5 px-2 text-center">Test (20)</th>
-                      <th className="py-2.5 px-2 text-center">Exam (60)</th>
-                      <th className="py-2.5 px-2 text-center">Total (100)</th>
+                      <th className="py-2.5 px-2 text-center">{caMeta.assignmentLabel} ({caMeta.assignmentMax})</th>
+                      <th className="py-2.5 px-2 text-center">{caMeta.firstCaLabel} ({caMeta.firstCaMax})</th>
+                      <th className="py-2.5 px-2 text-center">{caMeta.secondCaLabel} ({caMeta.secondCaMax})</th>
+                      <th className="py-2.5 px-2 text-center">{caMeta.examLabel} ({caMeta.examMax})</th>
+                      <th className="py-2.5 px-2 text-center">Total ({caMeta.assignmentMax + caMeta.firstCaMax + caMeta.secondCaMax + caMeta.examMax})</th>
                       <th className="py-2.5 px-2 text-center">Grade</th>
                       <th className="py-2.5 px-2 text-center">Point</th>
                       <th className="py-2.5 px-3">Remark / Comment</th>
@@ -316,12 +321,14 @@ export const StudentCumulativeTranscript: React.FC<StudentCumulativeTranscriptPr
                   <tbody className="divide-y divide-slate-100 font-medium">
                     {term.records.map((r, rIdx) => {
                       const gradePt = calculateGradePoint(r.totalScore);
+                      const firstCa = (typeof r.firstCaScore === 'number' && r.firstCaScore > 0) ? r.firstCaScore : (r.testScore ?? r.firstCaScore ?? 0);
+                      const secondCa = (typeof r.secondCaScore === 'number' && r.secondCaScore > 0) ? r.secondCaScore : (r.projectScore ?? r.secondCaScore ?? 0);
                       return (
                         <tr key={r.id || rIdx} className="hover:bg-slate-50 transition-colors">
                           <td className="py-2.5 px-3 font-bold text-slate-900">{r.subjectName}</td>
                           <td className="py-2.5 px-2 text-center font-mono text-slate-600">{r.assignmentScore ?? '-'}</td>
-                          <td className="py-2.5 px-2 text-center font-mono text-slate-600">{r.projectScore ?? '-'}</td>
-                          <td className="py-2.5 px-2 text-center font-mono text-slate-600">{r.testScore ?? '-'}</td>
+                          <td className="py-2.5 px-2 text-center font-mono text-slate-600">{firstCa ?? '-'}</td>
+                          <td className="py-2.5 px-2 text-center font-mono text-slate-600">{secondCa ?? '-'}</td>
                           <td className="py-2.5 px-2 text-center font-mono text-slate-600">{r.examScore ?? '-'}</td>
                           <td className="py-2.5 px-2 text-center font-mono font-bold text-slate-900">{r.totalScore}</td>
                           <td className="py-2.5 px-2 text-center">

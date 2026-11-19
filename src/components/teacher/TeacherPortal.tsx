@@ -2431,6 +2431,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             academicSession={settings.academicSession}
             currentTerm={settings.currentTerm as '1st Term' | '2nd Term' | '3rd Term'}
             schoolName={settings.schoolName}
+            settings={settings}
           />
         )}
 
@@ -3453,7 +3454,6 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             classGrade: activeStaff?.assignedClasses?.[0] || 'SS 2'
           }}
           availableStudents={students}
-          availableStaff={activeStaff ? [activeStaff] : []}
           onClose={() => setShowCampusChat(false)}
         />
       )}

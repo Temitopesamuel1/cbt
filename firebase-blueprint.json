@@ -171,6 +171,28 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["email", "fullName", "role", "status"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Real-time WhatsApp-style campus message with optional media attachments and replies",
+      "type": "object",
+      "properties": {
+        "channelId": { "type": "string", "maxLength": 150 },
+        "channelName": { "type": "string", "maxLength": 150 },
+        "channelType": { "type": "string", "enum": ["staff_group", "student_class_group", "campus_group", "direct_teacher", "direct_student", "student_to_teacher"] },
+        "senderId": { "type": "string", "maxLength": 128 },
+        "senderName": { "type": "string", "maxLength": 140 },
+        "senderRole": { "type": "string", "enum": ["super_admin", "admin", "teacher", "student"] },
+        "recipientId": { "type": "string", "maxLength": 128 },
+        "recipientName": { "type": "string", "maxLength": 140 },
+        "text": { "type": "string", "maxLength": 4000 },
+        "attachmentUrl": { "type": "string" },
+        "attachmentType": { "type": "string", "enum": ["image", "audio", "document"] },
+        "attachmentName": { "type": "string", "maxLength": 200 },
+        "deleted": { "type": "boolean" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["channelId", "channelType", "senderId", "senderName", "senderRole", "timestamp"]
     }
   },
   "firestore": {
@@ -213,6 +235,14 @@
     "/caRecords/{recordId}": {
       "schema": "Submission",
       "description": "Continuous assessment broadsheet scores, test marks, and academic grades"
+    },
+    "/termReports/{reportId}": {
+      "schema": "Submission",
+      "description": "End-of-term student bio, psychomotor, skills, remarks, and fees data"
+    },
+    "/chat_messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Real-time campus communications messages across group rooms and direct messages"
     },
     "/settings/school": {
       "schema": "SchoolSettings",

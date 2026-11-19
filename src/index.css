@@ -21,3 +21,27 @@
     }
   }
 }
+
+#hws-print-root {
+  display: none;
+}
+
+@media print {
+  body.hws-isolated-print {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  body.hws-isolated-print #root {
+    display: none !important;
+  }
+
+  body.hws-isolated-print #hws-print-root {
+    display: block !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+  }
+}

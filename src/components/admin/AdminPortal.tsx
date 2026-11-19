@@ -1093,6 +1093,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             settings={settings}
             showNotification={showNotification}
             onRefreshData={loadData}
+            onSettingsUpdated={setSettings}
           />
         )}
 

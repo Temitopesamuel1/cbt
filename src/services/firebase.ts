@@ -37,7 +37,11 @@ import {
   StudentAssessmentRecord,
   AdminUser,
   ChatMessage,
-  LessonNote
+  LessonNote,
+  StudentTermReportData,
+  DEFAULT_PSYCHOMOTOR,
+  DEFAULT_SKILLS,
+  resolveCaWeights
 } from '../types/cbt';
 import {
   DEFAULT_SCHOOL_CLASSES,
@@ -605,36 +609,69 @@ export async function deleteSubject(subjectId: string): Promise<void> {
 // School Settings
 export async function fetchSchoolSettings(): Promise<SchoolSettings> {
   const path = 'settings/school';
+  let localCached: SchoolSettings | null = null;
+  try {
+    const raw = localStorage.getItem('prime_edutech_school_settings');
+    if (raw) {
+      const parsed = JSON.parse(raw) as SchoolSettings;
+      localCached = { ...parsed, caWeights: resolveCaWeights(parsed.caWeights) };
+    }
+  } catch {}
+
   try {
     const snap = await getDoc(doc(db, 'settings', 'school'));
     if (snap.exists()) {
       const data = snap.data() as SchoolSettings;
+      const normalizedWeights = resolveCaWeights(data.caWeights);
       if (!data.schoolName || data.schoolName === 'PRIME EDUTECH' || !data.address) {
         const merged: SchoolSettings = {
           ...DEFAULT_SCHOOL_SETTINGS,
           ...data,
           schoolName: "Honey's World High School",
           address: 'Gaa Ajanaku, Ilorin, Kwara State',
-          location: 'Ilorin, Kwara State, Nigeria'
+          location: 'Ilorin, Kwara State, Nigeria',
+          caWeights: normalizedWeights
         };
         saveSchoolSettings(merged).catch(() => {});
         return merged;
       }
-      return data;
+      const normalized: SchoolSettings = {
+        ...(localCached || DEFAULT_SCHOOL_SETTINGS),
+        ...data,
+        caWeights: normalizedWeights
+      };
+      try {
+        localStorage.setItem('prime_edutech_school_settings', JSON.stringify(normalized));
+      } catch {}
+      return normalized;
     }
-    saveSchoolSettings(DEFAULT_SCHOOL_SETTINGS).catch(() => {});
-    return DEFAULT_SCHOOL_SETTINGS;
+    if (localCached) return localCached;
+    const defaultWithWeights: SchoolSettings = {
+      ...DEFAULT_SCHOOL_SETTINGS,
+      caWeights: resolveCaWeights(DEFAULT_SCHOOL_SETTINGS.caWeights)
+    };
+    saveSchoolSettings(defaultWithWeights).catch(() => {});
+    return defaultWithWeights;
   } catch (error) {
-    return DEFAULT_SCHOOL_SETTINGS;
+    return localCached || {
+      ...DEFAULT_SCHOOL_SETTINGS,
+      caWeights: resolveCaWeights(DEFAULT_SCHOOL_SETTINGS.caWeights)
+    };
   }
 }
 
 export async function saveSchoolSettings(settings: SchoolSettings): Promise<void> {
   const path = 'settings/school';
   try {
+    localStorage.setItem('prime_edutech_school_settings', JSON.stringify(settings));
+  } catch {}
+  try {
     await setDoc(doc(db, 'settings', 'school'), settings, { merge: true });
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    console.warn('Firestore settings write warning (saved locally):', error);
+  }
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('schoolSettingsUpdated', { detail: settings }));
   }
 }
 
@@ -1046,18 +1083,46 @@ export async function deleteQuestion(examId: string, questionId: string): Promis
 }
 
 // -------------------------------------------------------------
-// Campus Communications & Chat Group Services
+// Campus Communications & WhatsApp-Style Real-Time Chat Services
 // -------------------------------------------------------------
-export async function fetchChatMessages(channelId: string): Promise<ChatMessage[]> {
-  const localKey = `prime_cbt_chat_${channelId}`;
-  let cached: ChatMessage[] = [];
+function broadcastChatSync(channelId: string) {
   try {
-    const raw = localStorage.getItem(localKey);
-    if (raw) cached = JSON.parse(raw);
-  } catch (e) {
-    // ignore
+    const bc = new BroadcastChannel('prime_cbt_chat_channel');
+    bc.postMessage({ type: 'CHAT_UPDATED', channelId });
+    bc.close();
+  } catch {}
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('campusChatUpdated', { detail: { channelId } }));
   }
+}
 
+function readLocalChannelMessages(channelId: string): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(`prime_cbt_chat_${channelId}`);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalChannelMessages(channelId: string, msgs: ChatMessage[]) {
+  try {
+    localStorage.setItem(`prime_cbt_chat_${channelId}`, JSON.stringify(msgs));
+  } catch {}
+}
+
+function mergeSortedMessages(a: ChatMessage[], b: ChatMessage[], descending = false): ChatMessage[] {
+  const map: Record<string, ChatMessage> = {};
+  a.forEach(m => { if (m && m.id) map[m.id] = m; });
+  b.forEach(m => { if (m && m.id) map[m.id] = m; });
+  return Object.values(map).sort((x, y) => {
+    const diff = new Date(x.timestamp).getTime() - new Date(y.timestamp).getTime();
+    return descending ? -diff : diff;
+  });
+}
+
+export async function fetchChatMessages(channelId: string): Promise<ChatMessage[]> {
+  const cached = readLocalChannelMessages(channelId);
   try {
     const q = query(collection(db, 'chat_messages'), where('channelId', '==', channelId));
     const snapshot = await getDocs(q);
@@ -1066,57 +1131,208 @@ export async function fetchChatMessages(channelId: string): Promise<ChatMessage[
       snapshot.forEach(docSnap => {
         msgs.push({ id: docSnap.id, ...docSnap.data() } as ChatMessage);
       });
-      const mergedMap: Record<string, ChatMessage> = {};
-      cached.forEach(m => { mergedMap[m.id] = m; });
-      msgs.forEach(m => { mergedMap[m.id] = m; });
-      const sorted = Object.values(mergedMap).sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-      localStorage.setItem(localKey, JSON.stringify(sorted));
+      const sorted = mergeSortedMessages(cached, msgs);
+      writeLocalChannelMessages(channelId, sorted);
       return sorted;
     }
   } catch (e) {
     console.warn('Chat fetch fallback:', e);
   }
-
   return cached;
 }
 
-export async function sendChatMessage(message: ChatMessage): Promise<void> {
-  const localKey = `prime_cbt_chat_${message.channelId}`;
-  // 1. Immediately update localStorage for instant bubble display
-  try {
-    const raw = localStorage.getItem(localKey);
-    const list: ChatMessage[] = raw ? JSON.parse(raw) : [];
-    list.push(message);
-    localStorage.setItem(localKey, JSON.stringify(list));
+export function subscribeChatMessages(
+  channelId: string,
+  onUpdate: (msgs: ChatMessage[]) => void
+): () => void {
+  // Emit cached immediately for instant zero-lag WhatsApp UI
+  onUpdate(readLocalChannelMessages(channelId));
 
-    // Also update super admin master chat log
-    const masterRaw = localStorage.getItem('prime_cbt_all_campus_chats');
-    const masterList: ChatMessage[] = masterRaw ? JSON.parse(masterRaw) : [];
-    masterList.unshift(message);
-    if (masterList.length > 500) masterList.pop();
-    localStorage.setItem('prime_cbt_all_campus_chats', JSON.stringify(masterList));
+  let unsubFirestore = () => {};
+  try {
+    const q = query(collection(db, 'chat_messages'), where('channelId', '==', channelId));
+    unsubFirestore = onSnapshot(
+      q,
+      (snapshot) => {
+        const remote: ChatMessage[] = [];
+        snapshot.forEach(docSnap => {
+          remote.push({ id: docSnap.id, ...docSnap.data() } as ChatMessage);
+        });
+        const merged = mergeSortedMessages(readLocalChannelMessages(channelId), remote);
+        writeLocalChannelMessages(channelId, merged);
+        onUpdate(merged);
+      },
+      (err) => {
+        console.warn('Real-time channel subscription fallback:', err);
+      }
+    );
   } catch (e) {
-    // ignore
+    console.warn('Unable to attach channel snapshot:', e);
   }
 
-  // 2. Write to Firestore
+  const handleLocalSync = () => {
+    onUpdate(readLocalChannelMessages(channelId));
+  };
+
+  let bc: BroadcastChannel | null = null;
   try {
-    await setDoc(doc(db, 'chat_messages', message.id), message, { merge: true });
+    bc = new BroadcastChannel('prime_cbt_chat_channel');
+    bc.onmessage = (ev) => {
+      if (ev.data?.channelId === channelId) {
+        handleLocalSync();
+      }
+    };
+  } catch {}
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('campusChatUpdated', handleLocalSync);
+  }
+
+  return () => {
+    unsubFirestore();
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('campusChatUpdated', handleLocalSync);
+    }
+  };
+}
+
+export function subscribeAllChatMessages(
+  onUpdate: (msgs: ChatMessage[]) => void
+): () => void {
+  const readMaster = (): ChatMessage[] => {
+    try {
+      const raw = localStorage.getItem('prime_cbt_all_campus_chats');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  };
+
+  onUpdate(readMaster());
+
+  let unsubFirestore = () => {};
+  try {
+    unsubFirestore = onSnapshot(
+      collection(db, 'chat_messages'),
+      (snapshot) => {
+        const remote: ChatMessage[] = [];
+        snapshot.forEach(docSnap => {
+          remote.push({ id: docSnap.id, ...docSnap.data() } as ChatMessage);
+        });
+        const merged = mergeSortedMessages(readMaster(), remote, true).slice(0, 1000);
+        try {
+          localStorage.setItem('prime_cbt_all_campus_chats', JSON.stringify(merged));
+        } catch {}
+        onUpdate(merged);
+      },
+      (err) => {
+        console.warn('Master chat subscription fallback:', err);
+      }
+    );
+  } catch (e) {
+    console.warn('Unable to attach master chat snapshot:', e);
+  }
+
+  const handleLocalSync = () => {
+    onUpdate(readMaster());
+  };
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_chat_channel');
+    bc.onmessage = () => handleLocalSync();
+  } catch {}
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('campusChatUpdated', handleLocalSync);
+  }
+
+  return () => {
+    unsubFirestore();
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('campusChatUpdated', handleLocalSync);
+    }
+  };
+}
+
+export async function sendChatMessage(message: ChatMessage): Promise<void> {
+  // Sanitize undefined properties so Firestore never rejects optional fields
+  const cleanMsg = Object.fromEntries(
+    Object.entries(message).filter(([, val]) => val !== undefined)
+  ) as ChatMessage;
+
+  // 1. Immediately update local caches for instant WhatsApp-speed bubble render
+  try {
+    const channelList = readLocalChannelMessages(cleanMsg.channelId);
+    const updatedChannel = mergeSortedMessages(channelList, [cleanMsg]);
+    writeLocalChannelMessages(cleanMsg.channelId, updatedChannel);
+
+    const masterRaw = localStorage.getItem('prime_cbt_all_campus_chats');
+    const masterList: ChatMessage[] = masterRaw ? JSON.parse(masterRaw) : [];
+    const updatedMaster = mergeSortedMessages(masterList, [cleanMsg], true).slice(0, 1000);
+    localStorage.setItem('prime_cbt_all_campus_chats', JSON.stringify(updatedMaster));
+  } catch {}
+
+  broadcastChatSync(cleanMsg.channelId);
+
+  // 2. Persist to Firestore
+  try {
+    await setDoc(doc(db, 'chat_messages', cleanMsg.id), cleanMsg, { merge: true });
   } catch (e) {
     console.warn('Firestore chat write error:', e);
   }
 }
 
-// Super Admin Chat Oversight
-export async function fetchAllChatMessagesForAdmin(): Promise<ChatMessage[]> {
+export async function deleteChatMessage(messageId: string, channelId: string): Promise<void> {
+  const deletedPatch: Partial<ChatMessage> = {
+    deleted: true,
+    text: 'This message was deleted',
+    attachmentUrl: '',
+    attachmentName: ''
+  };
+
   try {
+    const channelList = readLocalChannelMessages(channelId).map(m =>
+      m.id === messageId ? { ...m, ...deletedPatch, attachmentType: undefined } : m
+    );
+    writeLocalChannelMessages(channelId, channelList);
+
     const masterRaw = localStorage.getItem('prime_cbt_all_campus_chats');
     if (masterRaw) {
-      return JSON.parse(masterRaw);
+      const masterList: ChatMessage[] = JSON.parse(masterRaw);
+      const updatedMaster = masterList.map(m =>
+        m.id === messageId ? { ...m, ...deletedPatch, attachmentType: undefined } : m
+      );
+      localStorage.setItem('prime_cbt_all_campus_chats', JSON.stringify(updatedMaster));
     }
+  } catch {}
+
+  broadcastChatSync(channelId);
+
+  try {
+    await setDoc(
+      doc(db, 'chat_messages', messageId),
+      { deleted: true, text: 'This message was deleted', attachmentUrl: '', attachmentName: '' },
+      { merge: true }
+    );
   } catch (e) {
-    // ignore
+    console.warn('Firestore chat delete error:', e);
   }
+}
+
+// Super Admin Chat Oversight
+export async function fetchAllChatMessagesForAdmin(): Promise<ChatMessage[]> {
+  let cached: ChatMessage[] = [];
+  try {
+    const masterRaw = localStorage.getItem('prime_cbt_all_campus_chats');
+    if (masterRaw) cached = JSON.parse(masterRaw);
+  } catch {}
 
   try {
     const snapshot = await getDocs(collection(db, 'chat_messages'));
@@ -1125,15 +1341,17 @@ export async function fetchAllChatMessagesForAdmin(): Promise<ChatMessage[]> {
       snapshot.forEach(docSnap => {
         msgs.push({ id: docSnap.id, ...docSnap.data() } as ChatMessage);
       });
-      const sorted = msgs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-      localStorage.setItem('prime_cbt_all_campus_chats', JSON.stringify(sorted));
+      const sorted = mergeSortedMessages(cached, msgs, true);
+      try {
+        localStorage.setItem('prime_cbt_all_campus_chats', JSON.stringify(sorted.slice(0, 1000)));
+      } catch {}
       return sorted;
     }
   } catch (e) {
-    // ignore
+    console.warn('Master chat fetch fallback:', e);
   }
 
-  return [];
+  return cached;
 }
 
 // -------------------------------------------------------------
@@ -1548,37 +1766,49 @@ export async function fetchAssessmentRecords(
   term?: string
 ): Promise<StudentAssessmentRecord[]> {
   const path = 'caRecords';
-  try {
-    const qList: any[] = [];
-    if (subjectId) qList.push(where('subjectId', '==', subjectId));
-    if (classGrade) qList.push(where('classGrade', '==', classGrade));
-    if (academicSession) qList.push(where('academicSession', '==', academicSession));
-    if (term) qList.push(where('term', '==', term));
+  const mergedMap: Record<string, StudentAssessmentRecord> = {};
 
-    const q = qList.length > 0 ? query(collection(db, path), ...qList) : collection(db, path);
+  const matchesFilters = (r: StudentAssessmentRecord) => {
+    if (subjectId && r.subjectId !== subjectId) return false;
+    if (classGrade && r.classGrade !== classGrade) return false;
+    if (academicSession && r.academicSession !== academicSession) return false;
+    if (term && r.term !== term) return false;
+    return true;
+  };
+
+  // 1. Read local cache first
+  try {
+    const local = localStorage.getItem('prime_edutech_ca_records');
+    if (local) {
+      const parsed: StudentAssessmentRecord[] = JSON.parse(local);
+      parsed.forEach(r => {
+        if (matchesFilters(r)) {
+          mergedMap[r.id] = r;
+        }
+      });
+    }
+  } catch {}
+
+  // 2. Fetch from Firestore using single-field index query (avoids composite index errors) and filter remaining fields in memory
+  try {
+    const q = subjectId
+      ? query(collection(db, path), where('subjectId', '==', subjectId))
+      : classGrade
+      ? query(collection(db, path), where('classGrade', '==', classGrade))
+      : collection(db, path);
+
     const snapshot = await getDocs(q);
-    const records: StudentAssessmentRecord[] = [];
     snapshot.forEach(docSnap => {
-      records.push({ id: docSnap.id, ...docSnap.data() } as StudentAssessmentRecord);
+      const rec = { id: docSnap.id, ...docSnap.data() } as StudentAssessmentRecord;
+      if (matchesFilters(rec)) {
+        mergedMap[rec.id] = rec;
+      }
     });
-    return records;
   } catch (error) {
     console.warn('Fallback fetching CA records from local cache:', error);
-    try {
-      const local = localStorage.getItem('prime_edutech_ca_records');
-      if (local) {
-        const parsed: StudentAssessmentRecord[] = JSON.parse(local);
-        return parsed.filter(r => {
-          if (subjectId && r.subjectId !== subjectId) return false;
-          if (classGrade && r.classGrade !== classGrade) return false;
-          if (academicSession && r.academicSession !== academicSession) return false;
-          if (term && r.term !== term) return false;
-          return true;
-        });
-      }
-    } catch {}
-    return [];
   }
+
+  return Object.values(mergedMap);
 }
 
 export async function saveAssessmentRecord(record: StudentAssessmentRecord): Promise<void> {
@@ -1867,3 +2097,134 @@ export async function authenticateStudentWithCredentials(
     error: `No student profile found for "${cleanId}". Please verify your credentials or ask your subject teacher.`
   };
 }
+
+/**
+ * Terminal Student Report Card Data (Psychomotor, Skills, Remarks, Bio)
+ */
+export async function fetchStudentTermReport(
+  studentId: string,
+  academicSession: string,
+  term: string,
+  fallbackStudent?: Partial<Student> | null
+): Promise<StudentTermReportData> {
+  const cleanStudentId = (studentId || fallbackStudent?.admissionNumber || 'stu').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanSession = (academicSession || '2024-2025').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanTerm = (term || '1stTerm').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const reportDocId = `report_${cleanStudentId}_${cleanSession}_${cleanTerm}`;
+
+  try {
+    const docRef = doc(db, 'termReports', reportDocId);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      return snap.data() as StudentTermReportData;
+    }
+  } catch (err) {
+    console.warn('Firestore fetch warning for termReport, checking local cache:', err);
+  }
+
+  // Check localStorage
+  try {
+    const local = localStorage.getItem(`prime_term_report_${reportDocId}`);
+    if (local) {
+      return JSON.parse(local) as StudentTermReportData;
+    }
+  } catch {}
+
+  // Fallback defaults matching official Honey's World High School standard
+  return {
+    id: reportDocId,
+    studentId: studentId || fallbackStudent?.id || 'stu-default',
+    studentName: fallbackStudent?.fullName || 'ABDULWAHEED SOLIU',
+    admissionNumber: fallbackStudent?.admissionNumber || 'HWS/24/032',
+    classGrade: fallbackStudent?.classGrade || 'S.S 2',
+    academicSession: academicSession || '2024/2025',
+    term: (term as any) || '1st Term',
+    age: 14,
+    house: 'BLUE',
+    sex: fallbackStudent?.gender || 'MALE',
+    noInClass: 13,
+    department: fallbackStudent?.department || '',
+    category: 'SENIOR SECONDARY',
+    classAverage: '62.6%',
+    behaviours: { ...DEFAULT_PSYCHOMOTOR },
+    skills: { ...DEFAULT_SKILLS },
+    classTeacherRemarks: "STAY FOCUS AND YOU'LL REACH YOUR GOALS.",
+    principalRemarks: "GOOD PROGRESS! BUT MORE EFFORT ARE NEEDED.",
+    nextTermBegins: "5TH JANUARY, 2026",
+    nextTermFees: "26,000",
+    principalSignature: "Signed",
+    proprietressSignature: "Signed",
+    updatedAt: new Date().toISOString()
+  };
+}
+
+export async function saveStudentTermReport(report: StudentTermReportData): Promise<void> {
+  const cleanId = (report.id || `report_${report.studentId}_${report.academicSession}_${report.term}`)
+    .replace(/[^a-zA-Z0-9_-]/g, '_');
+  report.id = cleanId;
+  report.updatedAt = new Date().toISOString();
+
+  try {
+    await setDoc(doc(db, 'termReports', cleanId), report, { merge: true });
+  } catch (err) {
+    console.warn('Firestore write warning for termReport:', err);
+  }
+
+  // Always mirror in localStorage
+  try {
+    localStorage.setItem(`prime_term_report_${cleanId}`, JSON.stringify(report));
+    const allKey = 'prime_term_reports_all';
+    const existing = localStorage.getItem(allKey);
+    const list: StudentTermReportData[] = existing ? JSON.parse(existing) : [];
+    const filtered = list.filter(r => r.id !== cleanId);
+    filtered.push(report);
+    localStorage.setItem(allKey, JSON.stringify(filtered));
+  } catch {}
+
+  // Broadcast real-time update event
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('termReportsUpdated', { detail: report }));
+    try {
+      const channel = new BroadcastChannel('prime_cbt_sync_channel');
+      channel.postMessage({ type: 'TERM_REPORT_UPDATED', reportId: cleanId });
+      channel.close();
+    } catch {}
+  }
+}
+
+export async function fetchClassTermReports(
+  classGrade: string,
+  academicSession: string,
+  term: string
+): Promise<StudentTermReportData[]> {
+  const mergedMap: Record<string, StudentTermReportData> = {};
+
+  try {
+    const allKey = 'prime_term_reports_all';
+    const existing = localStorage.getItem(allKey);
+    if (existing) {
+      const list: StudentTermReportData[] = JSON.parse(existing);
+      list.forEach(r => {
+        if (r.classGrade === classGrade && r.academicSession === academicSession && r.term === term) {
+          mergedMap[r.id] = r;
+        }
+      });
+    }
+  } catch {}
+
+  try {
+    const q = query(collection(db, 'termReports'), where('classGrade', '==', classGrade));
+    const snap = await getDocs(q);
+    snap.forEach(d => {
+      const r = d.data() as StudentTermReportData;
+      if (r.academicSession === academicSession && r.term === term) {
+        mergedMap[r.id] = r;
+      }
+    });
+  } catch (err) {
+    console.warn('Firestore fetchClassTermReports fallback to local:', err);
+  }
+
+  return Object.values(mergedMap);
+}
+

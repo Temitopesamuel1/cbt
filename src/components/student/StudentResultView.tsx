@@ -16,7 +16,8 @@ import {
   UserCheck,
   Check,
   FileCheck,
-  QrCode
+  QrCode,
+  FileSpreadsheet
 } from 'lucide-react';
 import {
   Submission,
@@ -26,6 +27,7 @@ import {
   Student
 } from '../../types/cbt';
 import { DEFAULT_SCHOOL_SETTINGS } from '../../data/initialSchoolData';
+import { HwsOfficialResultSlip } from '../common/HwsOfficialResultSlip';
 
 interface StudentResultViewProps {
   submission: Submission;
@@ -42,6 +44,7 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
   settings,
   student
 }) => {
+  const [activeTab, setActiveTab] = useState<'official-sheet' | 'cbt-paper'>('official-sheet');
   const [showQuestionsReview, setShowQuestionsReview] = useState(false);
   const activeSettings = settings || DEFAULT_SCHOOL_SETTINGS;
 
@@ -80,6 +83,18 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
 
   // Logo URL with graceful fallbacks
   const schoolLogoUrl = activeSettings.schoolLogo || '/school-logo.png';
+
+  const studentObj: Student = student || {
+    id: submission.studentId,
+    admissionNumber: submission.admissionNumber,
+    firstName: submission.studentName.split(' ')[0] || 'Student',
+    surname: submission.studentName.split(' ').slice(1).join(' ') || '',
+    fullName: submission.studentName,
+    classGrade: submission.classGrade,
+    academicSession: submission.academicSession,
+    status: 'active',
+    registeredAt: new Date().toISOString()
+  };
 
   const handlePrint = () => {
     window.print();
@@ -155,31 +170,79 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
 
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Navigation & Action Bar (Hidden on print) */}
-        <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-xl border border-slate-200 shadow-xs no-print">
-          <button
-            onClick={onReturnToDashboard}
-            className="px-4 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg transition-colors flex items-center gap-2 cursor-pointer shadow-2xs"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Return to Student Dashboard</span>
-          </button>
-
-          <div className="flex items-center gap-2">
-            <span className="hidden sm:inline-block text-xs font-semibold text-slate-500">
-              Session {submission.academicSession}
-            </span>
+        <div className="space-y-3 no-print">
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
             <button
-              onClick={handlePrint}
-              className="px-5 py-2.5 text-xs font-bold text-white bg-blue-900 hover:bg-blue-950 rounded-lg shadow-sm transition-all flex items-center gap-2 cursor-pointer active:scale-98"
+              onClick={onReturnToDashboard}
+              className="px-4 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg transition-colors flex items-center gap-2 cursor-pointer shadow-2xs"
             >
-              <Printer className="w-4 h-4 text-amber-300" />
-              <span>Print Official Result Slip</span>
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Return to Student Dashboard</span>
+            </button>
+
+            <div className="flex items-center gap-2">
+              <span className="hidden sm:inline-block text-xs font-semibold text-slate-500">
+                Session {submission.academicSession}
+              </span>
+              <button
+                onClick={handlePrint}
+                className="px-5 py-2.5 text-xs font-bold text-white bg-blue-900 hover:bg-blue-950 rounded-lg shadow-sm transition-all flex items-center gap-2 cursor-pointer active:scale-98"
+              >
+                <Printer className="w-4 h-4 text-amber-300" />
+                <span>{activeTab === 'official-sheet' ? 'Print Official 2-Page Slip' : 'Print CBT Result Slip'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* View Mode Switcher: Official 2-Page Report Card vs CBT Paper Diagnostics */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 p-1.5 bg-slate-200/80 rounded-xl border border-slate-300 text-xs font-bold gap-1.5">
+            <button
+              type="button"
+              onClick={() => setActiveTab('official-sheet')}
+              className={`py-2.5 px-3 rounded-lg flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                activeTab === 'official-sheet'
+                  ? 'bg-blue-900 text-white shadow-md'
+                  : 'text-slate-700 hover:text-slate-900 hover:bg-white/60'
+              }`}
+            >
+              <FileSpreadsheet className="w-4 h-4 text-amber-300" />
+              <span>Official Terminal Report Sheet (2-Page Honey's World Standard)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('cbt-paper')}
+              className={`py-2.5 px-3 rounded-lg flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                activeTab === 'cbt-paper'
+                  ? 'bg-blue-900 text-white shadow-md'
+                  : 'text-slate-700 hover:text-slate-900 hover:bg-white/60'
+              }`}
+            >
+              <Award className="w-4 h-4 text-amber-300" />
+              <span>CBT Paper Diagnostics & Question Corrections</span>
             </button>
           </div>
         </div>
 
-        {/* OFFICIAL INSTITUTIONAL RESULT SLIP */}
-        <div className="bg-white rounded-2xl border-2 border-slate-800 shadow-lg overflow-hidden printable-slip">
+        {/* Tab 1: Official 2-Page Term Report Sheet Matching Exact PDF Sample */}
+        {activeTab === 'official-sheet' && (
+          <div className="space-y-4">
+            <HwsOfficialResultSlip
+              student={studentObj}
+              academicSession={submission.academicSession}
+              term={(submission.term as any) || '1st Term'}
+              settings={activeSettings}
+              isEditable={false}
+              onClose={onReturnToDashboard}
+            />
+          </div>
+        )}
+
+        {/* Tab 2: CBT Paper Diagnostics & Question Corrections */}
+        {activeTab === 'cbt-paper' && (
+          <div className="space-y-6">
+            {/* OFFICIAL INSTITUTIONAL RESULT SLIP */}
+            <div className="bg-white rounded-2xl border-2 border-slate-800 shadow-lg overflow-hidden printable-slip">
           {/* Formal Header Triggered Specifically on Paper Print */}
           <div className="hidden print:block border-b-4 border-double border-slate-900 pb-4 pt-2 mb-4 text-center">
             <div className="flex items-center justify-center gap-4">
@@ -731,15 +794,17 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
                 ))}
               </div>
             )}
-          </div>
-        ) : !allowReview ? (
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center text-xs text-slate-500 space-y-1 no-print">
-            <Lock className="w-5 h-5 text-slate-400 mx-auto" />
-            <div className="font-bold text-slate-800">Answer Key Withheld</div>
-            <p>Per examination settings, detailed question corrections will be released once all class candidates have concluded.</p>
-          </div>
-        ) : null}
-      </div>
+            </div>
+          ) : !allowReview ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center text-xs text-slate-500 space-y-1 no-print">
+              <Lock className="w-5 h-5 text-slate-400 mx-auto" />
+              <div className="font-bold text-slate-800">Answer Key Withheld</div>
+              <p>Per examination settings, detailed question corrections will be released once all class candidates have concluded.</p>
+            </div>
+          ) : null}
+        </div>
+      )}
     </div>
-  );
+  </div>
+);
 };
