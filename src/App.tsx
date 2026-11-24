@@ -15,7 +15,13 @@ import { CampusChatModal } from './components/common/CampusChatModal';
 import { Lock } from 'lucide-react';
 import { Examination, Question, Student, Submission, SchoolSettings, StaffMember, checkExamTimeWindow } from './types/cbt';
 import { DEFAULT_SCHOOL_SETTINGS } from './data/initialSchoolData';
-import { testConnection, fetchQuestions, fetchSchoolSettings, ensureInitialSchoolData } from './services/firebase';
+import {
+  testConnection,
+  fetchQuestions,
+  fetchSchoolSettings,
+  ensureInitialSchoolData,
+  subscribeStaffMembers
+} from './services/firebase';
 
 export default function App() {
   // Current route state
@@ -99,6 +105,37 @@ export default function App() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  // Keep active teacher session synchronized in real time when edited by Admin or self
+  useEffect(() => {
+    if (!teacherStaff?.id) return;
+    const unsub = subscribeStaffMembers((liveStaff) => {
+      const matched = liveStaff.find(
+        s => s.id === teacherStaff.id ||
+             (teacherStaff.uniqueId && s.uniqueId?.toUpperCase() === teacherStaff.uniqueId.toUpperCase())
+      );
+      if (matched) {
+        setTeacherStaff(prev => {
+          if (!prev) return matched;
+          if (
+            prev.updatedAt === matched.updatedAt &&
+            prev.fullName === matched.fullName &&
+            prev.email === matched.email &&
+            JSON.stringify(prev.assignedSubjectIds) === JSON.stringify(matched.assignedSubjectIds) &&
+            JSON.stringify(prev.assignedSubjectNames) === JSON.stringify(matched.assignedSubjectNames) &&
+            JSON.stringify(prev.assignedClasses) === JSON.stringify(matched.assignedClasses)
+          ) {
+            return prev;
+          }
+          try {
+            sessionStorage.setItem('prime_edutech_active_teacher', JSON.stringify(matched));
+          } catch {}
+          return matched;
+        });
+      }
+    });
+    return () => unsub();
+  }, [teacherStaff?.id]);
 
   const navigate = (route: string) => {
     setCurrentRoute(route);
@@ -291,6 +328,12 @@ export default function App() {
               teacherStaff={teacherStaff}
               currentSubroute={currentRoute}
               onNavigateSubroute={navigate}
+              onProfileUpdated={(updated) => {
+                setTeacherStaff(updated);
+                try {
+                  sessionStorage.setItem('prime_edutech_active_teacher', JSON.stringify(updated));
+                } catch {}
+              }}
               onLogout={handleTeacherLogout}
               onGoToStudentPortal={() => navigate('/student/login')}
             />

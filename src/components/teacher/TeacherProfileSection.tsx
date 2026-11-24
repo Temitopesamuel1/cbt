@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   User,
   GraduationCap,
@@ -43,6 +43,7 @@ export const TeacherProfileSection: React.FC<TeacherProfileSectionProps> = ({
 }) => {
   // Profile form state
   const [fullName, setFullName] = useState(teacherStaff?.fullName || '');
+  const [email, setEmail] = useState(teacherStaff?.email || '');
   const [qualification, setQualification] = useState(teacherStaff?.qualification || '');
   const [courseOfStudy, setCourseOfStudy] = useState(teacherStaff?.courseOfStudy || '');
   const [phoneNumber, setPhoneNumber] = useState(teacherStaff?.phoneNumber || '');
@@ -50,6 +51,28 @@ export const TeacherProfileSection: React.FC<TeacherProfileSectionProps> = ({
   const [bio, setBio] = useState(teacherStaff?.bio || '');
   const [uploadingImage, setUploadingImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Sync form fields when teacherStaff updates externally (e.g. Admin edit or cross-tab sync)
+  useEffect(() => {
+    if (!teacherStaff) return;
+    setFullName(teacherStaff.fullName || '');
+    setEmail(teacherStaff.email || '');
+    setQualification(teacherStaff.qualification || '');
+    setCourseOfStudy(teacherStaff.courseOfStudy || '');
+    setPhoneNumber(teacherStaff.phoneNumber || '');
+    setAvatarUrl(teacherStaff.avatarUrl || '');
+    setBio(teacherStaff.bio || '');
+  }, [
+    teacherStaff?.id,
+    teacherStaff?.fullName,
+    teacherStaff?.email,
+    teacherStaff?.qualification,
+    teacherStaff?.courseOfStudy,
+    teacherStaff?.phoneNumber,
+    teacherStaff?.avatarUrl,
+    teacherStaff?.bio,
+    teacherStaff?.updatedAt
+  ]);
 
   // Password state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -102,6 +125,7 @@ export const TeacherProfileSection: React.FC<TeacherProfileSectionProps> = ({
     try {
       const updates: Partial<StaffMember> = {
         fullName: fullName.trim(),
+        email: email.trim().toLowerCase() || teacherStaff.email,
         qualification: qualification.trim(),
         courseOfStudy: courseOfStudy.trim(),
         phoneNumber: phoneNumber.trim(),
@@ -118,7 +142,7 @@ export const TeacherProfileSection: React.FC<TeacherProfileSectionProps> = ({
       } catch {}
 
       onProfileUpdated(combined);
-      setProfileMessage({ text: 'Teacher profile details updated successfully!', type: 'success' });
+      setProfileMessage({ text: 'Teacher profile details saved & synchronized across all portals!', type: 'success' });
     } catch (err) {
       console.error('Error updating profile:', err);
       setProfileMessage({ text: 'Failed to update profile to database.', type: 'error' });
@@ -243,8 +267,14 @@ export const TeacherProfileSection: React.FC<TeacherProfileSectionProps> = ({
 
           <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs space-y-1 w-full sm:w-auto">
             <div className="text-[10px] uppercase font-bold text-slate-400">Assigned Curriculum Scope</div>
-            <div className="font-bold text-blue-900">{teacherStaff.assignedSubjectNames.join(', ')}</div>
-            <div className="text-[11px] text-slate-500">Classes: {teacherStaff.assignedClasses.join(', ')}</div>
+            <div className="font-bold text-blue-900">
+              {teacherStaff.assignedSubjectNames && teacherStaff.assignedSubjectNames.length > 0
+                ? teacherStaff.assignedSubjectNames.join(', ')
+                : 'No subjects assigned yet'}
+            </div>
+            <div className="text-[11px] text-slate-500">
+              Classes: {teacherStaff.assignedClasses && teacherStaff.assignedClasses.length > 0 ? teacherStaff.assignedClasses.join(', ') : 'None assigned'}
+            </div>
           </div>
         </div>
       </div>
@@ -310,6 +340,20 @@ export const TeacherProfileSection: React.FC<TeacherProfileSectionProps> = ({
                 />
                 <span className="text-[10px] text-slate-400">Institutional ID allocated by Administration</span>
               </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5 text-slate-400" />
+                <span>Faculty Email Address</span>
+              </label>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 text-slate-900"
+              />
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

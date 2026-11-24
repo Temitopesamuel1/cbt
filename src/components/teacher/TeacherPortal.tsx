@@ -73,9 +73,13 @@ import {
   fetchSchoolClasses,
   saveSchoolClass,
   deleteSchoolClass,
+  subscribeSchoolClasses,
   fetchSubjects,
   saveSubject,
   deleteSubject,
+  subscribeSubjects,
+  subscribeStaffMembers,
+  updateTeacherProfile,
   fetchSchoolSettings,
   saveSchoolSettings,
   fetchSubmissions,
@@ -87,6 +91,7 @@ interface TeacherPortalProps {
   teacherStaff?: StaffMember | null;
   currentSubroute?: string;
   onNavigateSubroute?: (subroute: string) => void;
+  onProfileUpdated?: (updated: StaffMember) => void;
   onLogout: () => void;
   onGoToStudentPortal: () => void;
 }
@@ -96,6 +101,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   teacherStaff,
   currentSubroute = '/teacher/dashboard',
   onNavigateSubroute,
+  onProfileUpdated,
   onLogout,
   onGoToStudentPortal
 }) => {
@@ -113,6 +119,9 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     try {
       sessionStorage.setItem('prime_edutech_active_teacher', JSON.stringify(updated));
     } catch {}
+    if (onProfileUpdated) {
+      onProfileUpdated(updated);
+    }
   };
 
   // Determine active tab from subroute
@@ -182,25 +191,38 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     endDate: ''
   });
 
-  // Teacher's authorized subjects
+  // Teacher's authorized subjects (matches both ID and trimmed case-insensitive name)
   const authorizedSubjects = useMemo(() => {
-    if (!activeStaff || !activeStaff.assignedSubjectNames || activeStaff.assignedSubjectNames.length === 0) {
+    if (!activeStaff) return subjects;
+    const assignedIds = new Set(activeStaff.assignedSubjectIds || []);
+    const assignedNames = new Set(
+      (activeStaff.assignedSubjectNames || [])
+        .map(n => n.trim().toLowerCase())
+        .filter(n => n && n !== 'general subject')
+    );
+    if (assignedIds.size === 0 && assignedNames.size === 0) {
       return subjects;
     }
     return subjects.filter(
-      s => activeStaff.assignedSubjectNames.includes(s.name) ||
-           (activeStaff.assignedSubjectIds && activeStaff.assignedSubjectIds.includes(s.id))
+      s => assignedIds.has(s.id) || assignedNames.has(s.name.trim().toLowerCase())
     );
   }, [subjects, activeStaff]);
 
   // Teacher's authorized exams
   const authorizedExams = useMemo(() => {
-    if (!activeStaff || !activeStaff.assignedSubjectNames || activeStaff.assignedSubjectNames.length === 0) {
+    if (!activeStaff) return exams;
+    const assignedIds = new Set(activeStaff.assignedSubjectIds || []);
+    const assignedNames = new Set(
+      (activeStaff.assignedSubjectNames || [])
+        .map(n => n.trim().toLowerCase())
+        .filter(n => n && n !== 'general subject')
+    );
+    if (assignedIds.size === 0 && assignedNames.size === 0) {
       return exams;
     }
     return exams.filter(
-      e => activeStaff.assignedSubjectNames.includes(e.subjectName) ||
-           (activeStaff.assignedSubjectIds && activeStaff.assignedSubjectIds.includes(e.subjectId)) ||
+      e => assignedNames.has((e.subjectName || '').trim().toLowerCase()) ||
+           assignedIds.has(e.subjectId) ||
            e.teacherId === activeStaff.uniqueId ||
            e.teacherId === activeStaff.email
     );
@@ -211,26 +233,34 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     if (!activeStaff || !activeStaff.assignedClasses || activeStaff.assignedClasses.length === 0) {
       return classes;
     }
-    return classes.filter(c => activeStaff.assignedClasses.includes(c.code));
+    const clsSet = new Set(activeStaff.assignedClasses.map(c => c.trim().toUpperCase()));
+    return classes.filter(c => clsSet.has(c.code.trim().toUpperCase()));
   }, [classes, activeStaff]);
 
   const authorizedStudents = useMemo(() => {
     if (!activeStaff || !activeStaff.assignedClasses || activeStaff.assignedClasses.length === 0) {
       return students;
     }
-    return students.filter(s => activeStaff.assignedClasses.includes(s.classGrade));
+    const clsSet = new Set(activeStaff.assignedClasses.map(c => c.trim().toUpperCase()));
+    return students.filter(s => clsSet.has((s.classGrade || '').trim().toUpperCase()));
   }, [students, activeStaff]);
 
   // Teacher's authorized results/submissions
   const authorizedSubmissions = useMemo(() => {
-    if (!activeStaff || !activeStaff.assignedSubjectNames || activeStaff.assignedSubjectNames.length === 0) {
+    if (!activeStaff) return submissions;
+    const assignedIds = new Set(activeStaff.assignedSubjectIds || []);
+    const lowerSubjs = new Set(
+      (activeStaff.assignedSubjectNames || [])
+        .map(s => s.trim().toLowerCase())
+        .filter(n => n && n !== 'general subject')
+    );
+    if (assignedIds.size === 0 && lowerSubjs.size === 0) {
       return submissions;
     }
     const authorizedExamIds = new Set(authorizedExams.map(e => e.id));
-    const lowerSubjs = new Set(activeStaff.assignedSubjectNames.map(s => s.toLowerCase()));
     return submissions.filter(sub => {
       if (authorizedExamIds.has(sub.examId)) return true;
-      if (sub.subject && lowerSubjs.has(sub.subject.toLowerCase())) return true;
+      if (sub.subject && lowerSubjs.has(sub.subject.trim().toLowerCase())) return true;
       return false;
     });
   }, [submissions, activeStaff, authorizedExams]);
@@ -343,6 +373,41 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
   useEffect(() => {
     loadAllData();
+
+    const unsubStaff = subscribeStaffMembers((liveStaff) => {
+      const targetId = activeStaff?.id || teacherStaff?.id;
+      const targetUnique = (activeStaff?.uniqueId || teacherStaff?.uniqueId || '').toUpperCase();
+      const targetEmail = (activeStaff?.email || teacherEmail || '').toLowerCase();
+
+      const matched = liveStaff.find(
+        s => (targetId && s.id === targetId) ||
+             (targetUnique && s.uniqueId?.toUpperCase() === targetUnique) ||
+             (targetEmail && s.email?.toLowerCase() === targetEmail)
+      );
+      if (matched) {
+        setActiveStaff(matched);
+        try {
+          sessionStorage.setItem('prime_edutech_active_teacher', JSON.stringify(matched));
+        } catch {}
+        if (onProfileUpdated) {
+          onProfileUpdated(matched);
+        }
+      }
+    });
+
+    const unsubSubjects = subscribeSubjects((liveSubjects) => {
+      setSubjects(liveSubjects);
+    });
+
+    const unsubClasses = subscribeSchoolClasses((liveClasses) => {
+      setClasses(liveClasses);
+    });
+
+    return () => {
+      unsubStaff();
+      unsubSubjects();
+      unsubClasses();
+    };
   }, []);
 
   // When selected exam changes, fetch questions
@@ -822,14 +887,38 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   // Subject actions
   const handleSaveSubject = async (e: React.FormEvent) => {
     e.preventDefault();
-    const newSub: Subject = {
-      id: `sub-${Date.now()}`,
-      name: subjectForm.name,
-      code: subjectForm.code || subjectForm.name.slice(0, 3).toUpperCase(),
+    const cleanName = subjectForm.name.trim();
+    if (!cleanName) return;
+
+    const existing = subjects.find(s => s.name.trim().toLowerCase() === cleanName.toLowerCase());
+    const targetSub: Subject = existing || {
+      id: `sub_${Date.now()}`,
+      name: cleanName,
+      code: (subjectForm.code || cleanName.slice(0, 3)).trim().toUpperCase(),
       department: subjectForm.department
     };
-    await saveSubject(newSub);
-    setSubjects(prev => [...prev, newSub]);
+
+    if (!existing) {
+      await saveSubject(targetSub);
+      setSubjects(prev => (prev.some(s => s.id === targetSub.id) ? prev : [...prev, targetSub]));
+    }
+
+    // Also attach this subject to the logged-in teacher's assigned list & sync to Admin/DB
+    if (activeStaff) {
+      const nextIds = Array.from(new Set([...(activeStaff.assignedSubjectIds || []), targetSub.id]));
+      const nextNames = Array.from(
+        new Set([
+          ...(activeStaff.assignedSubjectNames || []).filter(n => n !== 'General Subject'),
+          targetSub.name
+        ])
+      );
+      const updated = await updateTeacherProfile(activeStaff.id, {
+        assignedSubjectIds: nextIds,
+        assignedSubjectNames: nextNames
+      });
+      handleProfileUpdated({ ...activeStaff, ...updated, assignedSubjectIds: nextIds, assignedSubjectNames: nextNames });
+    }
+
     setShowAddSubjectModal(false);
     setSubjectForm({ name: '', code: '', department: 'Science & Tech' });
   };
@@ -1986,33 +2075,49 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         {/* SUBROUTE 5: SUBJECTS */}
         {activeTab === 'subjects' && (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-black text-slate-900">Assigned Curriculum Subjects</h2>
                 <p className="text-xs text-slate-500">
-                  {teacherStaff
-                    ? `Curriculum subjects assigned to ${teacherStaff.fullName} (${teacherStaff.uniqueId}).`
+                  {activeStaff
+                    ? `Curriculum subjects assigned to ${activeStaff.fullName} (${activeStaff.uniqueId}). Updates sync live with Administration.`
                     : 'Curriculum subjects taught within the secondary school'}
                 </p>
               </div>
+              <button
+                type="button"
+                onClick={() => setShowAddSubjectModal(true)}
+                className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5 text-amber-400" />
+                <span>Add & Assign Subject</span>
+              </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {authorizedSubjects.map(sub => (
-                <div key={sub.id} className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
-                  <div>
-                    <span className="text-[10px] uppercase font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 mb-1 inline-block">
-                      Taught Subject
-                    </span>
-                    <h3 className="text-sm font-bold text-slate-900">{sub.name}</h3>
-                    <div className="text-xs text-slate-500 font-mono mt-0.5">{sub.code} · {sub.department}</div>
+            {authorizedSubjects.length === 0 ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center text-xs text-slate-500 space-y-2">
+                <BookOpen className="w-8 h-8 text-slate-300 mx-auto" />
+                <div className="font-bold text-slate-800">No subjects assigned yet</div>
+                <p>Click "Add & Assign Subject" or ask the Administrator to assign your teaching subjects.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {authorizedSubjects.map(sub => (
+                  <div key={sub.id} className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] uppercase font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 mb-1 inline-block">
+                        Taught Subject
+                      </span>
+                      <h3 className="text-sm font-bold text-slate-900">{sub.name}</h3>
+                      <div className="text-xs text-slate-500 font-mono mt-0.5">{sub.code} · {sub.department}</div>
+                    </div>
+                    <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-black text-xs shadow-xs">
+                      {sub.code ? sub.code.slice(0, 3) : 'SUB'}
+                    </div>
                   </div>
-                  <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-black text-xs shadow-xs">
-                    {sub.code ? sub.code.slice(0, 3) : 'SUB'}
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

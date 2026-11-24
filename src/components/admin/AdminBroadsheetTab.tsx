@@ -271,7 +271,13 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
         }
         if (field === 'examScore') updated.examScore = Math.min(caWeights.examMax, num);
 
-        const total = updated.assignmentScore + updated.projectScore + updated.testScore + updated.examScore;
+        const firstCa = updated.firstCaScore ?? updated.testScore ?? 0;
+        const secondCa = updated.secondCaScore ?? updated.projectScore ?? 0;
+        updated.firstCaScore = firstCa;
+        updated.secondCaScore = secondCa;
+        updated.testScore = firstCa;
+        updated.projectScore = secondCa;
+        const total = (updated.assignmentScore || 0) + firstCa + secondCa + (updated.examScore || 0);
         updated.totalScore = Math.min(100, total);
         const gradeInfo = calculateGrade(updated.totalScore);
         updated.grade = gradeInfo.grade;
@@ -586,8 +592,8 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     const rows = combinedEntries.map(entry => {
       const rec = records[entry.studentId];
       const asg = rec?.assignmentScore || 0;
-      const proj = rec?.projectScore || 0;
-      const tst = rec?.testScore || 0;
+      const tst = rec?.firstCaScore ?? rec?.testScore ?? 0;
+      const proj = rec?.secondCaScore ?? rec?.projectScore ?? 0;
       const caTot = asg + proj + tst;
       const ex = rec?.examScore || 0;
       const tot = rec?.totalScore || (caTot + ex);
@@ -939,8 +945,8 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                 const displayName = rec?.studentName !== undefined ? rec.studentName : entry.fullName;
                 const displayAdm = rec?.admissionNumber !== undefined ? rec.admissionNumber : entry.admissionNumber;
                 const asg = rec?.assignmentScore ?? 0;
-                const proj = rec?.projectScore ?? 0;
-                const tst = rec?.testScore ?? 0;
+                const tst = rec?.firstCaScore ?? rec?.testScore ?? 0;
+                const proj = rec?.secondCaScore ?? rec?.projectScore ?? 0;
                 const caTotal = asg + proj + tst;
                 const exam = rec?.examScore ?? 0;
                 const total = asg + proj + tst + exam;
@@ -1410,6 +1416,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
             <div className="overflow-y-auto p-3 sm:p-5 flex-1 bg-slate-100/60">
               <HwsOfficialResultSlip
                 student={viewingOfficialSlipStudent}
+                draftRecords={Object.values(records)}
                 academicSession={academicSession}
                 term={term}
                 settings={settings}

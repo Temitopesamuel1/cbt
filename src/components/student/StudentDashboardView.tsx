@@ -625,8 +625,8 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                 <HwsOfficialResultSlip
                   student={currentStudent}
                   settings={schoolSettings}
-                  academicSession={currentStudent.academicSession || '2024/2025'}
-                  term="1st Term"
+                  academicSession={schoolSettings?.academicSession || currentStudent.academicSession || '2025/2026'}
+                  term={(caRecords[0]?.term as any) || (schoolSettings?.currentTerm as any) || '1st Term'}
                   isEditable={false}
                   usePrintPortal={true}
                   onClose={() => setShowOfficialReportSheet(false)}

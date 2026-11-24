@@ -32,9 +32,9 @@ import {
   subscribeAllChatMessages,
   sendChatMessage,
   deleteChatMessage,
-  fetchStaffMembers,
+  subscribeStaffMembers,
   fetchStudents,
-  fetchSchoolClasses
+  subscribeSchoolClasses
 } from '../../services/firebase';
 import { DEFAULT_SCHOOL_CLASSES } from '../../data/initialSchoolData';
 
@@ -251,19 +251,13 @@ export const CampusChatModal: React.FC<CampusChatModalProps> = ({
   const audioInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Load safe directory lists on open so teachers, students, and classes always appear
+  // Load & subscribe to safe directory lists on open so teacher edits sync in real time
   useEffect(() => {
     if (!isOpen) return;
     let mounted = true;
 
-    Promise.all([
-      fetchStaffMembers().catch(() => [] as StaffMember[]),
-      fetchStudents().catch(() => [] as Student[]),
-      fetchSchoolClasses().catch(() => DEFAULT_SCHOOL_CLASSES)
-    ]).then(([remoteStaff, remoteStudents, remoteClasses]) => {
+    const unsubStaff = subscribeStaffMembers((remoteStaff) => {
       if (!mounted) return;
-
-      // Merge & deduplicate staff (strip private password/passcode in memory representation)
       const staffMap = new Map<string, StaffMember>();
       [...availableStaff, ...remoteStaff].forEach(st => {
         const key = (st.uniqueId || st.id || '').trim();
@@ -274,27 +268,36 @@ export const CampusChatModal: React.FC<CampusChatModalProps> = ({
         });
       });
       setStaffDirectory(Array.from(staffMap.values()));
+    });
 
-      // Merge & deduplicate students
-      const stuMap = new Map<string, Student>();
-      [...availableStudents, ...remoteStudents].forEach(stu => {
-        const key = (stu.id || stu.admissionNumber || '').trim();
-        if (!key || key === currentUser.id) return;
-        stuMap.set(key, {
-          ...stu,
-          password: '',
-          accessCode: ''
-        });
-      });
-      setStudentDirectory(Array.from(stuMap.values()));
-
+    const unsubClasses = subscribeSchoolClasses((remoteClasses) => {
+      if (!mounted) return;
       if (remoteClasses && remoteClasses.length > 0) {
         setClassesDirectory(remoteClasses);
       }
     });
 
+    fetchStudents()
+      .then((remoteStudents) => {
+        if (!mounted) return;
+        const stuMap = new Map<string, Student>();
+        [...availableStudents, ...remoteStudents].forEach(stu => {
+          const key = (stu.id || stu.admissionNumber || '').trim();
+          if (!key || key === currentUser.id) return;
+          stuMap.set(key, {
+            ...stu,
+            password: '',
+            accessCode: ''
+          });
+        });
+        setStudentDirectory(Array.from(stuMap.values()));
+      })
+      .catch(() => {});
+
     return () => {
       mounted = false;
+      unsubStaff();
+      unsubClasses();
     };
   }, [isOpen, currentUser.id, availableStaff, availableStudents]);
 

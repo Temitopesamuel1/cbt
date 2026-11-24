@@ -47,11 +47,15 @@ import {
   fetchStaffMembers,
   saveStaffMember,
   deleteStaffMember,
+  subscribeStaffMembers,
   fetchStudents,
   saveStudent,
   deleteStudent,
   fetchSchoolClasses,
+  subscribeSchoolClasses,
   fetchSubjects,
+  saveSubject,
+  subscribeSubjects,
   fetchSchoolSettings,
   saveSchoolSettings,
   fetchExaminations,
@@ -141,6 +145,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
   // Staff Form
+  const [savingStaff, setSavingStaff] = useState(false);
+  const [staffModalError, setStaffModalError] = useState<string | null>(null);
+  const [subjectSearchQuery, setSubjectSearchQuery] = useState('');
+  const [quickSubjectName, setQuickSubjectName] = useState('');
+  const [quickSubjectCode, setQuickSubjectCode] = useState('');
+  const [addingQuickSubject, setAddingQuickSubject] = useState(false);
   const [staffForm, setStaffForm] = useState({
     fullName: '',
     email: '',
@@ -152,6 +162,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     phoneNumber: '',
     password: '',
     avatarUrl: '',
+    bio: '',
     assignedSubjectIds: [] as string[],
     assignedClasses: [] as string[]
   });
@@ -213,6 +224,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   useEffect(() => {
     loadData();
+    const unsubStaff = subscribeStaffMembers((liveStaff) => {
+      setStaffList(liveStaff);
+    });
+    const unsubSubjects = subscribeSubjects((liveSubjects) => {
+      setSubjects(liveSubjects);
+    });
+    const unsubClasses = subscribeSchoolClasses((liveClasses) => {
+      setClasses(liveClasses);
+    });
+    return () => {
+      unsubStaff();
+      unsubSubjects();
+      unsubClasses();
+    };
   }, []);
 
   const showNotification = (text: string, type: 'success' | 'error' = 'success') => {
@@ -240,39 +265,116 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       phoneNumber: '',
       password: '',
       avatarUrl: '',
+      bio: '',
       assignedSubjectIds: subjects.length > 0 ? [subjects[0].id] : [],
       assignedClasses: classes.length > 0 ? [classes[0].code] : ['SS 1']
     });
+    setStaffModalError(null);
+    setSubjectSearchQuery('');
+    setQuickSubjectName('');
+    setQuickSubjectCode('');
     setEditingStaff(null);
     setShowAddStaffModal(true);
   };
 
   const handleOpenEditStaff = (staff: StaffMember) => {
     setEditingStaff(staff);
+    const idSet = new Set(staff.assignedSubjectIds || []);
+    const nameSet = new Set((staff.assignedSubjectNames || []).map(n => n.trim().toLowerCase()));
+    const matchedIds = subjects
+      .filter(sub => idSet.has(sub.id) || nameSet.has(sub.name.trim().toLowerCase()))
+      .map(sub => sub.id);
+    // Preserve any legacy IDs that might not have resolved yet
+    (staff.assignedSubjectIds || []).forEach(id => {
+      if (id && !matchedIds.includes(id)) matchedIds.push(id);
+    });
+
     setStaffForm({
-      fullName: staff.fullName,
-      email: staff.email,
-      uniqueId: staff.uniqueId,
-      role: staff.role,
-      status: staff.status,
+      fullName: staff.fullName || '',
+      email: staff.email || '',
+      uniqueId: staff.uniqueId || '',
+      role: staff.role || 'teacher',
+      status: staff.status || 'active',
       qualification: staff.qualification || '',
       courseOfStudy: staff.courseOfStudy || '',
       phoneNumber: staff.phoneNumber || '',
       password: staff.password || '',
       avatarUrl: staff.avatarUrl || '',
-      assignedSubjectIds: staff.assignedSubjectIds || [],
-      assignedClasses: staff.assignedClasses || []
+      bio: staff.bio || '',
+      assignedSubjectIds: Array.from(new Set(matchedIds)),
+      assignedClasses: Array.from(new Set(staff.assignedClasses || []))
     });
+    setStaffModalError(null);
+    setSubjectSearchQuery('');
+    setQuickSubjectName('');
+    setQuickSubjectCode('');
     setShowAddStaffModal(true);
+  };
+
+  const handleQuickCreateAndAssignSubject = async () => {
+    const cleanName = quickSubjectName.trim();
+    if (!cleanName) {
+      setStaffModalError('Enter a subject name to create and assign.');
+      return;
+    }
+
+    setStaffModalError(null);
+    // If subject already exists by name, just select it cleanly
+    const existing = subjects.find(
+      s => s.name.trim().toLowerCase() === cleanName.toLowerCase()
+    );
+    if (existing) {
+      setStaffForm(prev => ({
+        ...prev,
+        assignedSubjectIds: prev.assignedSubjectIds.includes(existing.id)
+          ? prev.assignedSubjectIds
+          : [...prev.assignedSubjectIds, existing.id]
+      }));
+      setQuickSubjectName('');
+      setQuickSubjectCode('');
+      return;
+    }
+
+    setAddingQuickSubject(true);
+    try {
+      const code =
+        quickSubjectCode.trim().toUpperCase() ||
+        cleanName.replace(/[^A-Za-z0-9]/g, '').slice(0, 4).toUpperCase() ||
+        'SUB';
+      const newSubject: Subject = {
+        id: `sub_${Date.now()}`,
+        name: cleanName,
+        code,
+        department: 'General Studies'
+      };
+      await saveSubject(newSubject);
+      setSubjects(prev => (prev.some(s => s.id === newSubject.id) ? prev : [...prev, newSubject]));
+      setStaffForm(prev => ({
+        ...prev,
+        assignedSubjectIds: [...prev.assignedSubjectIds, newSubject.id]
+      }));
+      setQuickSubjectName('');
+      setQuickSubjectCode('');
+      showNotification(`Subject "${newSubject.name}" added and assigned!`);
+    } catch (err: any) {
+      setStaffModalError(err?.message || 'Unable to create subject.');
+    } finally {
+      setAddingQuickSubject(false);
+    }
   };
 
   const handleSaveStaff = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savingStaff) return;
+    setStaffModalError(null);
+
     if (!staffForm.fullName.trim() || !staffForm.email.trim()) {
+      setStaffModalError('Please fill in Staff Name and Email.');
       showNotification('Please fill in Staff Name and Email', 'error');
       return;
     }
 
+    setSavingStaff(true);
     const assignedNames = subjects
       .filter(s => staffForm.assignedSubjectIds.includes(s.id))
       .map(s => s.name);
@@ -283,30 +385,36 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       uniqueId: staffForm.uniqueId.trim().toUpperCase() || generateStaffUniqueId(),
       fullName: staffForm.fullName.trim(),
       email: staffForm.email.trim().toLowerCase(),
-      assignedSubjectIds: staffForm.assignedSubjectIds,
-      assignedSubjectNames: assignedNames.length > 0 ? assignedNames : ['General Subject'],
-      assignedClasses: staffForm.assignedClasses,
+      assignedSubjectIds: Array.from(new Set(staffForm.assignedSubjectIds)),
+      assignedSubjectNames: Array.from(new Set(assignedNames)),
+      assignedClasses: Array.from(new Set(staffForm.assignedClasses)),
       role: staffForm.role,
       status: staffForm.status,
       qualification: staffForm.qualification.trim(),
       courseOfStudy: staffForm.courseOfStudy.trim(),
       phoneNumber: staffForm.phoneNumber.trim(),
-      password: staffForm.password.trim() || undefined,
-      avatarUrl: staffForm.avatarUrl.trim() || undefined,
-      createdAt: editingStaff ? editingStaff.createdAt : new Date().toISOString()
+      password: staffForm.password.trim(),
+      avatarUrl: staffForm.avatarUrl.trim(),
+      bio: staffForm.bio.trim(),
+      createdAt: editingStaff?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
 
     try {
-      await saveStaffMember(newStaff);
+      const savedStaff = await saveStaffMember(newStaff);
       setStaffList(prev => {
         const filtered = prev.filter(s => s.id !== staffId);
-        return [newStaff, ...filtered];
+        return [savedStaff, ...filtered];
       });
       setShowAddStaffModal(false);
-      showNotification(`Staff Member ${newStaff.fullName} saved with Unique ID ${newStaff.uniqueId}!`);
-    } catch (err) {
+      showNotification(`Teacher "${savedStaff.fullName}" (${savedStaff.uniqueId}) saved and synchronized!`);
+    } catch (err: any) {
       console.error('Error saving staff:', err);
+      const errText = err?.message || 'Could not save staff member to database.';
+      setStaffModalError(errText);
       showNotification('Could not save staff member to database', 'error');
+    } finally {
+      setSavingStaff(false);
     }
   };
 
@@ -379,9 +487,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       classGrade: studentForm.classGrade.trim(),
       academicSession: studentForm.academicSession,
       status: 'active',
-      email: studentForm.email.trim().toLowerCase() || undefined,
-      password: studentForm.password.trim() || undefined,
-      passportUrl: studentForm.passportUrl.trim() || undefined,
+      email: studentForm.email.trim().toLowerCase(),
+      password: studentForm.password.trim(),
+      passportUrl: studentForm.passportUrl.trim(),
       registeredAt: editingStudent ? editingStudent.registeredAt : new Date().toISOString(),
       accessCode: code
     };
@@ -819,6 +927,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                               <div>
                                 <div className="leading-tight">{staff.fullName}</div>
                                 <div className="text-[11px] text-slate-400 font-mono font-normal">{staff.email}</div>
+                                {(staff.phoneNumber || staff.qualification) && (
+                                  <div className="text-[10px] text-slate-500 font-normal mt-0.5">
+                                    {[staff.qualification, staff.phoneNumber].filter(Boolean).join(' · ')}
+                                  </div>
+                                )}
                               </div>
                             </div>
                           </td>
@@ -839,20 +952,32 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             </div>
                           </td>
                           <td className="py-3.5 px-4">
-                            <div className="flex flex-wrap gap-1">
-                              {staff.assignedSubjectNames.map((subj, idx) => (
-                                <span
-                                  key={idx}
-                                  className="text-[10px] font-semibold bg-blue-50 text-blue-900 border border-blue-200 px-2 py-0.5 rounded"
-                                >
-                                  {subj}
-                                </span>
-                              ))}
+                            <div className="flex flex-wrap items-center gap-1">
+                              {(staff.assignedSubjectNames || []).length > 0 ? (
+                                staff.assignedSubjectNames.map((subj, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="text-[10px] font-semibold bg-blue-50 text-blue-900 border border-blue-200 px-2 py-0.5 rounded"
+                                  >
+                                    {subj}
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="text-[10px] text-slate-400 italic">No subjects assigned</span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEditStaff(staff)}
+                                className="text-[10px] font-bold text-blue-800 hover:text-blue-950 bg-blue-50/70 hover:bg-blue-100 border border-dashed border-blue-300 px-1.5 py-0.5 rounded cursor-pointer"
+                                title="Add or edit assigned subjects"
+                              >
+                                + Subjects
+                              </button>
                             </div>
                           </td>
                           <td className="py-3.5 px-4">
                             <div className="flex flex-wrap gap-1">
-                              {staff.assignedClasses.map((cls, idx) => (
+                              {(staff.assignedClasses || []).map((cls, idx) => (
                                 <span
                                   key={idx}
                                   className="text-[10px] font-semibold bg-slate-100 text-slate-700 px-2 py-0.5 rounded"
@@ -1138,7 +1263,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSaveStaff} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+            <form onSubmit={handleSaveStaff} className="p-6 space-y-4 max-h-[82vh] overflow-y-auto">
+              {staffModalError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>{staffModalError}</span>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   Full Name (e.g. Mr. Olawale Benson)
@@ -1153,18 +1285,32 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Faculty Email Address
-                </label>
-                <input
-                  type="email"
-                  required
-                  placeholder="benson@primeedutech.ng"
-                  value={staffForm.email}
-                  onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })}
-                  className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Faculty Email Address
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="benson@honeysworld.edu.ng"
+                    value={staffForm.email}
+                    onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })}
+                    className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Phone Number
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="+234 803 123 4567"
+                    value={staffForm.phoneNumber}
+                    onChange={(e) => setStaffForm({ ...staffForm, phoneNumber: e.target.value })}
+                    className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900"
+                  />
+                </div>
               </div>
 
               {/* Staff Photo Upload */}
@@ -1287,43 +1433,150 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                  Assigned Teaching Subjects
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Professional Bio / Teaching Specialization
                 </label>
-                <div className="grid grid-cols-2 gap-2 max-h-32 overflow-y-auto p-2 bg-slate-50 border border-slate-200 rounded-xl">
-                  {subjects.map(sub => {
-                    const checked = staffForm.assignedSubjectIds.includes(sub.id);
-                    return (
-                      <label key={sub.id} className="flex items-center gap-2 text-xs cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setStaffForm({
-                                ...staffForm,
-                                assignedSubjectIds: [...staffForm.assignedSubjectIds, sub.id]
-                              });
-                            } else {
-                              setStaffForm({
-                                ...staffForm,
-                                assignedSubjectIds: staffForm.assignedSubjectIds.filter(id => id !== sub.id)
-                              });
-                            }
-                          }}
-                          className="rounded text-blue-900"
-                        />
-                        <span className="truncate">{sub.name}</span>
-                      </label>
-                    );
-                  })}
+                <textarea
+                  rows={2}
+                  placeholder="Optional instructor background, specialization, or office notes..."
+                  value={staffForm.bio}
+                  onChange={(e) => setStaffForm({ ...staffForm, bio: e.target.value })}
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl"
+                />
+              </div>
+
+              {/* Assigned Teaching Subjects with Search + Quick Create & Assign */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Assigned Teaching Subjects ({staffForm.assignedSubjectIds.length} selected)
+                  </label>
+                  <div className="flex items-center gap-2 text-[10px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setStaffForm(prev => ({ ...prev, assignedSubjectIds: subjects.map(s => s.id) }))}
+                      className="text-blue-900 hover:underline cursor-pointer"
+                    >
+                      Select All
+                    </button>
+                    <span className="text-slate-300">|</span>
+                    <button
+                      type="button"
+                      onClick={() => setStaffForm(prev => ({ ...prev, assignedSubjectIds: [] }))}
+                      className="text-rose-600 hover:underline cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+
+                {/* Inline Subject Search */}
+                <input
+                  type="text"
+                  placeholder="Filter subjects by name or code..."
+                  value={subjectSearchQuery}
+                  onChange={(e) => setSubjectSearchQuery(e.target.value)}
+                  className="w-full px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                />
+
+                <div className="grid grid-cols-2 gap-2 max-h-36 overflow-y-auto p-2.5 bg-slate-50 border border-slate-200 rounded-xl">
+                  {subjects
+                    .filter(sub => {
+                      const q = subjectSearchQuery.trim().toLowerCase();
+                      if (!q) return true;
+                      return sub.name.toLowerCase().includes(q) || sub.code.toLowerCase().includes(q);
+                    })
+                    .map(sub => {
+                      const checked = staffForm.assignedSubjectIds.includes(sub.id);
+                      return (
+                        <label
+                          key={sub.id}
+                          className={`flex items-center gap-2 text-xs px-2 py-1 rounded-lg cursor-pointer transition-colors ${
+                            checked ? 'bg-blue-50 text-blue-950 font-bold border border-blue-200' : 'hover:bg-slate-100'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setStaffForm(prev => ({
+                                  ...prev,
+                                  assignedSubjectIds: prev.assignedSubjectIds.includes(sub.id)
+                                    ? prev.assignedSubjectIds
+                                    : [...prev.assignedSubjectIds, sub.id]
+                                }));
+                              } else {
+                                setStaffForm(prev => ({
+                                  ...prev,
+                                  assignedSubjectIds: prev.assignedSubjectIds.filter(id => id !== sub.id)
+                                }));
+                              }
+                            }}
+                            className="rounded text-blue-900"
+                          />
+                          <span className="truncate">{sub.name}</span>
+                        </label>
+                      );
+                    })}
+                </div>
+
+                {/* Inline Quick-Create & Assign New Subject */}
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="text"
+                    placeholder="New subject name (e.g. Civic Education)"
+                    value={quickSubjectName}
+                    onChange={(e) => setQuickSubjectName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleQuickCreateAndAssignSubject();
+                      }
+                    }}
+                    className="flex-1 px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-300 rounded-lg"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Code"
+                    value={quickSubjectCode}
+                    onChange={(e) => setQuickSubjectCode(e.target.value.toUpperCase())}
+                    className="w-16 px-2 py-1.5 text-xs bg-slate-50 border border-slate-300 rounded-lg uppercase font-mono"
+                  />
+                  <button
+                    type="button"
+                    disabled={addingQuickSubject}
+                    onClick={handleQuickCreateAndAssignSubject}
+                    className="px-2.5 py-1.5 bg-blue-900 hover:bg-blue-800 text-white text-[11px] font-bold rounded-lg whitespace-nowrap cursor-pointer disabled:opacity-50"
+                  >
+                    {addingQuickSubject ? 'Adding...' : '+ Add & Assign'}
+                  </button>
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                  Assigned Classes
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Assigned Classes ({staffForm.assignedClasses.length} selected)
+                  </label>
+                  <div className="flex items-center gap-2 text-[10px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setStaffForm(prev => ({ ...prev, assignedClasses: classes.map(c => c.code) }))}
+                      className="text-blue-900 hover:underline cursor-pointer"
+                    >
+                      All Classes
+                    </button>
+                    <span className="text-slate-300">|</span>
+                    <button
+                      type="button"
+                      onClick={() => setStaffForm(prev => ({ ...prev, assignedClasses: [] }))}
+                      className="text-rose-600 hover:underline cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
                 <div className="flex flex-wrap gap-2">
                   {classes.map(cls => {
                     const checked = staffForm.assignedClasses.includes(cls.code);
@@ -1341,15 +1594,17 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                           checked={checked}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              setStaffForm({
-                                ...staffForm,
-                                assignedClasses: [...staffForm.assignedClasses, cls.code]
-                              });
+                              setStaffForm(prev => ({
+                                ...prev,
+                                assignedClasses: prev.assignedClasses.includes(cls.code)
+                                  ? prev.assignedClasses
+                                  : [...prev.assignedClasses, cls.code]
+                              }));
                             } else {
-                              setStaffForm({
-                                ...staffForm,
-                                assignedClasses: staffForm.assignedClasses.filter(c => c !== cls.code)
-                              });
+                              setStaffForm(prev => ({
+                                ...prev,
+                                assignedClasses: prev.assignedClasses.filter(c => c !== cls.code)
+                              }));
                             }
                           }}
                           className="sr-only"
@@ -1401,9 +1656,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 text-xs font-bold bg-slate-900 text-white rounded-xl shadow-md hover:bg-slate-800 cursor-pointer"
+                  disabled={savingStaff}
+                  className="px-5 py-2.5 text-xs font-bold bg-slate-900 text-white rounded-xl shadow-md hover:bg-slate-800 cursor-pointer disabled:opacity-50"
                 >
-                  {editingStaff ? 'Update Staff Member' : 'Save Faculty Staff'}
+                  {savingStaff
+                    ? 'Saving & Syncing...'
+                    : editingStaff
+                    ? 'Update Teacher Member'
+                    : 'Save Faculty Staff'}
                 </button>
               </div>
             </form>

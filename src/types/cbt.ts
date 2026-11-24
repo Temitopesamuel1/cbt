@@ -203,12 +203,12 @@ export function resolveCaWeights(raw?: Partial<CaWeightsConfig> | null): Require
     };
   }
 
-  // Upgrade unversioned legacy 15/15/10/60 defaults automatically to 20/20/10/50
+  // Upgrade unversioned or v1 legacy 15/15/10/60 defaults automatically to 20/20/10/50
   const isLegacyDefault =
-    !raw.version &&
+    (!raw.version || raw.version < 2) &&
     (raw.firstCaMax === 15 || raw.testMax === 15) &&
     (raw.secondCaMax === 15 || raw.projectMax === 15) &&
-    raw.assignmentMax === 10 &&
+    (raw.assignmentMax === 10 || raw.assignmentMax === undefined) &&
     raw.examMax === 60;
 
   if (isLegacyDefault) {
@@ -332,6 +332,7 @@ export interface StaffMember {
   phoneNumber?: string;
   avatarUrl?: string; // Teacher photo or preset avatar URL
   bio?: string; // Professional summary / specialization
+  updatedAt?: string; // ISO timestamp for fast cross-platform sync
 }
 
 export interface StudentAssessmentRecord {
@@ -408,6 +409,7 @@ export interface StudentTermReportData {
   nextTermFees?: string;        // e.g. "26,000"
   principalSignature?: string;
   proprietressSignature?: string;
+  customLabels?: Record<string, string>;
   updatedAt: string;
   updatedBy?: string;
 }

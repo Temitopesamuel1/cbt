@@ -434,11 +434,30 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
         return;
       }
 
-      const recordsToSave: StudentAssessmentRecord[] = classStudents.map(s => getRecord(s));
+      const recordsToSave: StudentAssessmentRecord[] = classStudents
+        .filter(s => Boolean(assessmentRecords[s.id]))
+        .map(s => getRecord(s))
+        .filter(
+          r =>
+            r.assignmentScore > 0 ||
+            (r.firstCaScore || 0) > 0 ||
+            (r.secondCaScore || 0) > 0 ||
+            r.examScore > 0 ||
+            r.totalScore > 0 ||
+            Boolean(r.teacherComment?.trim())
+        );
+      if (recordsToSave.length === 0) {
+        setSaveStatus({
+          text: `Enter at least one student score before saving ${activeSubject?.name || 'sheet'}.`,
+          type: 'error'
+        });
+        setIsSaving(false);
+        return;
+      }
       await saveAssessmentBatch(recordsToSave);
       setHasUnsavedChanges(false);
       setSaveStatus({
-        text: `Master Assessment Record Sheet for ${selectedClassCode} (${activeSubject?.name}) with ${recordsToSave.length} student(s) saved & published successfully!`,
+        text: `Master Assessment Record Sheet for ${selectedClassCode} (${activeSubject?.name}) with ${recordsToSave.length} entered student record(s) saved & published successfully!`,
         type: 'success'
       });
     } catch (err) {
@@ -1197,6 +1216,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
           students={classStudents}
           classes={classes}
           submissions={submissions}
+          settings={liveSettings || settings}
           initialClassFilter={selectedClassCode}
           academicSession={academicSession}
           term={currentTerm}
@@ -1210,7 +1230,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
           <div className="relative w-full max-w-4xl max-h-[96vh] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-slate-300 p-2 sm:p-4">
             <HwsOfficialResultSlip
               student={viewingOfficialSlipStudent}
-              settings={{
+              draftRecords={Object.values(assessmentRecords)}
+              settings={liveSettings || settings || {
                 schoolName,
                 motto: "Good Education is the Best Foundation for a Better Future.",
                 address: "NO. 84 GAA-AJANAKU AIYETORO STREET, ILORIN KW/ST.",
@@ -1220,7 +1241,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                 currentTerm,
                 schoolLogo: "/school-logo.png",
                 passMarkPercentage: 50,
-                allowImmediateResultViewing: true
+                allowImmediateResultViewing: true,
+                caWeights
               }}
               academicSession={academicSession}
               term={currentTerm}

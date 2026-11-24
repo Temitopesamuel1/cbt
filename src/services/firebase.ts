@@ -8,7 +8,11 @@ import {
   User
 } from 'firebase/auth';
 import {
+  initializeFirestore,
   getFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  Firestore,
   collection,
   doc,
   setDoc,
@@ -55,7 +59,20 @@ import {
 } from '../data/initialSchoolData';
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+let dbInstance: Firestore;
+try {
+  dbInstance = initializeFirestore(
+    app,
+    {
+      experimentalForceLongPolling: true,
+      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+    },
+    firebaseConfig.firestoreDatabaseId
+  );
+} catch {
+  dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+}
+export const db = dbInstance;
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
@@ -107,16 +124,66 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 }
 
 export async function testConnection(): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return false;
+  }
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firebase client is offline or initializing.');
+    const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    if (msg.includes('client is offline') || msg.includes('unavailable') || msg.includes('respond')) {
+      console.warn('Firebase client operating with cached persistence while reconnecting.');
       return false;
     }
     return true;
   }
+}
+
+// Deeply strip undefined properties so Firestore setDoc/updateDoc never throws
+export function sanitizeFirestoreData<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value
+      .filter(item => item !== undefined)
+      .map(item => sanitizeFirestoreData(item)) as unknown as T;
+  }
+  if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
+    const cleaned: Record<string, any> = {};
+    for (const [key, val] of Object.entries(value as Record<string, any>)) {
+      if (val !== undefined) {
+        cleaned[key] = sanitizeFirestoreData(val);
+      }
+    }
+    return cleaned as T;
+  }
+  return value;
+}
+
+// Await Firestore write up to 2s for fast UI response while IndexedDB localCache finishes sync cleanly
+async function commitFirestoreFast(
+  writePromise: Promise<unknown>,
+  operationType: OperationType,
+  path: string
+): Promise<void> {
+  const guarded = writePromise.catch((error: unknown) => {
+    const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+    if (
+      msg.includes('offline') ||
+      msg.includes('unavailable') ||
+      msg.includes('network') ||
+      msg.includes('failed to fetch') ||
+      msg.includes('could not reach')
+    ) {
+      console.warn(`Firestore ${operationType} queued offline for ${path}:`, error);
+      return;
+    }
+    handleFirestoreError(error, operationType, path);
+  });
+
+  await Promise.race([
+    guarded,
+    new Promise<void>(resolve => setTimeout(resolve, 1800))
+  ]);
 }
 
 // =========================================================================
@@ -298,103 +365,256 @@ export async function verifyAdminLogin(
   return { success: true, admin: updatedAdmin };
 }
 
-// Faculty & Staff Management
-export async function fetchStaffMembers(): Promise<StaffMember[]> {
-  const path = 'teachers';
-  let staff: StaffMember[] = [];
+// =========================================================================
+// Faculty & Staff Management (Real-Time Sync + Offline Cache + Tombstones)
+// =========================================================================
+const SAVED_TEACHERS_KEY = 'prime_edutech_saved_teachers';
+const DELETED_STAFF_KEY = 'prime_edutech_deleted_staff_ids';
+const SAVED_CLASSES_KEY = 'prime_edutech_saved_classes';
+const DELETED_CLASSES_KEY = 'prime_edutech_deleted_class_ids';
+const SAVED_SUBJECTS_KEY = 'prime_edutech_saved_subjects';
+const DELETED_SUBJECTS_KEY = 'prime_edutech_deleted_subject_ids';
 
-  // Read local cache first
+function getTombstoneSet(storageKey: string): Set<string> {
   try {
-    const local = localStorage.getItem('prime_edutech_saved_teachers');
+    const raw = localStorage.getItem(storageKey);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function addTombstone(storageKey: string, id: string) {
+  try {
+    const set = getTombstoneSet(storageKey);
+    set.add(id);
+    localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
+  } catch {}
+}
+
+function removeTombstone(storageKey: string, id: string) {
+  try {
+    const set = getTombstoneSet(storageKey);
+    if (set.has(id)) {
+      set.delete(id);
+      localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
+    }
+  } catch {}
+}
+
+function broadcastEntitySync(windowEvent: string, channelType: string, detail: any = {}) {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(windowEvent, { detail }));
+    try {
+      const bc = new BroadcastChannel('prime_cbt_sync_channel');
+      bc.postMessage({ type: channelType, ...detail, timestamp: Date.now() });
+      bc.close();
+    } catch {}
+  }
+}
+
+const pickNewerStaff = (existing: StaffMember | undefined, incoming: StaffMember): StaffMember => {
+  if (!existing) return incoming;
+  const tExisting = new Date(existing.updatedAt || existing.createdAt || 0).getTime() || 0;
+  const tIncoming = new Date(incoming.updatedAt || incoming.createdAt || 0).getTime() || 0;
+  if (tIncoming > tExisting) {
+    return { ...existing, ...incoming };
+  }
+  if (tExisting > tIncoming) {
+    return { ...incoming, ...existing };
+  }
+  return { ...existing, ...incoming };
+};
+
+function readLocalStaffList(): StaffMember[] {
+  const deleted = getTombstoneSet(DELETED_STAFF_KEY);
+  try {
+    const local = localStorage.getItem(SAVED_TEACHERS_KEY);
     if (local) {
       const parsed = JSON.parse(local);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        staff = [...parsed];
+      if (Array.isArray(parsed)) {
+        return parsed.filter((s: StaffMember) => s && s.id && !deleted.has(s.id));
       }
     }
   } catch {}
+  return DEFAULT_STAFF.filter(s => !deleted.has(s.id));
+}
 
-  // Fetch from Firestore
+function writeLocalStaffList(list: StaffMember[]) {
+  try {
+    localStorage.setItem(SAVED_TEACHERS_KEY, JSON.stringify(list));
+  } catch {}
+}
+
+export async function fetchStaffMembers(): Promise<StaffMember[]> {
+  const path = 'teachers';
+  const deleted = getTombstoneSet(DELETED_STAFF_KEY);
+  const mergedMap = new Map<string, StaffMember>();
+
+  // 1. Read local cache first
+  const localStaff = readLocalStaffList();
+  for (const s of localStaff) {
+    if (!deleted.has(s.id)) mergedMap.set(s.id, s);
+  }
+
+  // 2. Fetch live from Firestore
   try {
     const snapshot = await getDocs(collection(db, path));
     if (!snapshot.empty) {
-      const firestoreStaff: StaffMember[] = [];
       snapshot.forEach(docSnap => {
-        firestoreStaff.push({ id: docSnap.id, ...docSnap.data() } as StaffMember);
+        if (deleted.has(docSnap.id)) return;
+        const fStaff = { id: docSnap.id, ...docSnap.data() } as StaffMember;
+        mergedMap.set(fStaff.id, pickNewerStaff(mergedMap.get(fStaff.id), fStaff));
       });
-
-      // Merge: Firestore takes precedence, but keep local additions not yet indexed
-      for (const fStaff of firestoreStaff) {
-        const idx = staff.findIndex(
-          s => s.id === fStaff.id || (s.uniqueId && s.uniqueId.toUpperCase() === fStaff.uniqueId?.toUpperCase())
-        );
-        if (idx >= 0) {
-          staff[idx] = { ...staff[idx], ...fStaff };
-        } else {
-          staff.push(fStaff);
-        }
-      }
-    } else if (staff.length === 0) {
-      staff = [...DEFAULT_STAFF];
+    } else if (mergedMap.size === 0) {
+      DEFAULT_STAFF.filter(s => !deleted.has(s.id)).forEach(s => mergedMap.set(s.id, s));
     }
   } catch (error) {
-    console.warn('Fallback to default staff roster:', error);
-    if (staff.length === 0) {
-      staff = [...DEFAULT_STAFF];
+    console.warn('Fallback to cached staff roster:', error);
+    if (mergedMap.size === 0) {
+      DEFAULT_STAFF.filter(s => !deleted.has(s.id)).forEach(s => mergedMap.set(s.id, s));
     }
   }
 
-  // Update local cache
-  try {
-    localStorage.setItem('prime_edutech_saved_teachers', JSON.stringify(staff));
-  } catch {}
-
-  return staff;
+  const finalStaff = Array.from(mergedMap.values());
+  writeLocalStaffList(finalStaff);
+  return finalStaff;
 }
 
-export async function saveStaffMember(staff: StaffMember): Promise<void> {
+export async function saveStaffMember(staff: StaffMember): Promise<StaffMember> {
   const path = `teachers/${staff.id}`;
-  if (!staff.uniqueId || staff.uniqueId.trim() === '') {
-    staff.uniqueId = generateStaffUniqueId();
-  }
+  removeTombstone(DELETED_STAFF_KEY, staff.id);
 
-  // Save to local cache immediately
+  const normalizedUniqueId =
+    staff.uniqueId && staff.uniqueId.trim() !== ''
+      ? staff.uniqueId.trim().toUpperCase()
+      : generateStaffUniqueId();
+
+  const cleanStaff = sanitizeFirestoreData<StaffMember>({
+    ...staff,
+    uniqueId: normalizedUniqueId,
+    assignedSubjectIds: Array.isArray(staff.assignedSubjectIds) ? staff.assignedSubjectIds : [],
+    assignedSubjectNames: Array.isArray(staff.assignedSubjectNames) ? staff.assignedSubjectNames : [],
+    assignedClasses: Array.isArray(staff.assignedClasses) ? staff.assignedClasses : [],
+    updatedAt: new Date().toISOString()
+  });
+
+  // 1. Update local cache immediately
   try {
-    const local = localStorage.getItem('prime_edutech_saved_teachers');
-    let list: StaffMember[] = local ? JSON.parse(local) : [...DEFAULT_STAFF];
-    const idx = list.findIndex(s => s.id === staff.id || s.uniqueId === staff.uniqueId);
+    const list = readLocalStaffList();
+    const idx = list.findIndex(s => s.id === cleanStaff.id);
     if (idx >= 0) {
-      list[idx] = { ...list[idx], ...staff };
+      list[idx] = { ...list[idx], ...cleanStaff };
     } else {
-      list.push(staff);
+      list.unshift(cleanStaff);
     }
-    localStorage.setItem('prime_edutech_saved_teachers', JSON.stringify(list));
+    writeLocalStaffList(list);
   } catch {}
 
-  // Persist to Firestore
-  try {
-    await setDoc(doc(db, 'teachers', staff.id), staff, { merge: true });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+  // 2. Broadcast real-time update immediately across portals & tabs
+  broadcastEntitySync('staffUpdated', 'STAFF_UPDATED', { staff: cleanStaff, staffId: cleanStaff.id });
+
+  // 3. Persist to Firestore fast (queued in IndexedDB immediately + synced to backend)
+  await commitFirestoreFast(
+    setDoc(doc(db, 'teachers', cleanStaff.id), cleanStaff, { merge: true }),
+    OperationType.WRITE,
+    path
+  );
+
+  return cleanStaff;
 }
 
 export async function deleteStaffMember(staffId: string): Promise<void> {
   const path = `teachers/${staffId}`;
-  try {
-    const local = localStorage.getItem('prime_edutech_saved_teachers');
-    if (local) {
-      const list: StaffMember[] = JSON.parse(local);
-      const filtered = list.filter(s => s.id !== staffId);
-      localStorage.setItem('prime_edutech_saved_teachers', JSON.stringify(filtered));
-    }
-  } catch {}
+  addTombstone(DELETED_STAFF_KEY, staffId);
 
   try {
-    await deleteDoc(doc(db, 'teachers', staffId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    const list = readLocalStaffList().filter(s => s.id !== staffId);
+    writeLocalStaffList(list);
+  } catch {}
+
+  broadcastEntitySync('staffUpdated', 'STAFF_UPDATED', { staffId, deleted: true });
+
+  await commitFirestoreFast(
+    deleteDoc(doc(db, 'teachers', staffId)),
+    OperationType.DELETE,
+    path
+  );
+}
+
+export function subscribeStaffMembers(callback: (staff: StaffMember[]) => void): () => void {
+  let firestoreList: StaffMember[] = [];
+  let hasRemote = false;
+
+  const emitMerged = () => {
+    const deleted = getTombstoneSet(DELETED_STAFF_KEY);
+    const merged = new Map<string, StaffMember>();
+
+    readLocalStaffList().forEach(s => {
+      if (!deleted.has(s.id)) merged.set(s.id, s);
+    });
+
+    if (hasRemote) {
+      firestoreList.forEach(fs => {
+        if (!deleted.has(fs.id)) {
+          merged.set(fs.id, pickNewerStaff(merged.get(fs.id), fs));
+        }
+      });
+    }
+
+    const result = Array.from(merged.values());
+    writeLocalStaffList(result);
+    callback(result);
+  };
+
+  // Immediate local emit
+  emitMerged();
+
+  let unsubFirestore: (() => void) | null = null;
+  try {
+    unsubFirestore = onSnapshot(
+      collection(db, 'teachers'),
+      snapshot => {
+        hasRemote = true;
+        const remote: StaffMember[] = [];
+        snapshot.forEach(docSnap => {
+          remote.push({ id: docSnap.id, ...docSnap.data() } as StaffMember);
+        });
+        firestoreList = remote;
+        emitMerged();
+      },
+      err => {
+        console.warn('Staff snapshot listener fallback:', err);
+      }
+    );
+  } catch (err) {
+    console.warn('Unable to attach staff snapshot:', err);
   }
+
+  const onSync = () => emitMerged();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('staffUpdated', onSync);
+    window.addEventListener('storage', onSync);
+  }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_sync_channel');
+    bc.onmessage = (ev) => {
+      if (ev.data?.type === 'STAFF_UPDATED') onSync();
+    };
+  } catch {}
+
+  return () => {
+    if (unsubFirestore) unsubFirestore();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('staffUpdated', onSync);
+      window.removeEventListener('storage', onSync);
+    }
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+  };
 }
 
 export interface StaffAuthResult {
@@ -423,40 +643,41 @@ export async function authenticateStaffWithCredentials(
 
   // 1. Check local cache first for fast response
   try {
-    const local = localStorage.getItem('prime_edutech_saved_teachers');
-    if (local) {
-      const list: StaffMember[] = JSON.parse(local);
-      matchedStaff = list.find(
-        s => (s.uniqueId && s.uniqueId.toUpperCase() === cleanUpper) ||
-             (s.email && s.email.toLowerCase() === cleanLower)
-      ) || null;
-    }
+    const list = readLocalStaffList();
+    matchedStaff = list.find(
+      s => (s.uniqueId && s.uniqueId.toUpperCase() === cleanUpper) ||
+           (s.email && s.email.toLowerCase() === cleanLower)
+    ) || null;
   } catch {}
 
-  // 2. Query Firestore if not found or to get most up to date password
+  // 2. Query Firestore to get latest profile, password & assigned subjects
   try {
     const qCode = query(collection(db, path), where('uniqueId', '==', cleanUpper));
     const snapCode = await getDocs(qCode);
     if (!snapCode.empty) {
       const docSnap = snapCode.docs[0];
-      matchedStaff = { ...(docSnap.data() as StaffMember), id: docSnap.id };
+      const remote = { ...(docSnap.data() as StaffMember), id: docSnap.id };
+      matchedStaff = pickNewerStaff(matchedStaff || undefined, remote);
     } else {
       const qEmail = query(collection(db, path), where('email', '==', cleanLower));
       const snapEmail = await getDocs(qEmail);
       if (!snapEmail.empty) {
         const docSnap = snapEmail.docs[0];
-        matchedStaff = { ...(docSnap.data() as StaffMember), id: docSnap.id };
+        const remote = { ...(docSnap.data() as StaffMember), id: docSnap.id };
+        matchedStaff = pickNewerStaff(matchedStaff || undefined, remote);
       }
     }
   } catch (err) {
     console.warn('Teacher lookup from Firestore failed, checking local default staff:', err);
   }
 
-  // 3. Fallback to default staff roster
+  // 3. Fallback to default staff roster (only if not deleted)
   if (!matchedStaff) {
+    const deleted = getTombstoneSet(DELETED_STAFF_KEY);
     const local = DEFAULT_STAFF.find(
-      s => (s.uniqueId && s.uniqueId.toUpperCase() === cleanUpper) ||
-           (s.email && s.email.toLowerCase() === cleanLower)
+      s => !deleted.has(s.id) &&
+           ((s.uniqueId && s.uniqueId.toUpperCase() === cleanUpper) ||
+            (s.email && s.email.toLowerCase() === cleanLower))
     );
     if (local) {
       matchedStaff = { ...local };
@@ -510,19 +731,51 @@ export async function authenticateStaffByUniqueId(rawUniqueId: string): Promise<
   return res.success && res.staff ? res.staff : null;
 }
 
-// Update teacher profile & password
+// Update teacher profile & password with immediate local + cross-tab + Firestore sync
 export async function updateTeacherProfile(staffId: string, updates: Partial<StaffMember>): Promise<StaffMember> {
   const path = `teachers/${staffId}`;
+  const cleanUpdates = sanitizeFirestoreData<Partial<StaffMember>>({
+    ...updates,
+    updatedAt: new Date().toISOString()
+  });
+
+  // 1. Update local cache immediately and build merged StaffMember
+  let mergedStaff: StaffMember = { id: staffId, ...cleanUpdates } as StaffMember;
   try {
-    await setDoc(doc(db, 'teachers', staffId), updates, { merge: true });
-    const snap = await getDoc(doc(db, 'teachers', staffId));
-    if (snap.exists()) {
-      return { id: snap.id, ...snap.data() } as StaffMember;
+    const list = readLocalStaffList();
+    const idx = list.findIndex(s => s.id === staffId);
+    if (idx >= 0) {
+      mergedStaff = { ...list[idx], ...cleanUpdates };
+      list[idx] = mergedStaff;
+    } else {
+      list.unshift(mergedStaff);
     }
-  } catch (err) {
-    console.warn('Firestore update error, updating local representation:', err);
-  }
-  return { id: staffId, ...updates } as StaffMember;
+    writeLocalStaffList(list);
+  } catch {}
+
+  // Update active session if it belongs to this teacher
+  try {
+    const activeRaw = sessionStorage.getItem('prime_edutech_active_teacher');
+    if (activeRaw) {
+      const parsed = JSON.parse(activeRaw) as StaffMember;
+      if (parsed.id === staffId) {
+        mergedStaff = { ...parsed, ...mergedStaff };
+        sessionStorage.setItem('prime_edutech_active_teacher', JSON.stringify(mergedStaff));
+      }
+    }
+  } catch {}
+
+  // 2. Broadcast immediately across all portals & tabs
+  broadcastEntitySync('staffUpdated', 'STAFF_UPDATED', { staff: mergedStaff, staffId });
+
+  // 3. Persist to Firestore
+  await commitFirestoreFast(
+    setDoc(doc(db, 'teachers', staffId), cleanUpdates, { merge: true }),
+    OperationType.WRITE,
+    path
+  );
+
+  return mergedStaff;
 }
 
 export async function logoutTeacher(): Promise<void> {
@@ -533,77 +786,325 @@ export async function logoutTeacher(): Promise<void> {
   }
 }
 
-// Classes & Subjects Management
+// =========================================================================
+// Classes & Subjects Management (Real-Time Sync + Offline Cache + Tombstones)
+// =========================================================================
+function readLocalClassesList(): SchoolClass[] {
+  const deleted = getTombstoneSet(DELETED_CLASSES_KEY);
+  try {
+    const raw = localStorage.getItem(SAVED_CLASSES_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((c: SchoolClass) => c && c.id && !deleted.has(c.id));
+      }
+    }
+  } catch {}
+  return DEFAULT_SCHOOL_CLASSES.filter(c => !deleted.has(c.id));
+}
+
+function writeLocalClassesList(list: SchoolClass[]) {
+  try {
+    localStorage.setItem(SAVED_CLASSES_KEY, JSON.stringify(list));
+  } catch {}
+}
+
 export async function fetchSchoolClasses(): Promise<SchoolClass[]> {
   const path = 'classes';
+  const deleted = getTombstoneSet(DELETED_CLASSES_KEY);
+  const mergedMap = new Map<string, SchoolClass>();
+
+  readLocalClassesList().forEach(c => {
+    if (!deleted.has(c.id)) mergedMap.set(c.id, c);
+  });
+
   try {
     const snapshot = await getDocs(collection(db, path));
-    if (snapshot.empty) {
-      return DEFAULT_SCHOOL_CLASSES;
+    if (!snapshot.empty) {
+      snapshot.forEach(docSnap => {
+        if (deleted.has(docSnap.id)) return;
+        const fc = { id: docSnap.id, ...docSnap.data() } as SchoolClass;
+        mergedMap.set(fc.id, { ...(mergedMap.get(fc.id) || {}), ...fc });
+      });
+    } else if (mergedMap.size === 0) {
+      DEFAULT_SCHOOL_CLASSES.filter(c => !deleted.has(c.id)).forEach(c => mergedMap.set(c.id, c));
     }
-    const classes: SchoolClass[] = [];
-    snapshot.forEach(docSnap => {
-      classes.push({ id: docSnap.id, ...docSnap.data() } as SchoolClass);
-    });
-    return classes;
   } catch (error) {
-    console.warn('Fallback to local school classes:', error);
-    return DEFAULT_SCHOOL_CLASSES;
+    console.warn('Fallback to cached school classes:', error);
+    if (mergedMap.size === 0) {
+      DEFAULT_SCHOOL_CLASSES.filter(c => !deleted.has(c.id)).forEach(c => mergedMap.set(c.id, c));
+    }
   }
+
+  const finalClasses = Array.from(mergedMap.values());
+  writeLocalClassesList(finalClasses);
+  return finalClasses;
 }
 
 export async function saveSchoolClass(c: SchoolClass): Promise<void> {
   const path = `classes/${c.id}`;
+  removeTombstone(DELETED_CLASSES_KEY, c.id);
+  const cleanClass = sanitizeFirestoreData(c);
+
   try {
-    await setDoc(doc(db, 'classes', c.id), c, { merge: true });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+    const list = readLocalClassesList();
+    const idx = list.findIndex(item => item.id === cleanClass.id);
+    if (idx >= 0) list[idx] = { ...list[idx], ...cleanClass };
+    else list.push(cleanClass);
+    writeLocalClassesList(list);
+  } catch {}
+
+  broadcastEntitySync('classesUpdated', 'CLASSES_UPDATED', { classObj: cleanClass, classId: cleanClass.id });
+
+  await commitFirestoreFast(
+    setDoc(doc(db, 'classes', cleanClass.id), cleanClass, { merge: true }),
+    OperationType.WRITE,
+    path
+  );
 }
 
 export async function deleteSchoolClass(classId: string): Promise<void> {
   const path = `classes/${classId}`;
+  addTombstone(DELETED_CLASSES_KEY, classId);
+
   try {
-    await deleteDoc(doc(db, 'classes', classId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    const list = readLocalClassesList().filter(c => c.id !== classId);
+    writeLocalClassesList(list);
+  } catch {}
+
+  broadcastEntitySync('classesUpdated', 'CLASSES_UPDATED', { classId, deleted: true });
+
+  await commitFirestoreFast(
+    deleteDoc(doc(db, 'classes', classId)),
+    OperationType.DELETE,
+    path
+  );
+}
+
+export function subscribeSchoolClasses(callback: (classes: SchoolClass[]) => void): () => void {
+  let firestoreList: SchoolClass[] = [];
+  let hasRemote = false;
+
+  const emitMerged = () => {
+    const deleted = getTombstoneSet(DELETED_CLASSES_KEY);
+    const merged = new Map<string, SchoolClass>();
+    readLocalClassesList().forEach(c => {
+      if (!deleted.has(c.id)) merged.set(c.id, c);
+    });
+    if (hasRemote) {
+      firestoreList.forEach(fc => {
+        if (!deleted.has(fc.id)) merged.set(fc.id, { ...(merged.get(fc.id) || {}), ...fc });
+      });
+    }
+    const result = Array.from(merged.values());
+    writeLocalClassesList(result);
+    callback(result);
+  };
+
+  emitMerged();
+
+  let unsubFirestore: (() => void) | null = null;
+  try {
+    unsubFirestore = onSnapshot(
+      collection(db, 'classes'),
+      snapshot => {
+        hasRemote = true;
+        const remote: SchoolClass[] = [];
+        snapshot.forEach(docSnap => {
+          remote.push({ id: docSnap.id, ...docSnap.data() } as SchoolClass);
+        });
+        firestoreList = remote;
+        emitMerged();
+      },
+      err => {
+        console.warn('Classes snapshot fallback:', err);
+      }
+    );
+  } catch {}
+
+  const onSync = () => emitMerged();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('classesUpdated', onSync);
+    window.addEventListener('storage', onSync);
   }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_sync_channel');
+    bc.onmessage = (ev) => {
+      if (ev.data?.type === 'CLASSES_UPDATED') onSync();
+    };
+  } catch {}
+
+  return () => {
+    if (unsubFirestore) unsubFirestore();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('classesUpdated', onSync);
+      window.removeEventListener('storage', onSync);
+    }
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+  };
+}
+
+function readLocalSubjectsList(): Subject[] {
+  const deleted = getTombstoneSet(DELETED_SUBJECTS_KEY);
+  try {
+    const raw = localStorage.getItem(SAVED_SUBJECTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((s: Subject) => s && s.id && !deleted.has(s.id));
+      }
+    }
+  } catch {}
+  return DEFAULT_SUBJECTS.filter(s => !deleted.has(s.id));
+}
+
+function writeLocalSubjectsList(list: Subject[]) {
+  try {
+    localStorage.setItem(SAVED_SUBJECTS_KEY, JSON.stringify(list));
+  } catch {}
 }
 
 export async function fetchSubjects(): Promise<Subject[]> {
   const path = 'subjects';
+  const deleted = getTombstoneSet(DELETED_SUBJECTS_KEY);
+  const mergedMap = new Map<string, Subject>();
+
+  readLocalSubjectsList().forEach(s => {
+    if (!deleted.has(s.id)) mergedMap.set(s.id, s);
+  });
+
   try {
     const snapshot = await getDocs(collection(db, path));
-    if (snapshot.empty) {
-      return DEFAULT_SUBJECTS;
+    if (!snapshot.empty) {
+      snapshot.forEach(docSnap => {
+        if (deleted.has(docSnap.id)) return;
+        const fs = { id: docSnap.id, ...docSnap.data() } as Subject;
+        mergedMap.set(fs.id, { ...(mergedMap.get(fs.id) || {}), ...fs });
+      });
+    } else if (mergedMap.size === 0) {
+      DEFAULT_SUBJECTS.filter(s => !deleted.has(s.id)).forEach(s => mergedMap.set(s.id, s));
     }
-    const subjects: Subject[] = [];
-    snapshot.forEach(docSnap => {
-      subjects.push({ id: docSnap.id, ...docSnap.data() } as Subject);
-    });
-    return subjects;
   } catch (error) {
-    console.warn('Fallback to default subjects:', error);
-    return DEFAULT_SUBJECTS;
+    console.warn('Fallback to cached subjects:', error);
+    if (mergedMap.size === 0) {
+      DEFAULT_SUBJECTS.filter(s => !deleted.has(s.id)).forEach(s => mergedMap.set(s.id, s));
+    }
   }
+
+  const finalSubjects = Array.from(mergedMap.values());
+  writeLocalSubjectsList(finalSubjects);
+  return finalSubjects;
 }
 
 export async function saveSubject(sub: Subject): Promise<void> {
   const path = `subjects/${sub.id}`;
+  removeTombstone(DELETED_SUBJECTS_KEY, sub.id);
+  const cleanSub = sanitizeFirestoreData(sub);
+
   try {
-    await setDoc(doc(db, 'subjects', sub.id), sub, { merge: true });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+    const list = readLocalSubjectsList();
+    const idx = list.findIndex(item => item.id === cleanSub.id);
+    if (idx >= 0) list[idx] = { ...list[idx], ...cleanSub };
+    else list.push(cleanSub);
+    writeLocalSubjectsList(list);
+  } catch {}
+
+  broadcastEntitySync('subjectsUpdated', 'SUBJECTS_UPDATED', { subject: cleanSub, subjectId: cleanSub.id });
+
+  await commitFirestoreFast(
+    setDoc(doc(db, 'subjects', cleanSub.id), cleanSub, { merge: true }),
+    OperationType.WRITE,
+    path
+  );
 }
 
 export async function deleteSubject(subjectId: string): Promise<void> {
   const path = `subjects/${subjectId}`;
+  addTombstone(DELETED_SUBJECTS_KEY, subjectId);
+
   try {
-    await deleteDoc(doc(db, 'subjects', subjectId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    const list = readLocalSubjectsList().filter(s => s.id !== subjectId);
+    writeLocalSubjectsList(list);
+  } catch {}
+
+  broadcastEntitySync('subjectsUpdated', 'SUBJECTS_UPDATED', { subjectId, deleted: true });
+
+  await commitFirestoreFast(
+    deleteDoc(doc(db, 'subjects', subjectId)),
+    OperationType.DELETE,
+    path
+  );
+}
+
+export function subscribeSubjects(callback: (subjects: Subject[]) => void): () => void {
+  let firestoreList: Subject[] = [];
+  let hasRemote = false;
+
+  const emitMerged = () => {
+    const deleted = getTombstoneSet(DELETED_SUBJECTS_KEY);
+    const merged = new Map<string, Subject>();
+    readLocalSubjectsList().forEach(s => {
+      if (!deleted.has(s.id)) merged.set(s.id, s);
+    });
+    if (hasRemote) {
+      firestoreList.forEach(fs => {
+        if (!deleted.has(fs.id)) merged.set(fs.id, { ...(merged.get(fs.id) || {}), ...fs });
+      });
+    }
+    const result = Array.from(merged.values());
+    writeLocalSubjectsList(result);
+    callback(result);
+  };
+
+  emitMerged();
+
+  let unsubFirestore: (() => void) | null = null;
+  try {
+    unsubFirestore = onSnapshot(
+      collection(db, 'subjects'),
+      snapshot => {
+        hasRemote = true;
+        const remote: Subject[] = [];
+        snapshot.forEach(docSnap => {
+          remote.push({ id: docSnap.id, ...docSnap.data() } as Subject);
+        });
+        firestoreList = remote;
+        emitMerged();
+      },
+      err => {
+        console.warn('Subjects snapshot fallback:', err);
+      }
+    );
+  } catch {}
+
+  const onSync = () => emitMerged();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('subjectsUpdated', onSync);
+    window.addEventListener('storage', onSync);
   }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_sync_channel');
+    bc.onmessage = (ev) => {
+      if (ev.data?.type === 'SUBJECTS_UPDATED') onSync();
+    };
+  } catch {}
+
+  return () => {
+    if (unsubFirestore) unsubFirestore();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('subjectsUpdated', onSync);
+      window.removeEventListener('storage', onSync);
+    }
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+  };
 }
 
 // School Settings
@@ -828,25 +1329,26 @@ export async function getExaminationById(examId: string): Promise<Examination | 
 export async function saveExamination(exam: Examination): Promise<void> {
   // Clear any tombstone for this exam ID
   unmarkExamAsDeleted(exam.id);
+  const cleanExam = sanitizeFirestoreData(exam);
 
   // 1. Immediately mirror to localStorage so UI never blocks or fails
   try {
     const raw = localStorage.getItem('prime_cbt_saved_examinations');
     const list: Examination[] = raw ? JSON.parse(raw) : [...DEFAULT_EXAMINATIONS];
-    const filtered = list.filter(e => e.id !== exam.id);
-    const updated = [exam, ...filtered];
+    const filtered = list.filter(e => e.id !== cleanExam.id);
+    const updated = [cleanExam, ...filtered];
     localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(updated));
   } catch (err) {
     console.warn('LocalStorage exam cache error:', err);
   }
 
   // 2. Broadcast immediately to student portals and all browser tabs
-  broadcastExamSync('EXAM_SAVED', { examId: exam.id, status: exam.status });
+  broadcastExamSync('EXAM_SAVED', { examId: cleanExam.id, status: cleanExam.status });
 
-  // 3. Sync to Firestore in background
-  const path = `examinations/${exam.id}`;
+  // 3. Sync to Firestore cleanly
+  const path = `examinations/${cleanExam.id}`;
   try {
-    await setDoc(doc(db, 'examinations', exam.id), exam, { merge: true });
+    await setDoc(doc(db, 'examinations', cleanExam.id), cleanExam, { merge: true });
   } catch (error) {
     console.warn('Firestore examination write fallback:', error);
   }
@@ -1497,26 +1999,29 @@ export async function saveStudent(student: Student): Promise<void> {
   if (!student.accessCode || student.accessCode.trim() === '') {
     student.accessCode = generateStudentAccessCode();
   }
+  const cleanStudent = sanitizeFirestoreData(student);
 
   // Save to local cache immediately
   try {
     const local = localStorage.getItem('prime_edutech_saved_students_roster');
     let list: Student[] = local ? JSON.parse(local) : [...DEFAULT_STUDENTS];
-    const idx = list.findIndex(s => s.id === student.id || s.admissionNumber.toUpperCase() === student.admissionNumber.toUpperCase());
+    const idx = list.findIndex(s => s.id === cleanStudent.id || s.admissionNumber.toUpperCase() === cleanStudent.admissionNumber.toUpperCase());
     if (idx >= 0) {
-      list[idx] = { ...list[idx], ...student };
+      list[idx] = { ...list[idx], ...cleanStudent };
     } else {
-      list.push(student);
+      list.push(cleanStudent);
     }
     localStorage.setItem('prime_edutech_saved_students_roster', JSON.stringify(list));
   } catch {}
 
-  // Persist to Firestore
-  try {
-    await setDoc(doc(db, 'students', student.id), student, { merge: true });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+  broadcastEntitySync('studentsUpdated', 'STUDENTS_UPDATED', { studentId: cleanStudent.id });
+
+  // Persist to Firestore cleanly
+  await commitFirestoreFast(
+    setDoc(doc(db, 'students', cleanStudent.id), cleanStudent, { merge: true }),
+    OperationType.WRITE,
+    path
+  );
 }
 
 export async function deleteStudent(studentId: string): Promise<void> {
@@ -1758,6 +2263,27 @@ export async function fetchSubmissions(examId?: string, studentId?: string): Pro
   }
 }
 
+const normalizeClassCode = (val?: string) =>
+  (val || '').trim().toLowerCase().replace(/[\s\-_]/g, '');
+
+const normalizeTermCode = (val?: string) => {
+  const clean = (val || '').trim().toLowerCase().replace(/[\s\-_]/g, '');
+  if (clean.startsWith('first') || clean === '1st') return '1stterm';
+  if (clean.startsWith('second') || clean === '2nd') return '2ndterm';
+  if (clean.startsWith('third') || clean === '3rd') return '3rdterm';
+  return clean;
+};
+
+const pickNewerRecord = (
+  a: StudentAssessmentRecord | undefined,
+  b: StudentAssessmentRecord
+): StudentAssessmentRecord => {
+  if (!a) return b;
+  const tA = new Date(a.updatedAt || 0).getTime() || 0;
+  const tB = new Date(b.updatedAt || 0).getTime() || 0;
+  return tB >= tA ? b : a;
+};
+
 // Continuous Assessment / Master Gradebook Records
 export async function fetchAssessmentRecords(
   subjectId?: string,
@@ -1768,11 +2294,15 @@ export async function fetchAssessmentRecords(
   const path = 'caRecords';
   const mergedMap: Record<string, StudentAssessmentRecord> = {};
 
+  const normClass = normalizeClassCode(classGrade);
+  const normTerm = normalizeTermCode(term);
+  const normSession = (academicSession || '').trim();
+
   const matchesFilters = (r: StudentAssessmentRecord) => {
     if (subjectId && r.subjectId !== subjectId) return false;
-    if (classGrade && r.classGrade !== classGrade) return false;
-    if (academicSession && r.academicSession !== academicSession) return false;
-    if (term && r.term !== term) return false;
+    if (normClass && normalizeClassCode(r.classGrade) !== normClass) return false;
+    if (normSession && (r.academicSession || '').trim() !== normSession) return false;
+    if (normTerm && normalizeTermCode(r.term) !== normTerm) return false;
     return true;
   };
 
@@ -1783,25 +2313,23 @@ export async function fetchAssessmentRecords(
       const parsed: StudentAssessmentRecord[] = JSON.parse(local);
       parsed.forEach(r => {
         if (matchesFilters(r)) {
-          mergedMap[r.id] = r;
+          mergedMap[r.id] = pickNewerRecord(mergedMap[r.id], r);
         }
       });
     }
   } catch {}
 
-  // 2. Fetch from Firestore using single-field index query (avoids composite index errors) and filter remaining fields in memory
+  // 2. Fetch from Firestore using single-field index query and filter remaining fields in memory
   try {
     const q = subjectId
       ? query(collection(db, path), where('subjectId', '==', subjectId))
-      : classGrade
-      ? query(collection(db, path), where('classGrade', '==', classGrade))
       : collection(db, path);
 
     const snapshot = await getDocs(q);
     snapshot.forEach(docSnap => {
       const rec = { id: docSnap.id, ...docSnap.data() } as StudentAssessmentRecord;
       if (matchesFilters(rec)) {
-        mergedMap[rec.id] = rec;
+        mergedMap[rec.id] = pickNewerRecord(mergedMap[rec.id], rec);
       }
     });
   } catch (error) {
@@ -1814,26 +2342,39 @@ export async function fetchAssessmentRecords(
 export async function saveAssessmentRecord(record: StudentAssessmentRecord): Promise<void> {
   const sanitizedId = (record.id || `ca_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`)
     .replace(/[^a-zA-Z0-9_-]/g, '_');
-  record.id = sanitizedId;
-  const path = `caRecords/${sanitizedId}`;
-  try {
-    await setDoc(doc(db, 'caRecords', sanitizedId), record, { merge: true });
-  } catch (error) {
-    console.warn('Firestore write warning for caRecord, falling back to local cache:', error);
-  }
+  const cleanRecord = sanitizeFirestoreData({
+    ...record,
+    id: sanitizedId,
+    updatedAt: record.updatedAt || new Date().toISOString()
+  });
 
-  // Always mirror in localStorage for instant offline access
+  // Always mirror in localStorage immediately for instant offline access
   try {
     const local = localStorage.getItem('prime_edutech_ca_records');
     const records: StudentAssessmentRecord[] = local ? JSON.parse(local) : [];
-    const filtered = records.filter(r => r.id !== record.id);
-    filtered.push(record);
+    const filtered = records.filter(r => r.id !== sanitizedId);
+    filtered.push(cleanRecord);
     localStorage.setItem('prime_edutech_ca_records', JSON.stringify(filtered));
   } catch {}
 
-  // Broadcast real-time score update event across components & tabs
+  // Broadcast real-time score update event across components & tabs immediately
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('caRecordsUpdated', { detail: record }));
+    window.dispatchEvent(new CustomEvent('caRecordsUpdated', { detail: cleanRecord }));
+    try {
+      const channel = new BroadcastChannel('prime_cbt_sync_channel');
+      channel.postMessage({ type: 'CA_RECORDS_UPDATED', recordId: sanitizedId });
+      channel.close();
+    } catch {}
+  }
+
+  try {
+    await commitFirestoreFast(
+      setDoc(doc(db, 'caRecords', sanitizedId), cleanRecord, { merge: true }),
+      OperationType.WRITE,
+      `caRecords/${sanitizedId}`
+    );
+  } catch (error) {
+    console.warn('Firestore write warning for caRecord, falling back to local cache:', error);
   }
 }
 
@@ -1845,7 +2386,6 @@ export async function saveAssessmentBatch(records: StudentAssessmentRecord[]): P
 
 export async function deleteAssessmentRecord(recordId: string): Promise<void> {
   const cleanId = recordId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const path = `caRecords/${cleanId}`;
   try {
     await deleteDoc(doc(db, 'caRecords', cleanId));
   } catch (error) {
@@ -1863,6 +2403,11 @@ export async function deleteAssessmentRecord(recordId: string): Promise<void> {
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('caRecordsUpdated', { detail: { id: cleanId, deleted: true } }));
+    try {
+      const channel = new BroadcastChannel('prime_cbt_sync_channel');
+      channel.postMessage({ type: 'CA_RECORDS_UPDATED', recordId: cleanId, deleted: true });
+      channel.close();
+    } catch {}
   }
 }
 
@@ -1883,60 +2428,57 @@ export function subscribeStudentAssessmentRecords(
 ): () => void {
   const path = 'caRecords';
   let unsubFirestore: (() => void) | null = null;
+  let firestoreRecords: StudentAssessmentRecord[] = [];
 
-  const triggerFromLocalCache = () => {
+  const normAdm = (admissionNumber || '').trim().toUpperCase();
+  const isStudentMatch = (r: Partial<StudentAssessmentRecord>) => {
+    if (studentId && r.studentId === studentId) return true;
+    const rAdm = (r.admissionNumber || '').trim().toUpperCase();
+    return Boolean(normAdm && rAdm && rAdm === normAdm);
+  };
+
+  const mergeAndEmit = () => {
+    const mergedMap: Record<string, StudentAssessmentRecord> = {};
+    firestoreRecords.forEach(r => {
+      if (isStudentMatch(r)) {
+        mergedMap[r.id] = pickNewerRecord(mergedMap[r.id], r);
+      }
+    });
     try {
       const local = localStorage.getItem('prime_edutech_ca_records');
       if (local) {
         const parsed: StudentAssessmentRecord[] = JSON.parse(local);
-        const matched = parsed.filter(
-          r => r.studentId === studentId || (r.admissionNumber && r.admissionNumber.toUpperCase() === admissionNumber.toUpperCase())
-        );
-        callback(matched);
+        parsed.forEach(lr => {
+          if (isStudentMatch(lr)) {
+            mergedMap[lr.id] = pickNewerRecord(mergedMap[lr.id], lr);
+          }
+        });
       }
     } catch {}
+    callback(Object.values(mergedMap));
   };
 
   // Immediate local cache dispatch
-  triggerFromLocalCache();
+  mergeAndEmit();
 
   try {
     const q = collection(db, path);
     unsubFirestore = onSnapshot(
       q,
       snapshot => {
-        const records: StudentAssessmentRecord[] = [];
+        const list: StudentAssessmentRecord[] = [];
         snapshot.forEach(docSnap => {
           const data = docSnap.data() as StudentAssessmentRecord;
-          if (
-            data.studentId === studentId ||
-            (data.admissionNumber && data.admissionNumber.toUpperCase() === admissionNumber.toUpperCase())
-          ) {
-            records.push({ ...data, id: docSnap.id });
+          if (isStudentMatch(data)) {
+            list.push({ ...data, id: docSnap.id });
           }
         });
-
-        // Merge any local unsynced records
-        try {
-          const local = localStorage.getItem('prime_edutech_ca_records');
-          if (local) {
-            const parsed: StudentAssessmentRecord[] = JSON.parse(local);
-            parsed.forEach(lr => {
-              if (
-                (lr.studentId === studentId || lr.admissionNumber.toUpperCase() === admissionNumber.toUpperCase()) &&
-                !records.some(r => r.id === lr.id)
-              ) {
-                records.push(lr);
-              }
-            });
-          }
-        } catch {}
-
-        callback(records);
+        firestoreRecords = list;
+        mergeAndEmit();
       },
       err => {
         console.warn('Real-time score listener fallback:', err);
-        triggerFromLocalCache();
+        mergeAndEmit();
       }
     );
   } catch (error) {
@@ -1944,17 +2486,30 @@ export function subscribeStudentAssessmentRecords(
   }
 
   // Cross-tab and local broadcast listener
-  const handleLocalUpdate = () => triggerFromLocalCache();
+  const handleLocalUpdate = () => mergeAndEmit();
   if (typeof window !== 'undefined') {
     window.addEventListener('caRecordsUpdated', handleLocalUpdate);
     window.addEventListener('storage', handleLocalUpdate);
   }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_sync_channel');
+    bc.onmessage = (ev) => {
+      if (ev.data?.type === 'CA_RECORDS_UPDATED') {
+        mergeAndEmit();
+      }
+    };
+  } catch {}
 
   return () => {
     if (unsubFirestore) unsubFirestore();
     if (typeof window !== 'undefined') {
       window.removeEventListener('caRecordsUpdated', handleLocalUpdate);
       window.removeEventListener('storage', handleLocalUpdate);
+    }
+    if (bc) {
+      try { bc.close(); } catch {}
     }
   };
 }
@@ -2016,15 +2571,11 @@ export async function updateStudentProfile(
   studentId: string,
   updates: Partial<Student>
 ): Promise<Student> {
-  const path = `students/${studentId}`;
+  const cleanUpdates = sanitizeFirestoreData(updates);
   try {
-    await updateDoc(doc(db, 'students', studentId), updates);
-  } catch (error) {
-    try {
-      await setDoc(doc(db, 'students', studentId), updates, { merge: true });
-    } catch (err) {
-      console.warn('Firestore write warning for student profile:', err);
-    }
+    await setDoc(doc(db, 'students', studentId), cleanUpdates, { merge: true });
+  } catch (err) {
+    console.warn('Firestore write warning for student profile:', err);
   }
 
   // Update in localStorage
@@ -2033,13 +2584,13 @@ export async function updateStudentProfile(
     if (stored) {
       const list = JSON.parse(stored);
       const updatedList = list.map((s: any) =>
-        s.id === studentId || s.admissionNumber === updates.admissionNumber ? { ...s, ...updates } : s
+        s.id === studentId || s.admissionNumber === cleanUpdates.admissionNumber ? { ...s, ...cleanUpdates } : s
       );
       localStorage.setItem('prime_edutech_saved_students', JSON.stringify(updatedList));
     }
   } catch {}
 
-  return updates as Student;
+  return cleanUpdates as Student;
 }
 
 // Comprehensive Student Authentication (Passcode, Admission No, or Connected Email + Password)
@@ -2130,22 +2681,23 @@ export async function fetchStudentTermReport(
     }
   } catch {}
 
-  // Fallback defaults matching official Honey's World High School standard
+  // Dynamic defaults using actual student data (no stale sample overrides)
+  const clsUpper = (fallbackStudent?.classGrade || '').toUpperCase();
   return {
     id: reportDocId,
     studentId: studentId || fallbackStudent?.id || 'stu-default',
-    studentName: fallbackStudent?.fullName || 'ABDULWAHEED SOLIU',
-    admissionNumber: fallbackStudent?.admissionNumber || 'HWS/24/032',
-    classGrade: fallbackStudent?.classGrade || 'S.S 2',
-    academicSession: academicSession || '2024/2025',
+    studentName: fallbackStudent?.fullName || '',
+    admissionNumber: fallbackStudent?.admissionNumber || '',
+    classGrade: fallbackStudent?.classGrade || '',
+    academicSession: academicSession || '2025/2026',
     term: (term as any) || '1st Term',
-    age: 14,
-    house: 'BLUE',
-    sex: fallbackStudent?.gender || 'MALE',
-    noInClass: 13,
+    age: '',
+    house: '',
+    sex: fallbackStudent?.gender || '',
+    noInClass: '',
     department: fallbackStudent?.department || '',
-    category: 'SENIOR SECONDARY',
-    classAverage: '62.6%',
+    category: clsUpper.includes('JSS') ? 'JUNIOR SECONDARY' : 'SENIOR SECONDARY',
+    classAverage: '',
     behaviours: { ...DEFAULT_PSYCHOMOTOR },
     skills: { ...DEFAULT_SKILLS },
     classTeacherRemarks: "STAY FOCUS AND YOU'LL REACH YOUR GOALS.",
@@ -2154,6 +2706,7 @@ export async function fetchStudentTermReport(
     nextTermFees: "26,000",
     principalSignature: "Signed",
     proprietressSignature: "Signed",
+    customLabels: {},
     updatedAt: new Date().toISOString()
   };
 }
@@ -2161,11 +2714,14 @@ export async function fetchStudentTermReport(
 export async function saveStudentTermReport(report: StudentTermReportData): Promise<void> {
   const cleanId = (report.id || `report_${report.studentId}_${report.academicSession}_${report.term}`)
     .replace(/[^a-zA-Z0-9_-]/g, '_');
-  report.id = cleanId;
-  report.updatedAt = new Date().toISOString();
+  const cleanReport = sanitizeFirestoreData({
+    ...report,
+    id: cleanId,
+    updatedAt: new Date().toISOString()
+  });
 
   try {
-    await setDoc(doc(db, 'termReports', cleanId), report, { merge: true });
+    await setDoc(doc(db, 'termReports', cleanId), cleanReport, { merge: true });
   } catch (err) {
     console.warn('Firestore write warning for termReport:', err);
   }
