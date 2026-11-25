@@ -2,7 +2,7 @@
   "entities": {
     "Examination": {
       "title": "Examination",
-      "description": "School examination specification created and configured by teachers",
+      "description": "School examination specification created and configured by teachers or administrators",
       "type": "object",
       "properties": {
         "title": { "type": "string", "maxLength": 150 },
@@ -12,8 +12,11 @@
         "academicSession": { "type": "string", "maxLength": 20 },
         "term": { "type": "string", "maxLength": 20 },
         "examType": { "type": "string", "maxLength": 50 },
+        "targetCaComponent": { "type": "string", "enum": ["first_ca", "second_ca", "exam"] },
         "durationMinutes": { "type": "number" },
         "totalQuestions": { "type": "number" },
+        "totalMarks": { "type": "number" },
+        "passingScore": { "type": "number" },
         "instructions": { "type": "string", "maxLength": 2000 },
         "teacherId": { "type": "string", "maxLength": 128 },
         "teacherName": { "type": "string", "maxLength": 120 },
@@ -21,6 +24,8 @@
         "shuffleQuestions": { "type": "boolean" },
         "shuffleOptions": { "type": "boolean" },
         "resultVisibility": { "type": "string", "enum": ["immediate", "teacher_publish"] },
+        "startDate": { "type": "string", "maxLength": 60 },
+        "endDate": { "type": "string", "maxLength": 60 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -51,14 +56,28 @@
       "type": "object",
       "properties": {
         "admissionNumber": { "type": "string", "maxLength": 60 },
+        "accessCode": { "type": "string", "maxLength": 60 },
         "firstName": { "type": "string", "maxLength": 60 },
         "surname": { "type": "string", "maxLength": 60 },
         "fullName": { "type": "string", "maxLength": 140 },
+        "email": { "type": "string", "maxLength": 120 },
+        "password": { "type": "string", "maxLength": 120 },
+        "passportUrl": { "type": "string" },
+        "gender": { "type": "string", "maxLength": 20 },
+        "phoneNumber": { "type": "string", "maxLength": 30 },
+        "dateOfBirth": { "type": "string", "maxLength": 30 },
+        "stateOfOrigin": { "type": "string", "maxLength": 60 },
+        "department": { "type": "string", "maxLength": 80 },
+        "bio": { "type": "string", "maxLength": 500 },
         "classGrade": { "type": "string", "maxLength": 50 },
         "classId": { "type": "string", "maxLength": 60 },
         "academicSession": { "type": "string", "maxLength": 20 },
         "status": { "type": "string", "enum": ["active", "suspended", "graduated"] },
-        "registeredAt": { "type": "string", "format": "date-time" }
+        "resultWithheld": { "type": "boolean" },
+        "withheldSubjectIds": { "type": "array" },
+        "withheldReason": { "type": "string", "maxLength": 300 },
+        "registeredAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["admissionNumber", "firstName", "surname", "classGrade", "status"]
     },
@@ -71,7 +90,8 @@
         "code": { "type": "string", "maxLength": 30 },
         "arm": { "type": "string", "maxLength": 20 },
         "academicSession": { "type": "string", "maxLength": 20 },
-        "studentCount": { "type": "number" }
+        "studentCount": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["name", "code", "academicSession"]
     },
@@ -82,7 +102,8 @@
       "properties": {
         "name": { "type": "string", "maxLength": 100 },
         "code": { "type": "string", "maxLength": 30 },
-        "department": { "type": "string", "maxLength": 50 }
+        "department": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["name", "code", "department"]
     },
@@ -123,28 +144,163 @@
         "timeSpentSeconds": { "type": "number" },
         "answers": { "type": "object" },
         "submittedAt": { "type": "string", "format": "date-time" },
+        "attemptNumber": { "type": "number" },
+        "sittingLabel": { "type": "string", "maxLength": 40 },
+        "targetCaComponent": { "type": "string", "enum": ["first_ca", "second_ca", "exam"] },
         "detailedResults": { "type": "array" },
         "topicAnalysis": { "type": "object" },
         "aiRevisionRecommendations": { "type": "array" }
       },
       "required": ["examId", "studentName", "admissionNumber", "score", "totalQuestions", "percentage", "submittedAt"]
     },
+    "AssessmentRecord": {
+      "title": "AssessmentRecord",
+      "description": "Continuous assessment and examination broadsheet scores per student and subject",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string", "maxLength": 128 },
+        "studentName": { "type": "string", "maxLength": 140 },
+        "admissionNumber": { "type": "string", "maxLength": 60 },
+        "classGrade": { "type": "string", "maxLength": 50 },
+        "subjectId": { "type": "string", "maxLength": 100 },
+        "subjectName": { "type": "string", "maxLength": 100 },
+        "academicSession": { "type": "string", "maxLength": 20 },
+        "term": { "type": "string", "maxLength": 20 },
+        "assignmentScore": { "type": "number" },
+        "firstCaScore": { "type": "number" },
+        "secondCaScore": { "type": "number" },
+        "projectScore": { "type": "number" },
+        "testScore": { "type": "number" },
+        "examScore": { "type": "number" },
+        "totalScore": { "type": "number" },
+        "grade": { "type": "string", "maxLength": 10 },
+        "remark": { "type": "string", "maxLength": 60 },
+        "teacherComment": { "type": "string", "maxLength": 500 },
+        "cbtSubmissionId": { "type": "string", "maxLength": 128 },
+        "examEntries": { "type": "array" },
+        "isAutoSynced": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["studentId", "subjectId", "classGrade", "academicSession", "term"]
+    },
+    "TermReport": {
+      "title": "TermReport",
+      "description": "End-of-term student bio, psychomotor behaviours, skills ratings, remarks, and fee schedule",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string", "maxLength": 128 },
+        "studentName": { "type": "string", "maxLength": 140 },
+        "admissionNumber": { "type": "string", "maxLength": 60 },
+        "classGrade": { "type": "string", "maxLength": 50 },
+        "academicSession": { "type": "string", "maxLength": 20 },
+        "term": { "type": "string", "maxLength": 20 },
+        "age": { "type": "string", "maxLength": 20 },
+        "house": { "type": "string", "maxLength": 40 },
+        "sex": { "type": "string", "maxLength": 20 },
+        "noInClass": { "type": "string", "maxLength": 20 },
+        "department": { "type": "string", "maxLength": 80 },
+        "category": { "type": "string", "maxLength": 80 },
+        "classAverage": { "type": "string", "maxLength": 30 },
+        "behaviours": { "type": "object" },
+        "skills": { "type": "object" },
+        "classTeacherRemarks": { "type": "string", "maxLength": 500 },
+        "principalRemarks": { "type": "string", "maxLength": 500 },
+        "nextTermBegins": { "type": "string", "maxLength": 80 },
+        "nextTermFees": { "type": "string", "maxLength": 40 },
+        "principalSignature": { "type": "string", "maxLength": 120 },
+        "proprietressSignature": { "type": "string", "maxLength": 120 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["studentId", "academicSession", "term"]
+    },
+    "LessonNote": {
+      "title": "LessonNote",
+      "description": "Curriculum-aligned teacher lesson plan and instructional note",
+      "type": "object",
+      "properties": {
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherName": { "type": "string", "maxLength": 140 },
+        "subjectName": { "type": "string", "maxLength": 100 },
+        "classGrade": { "type": "string", "maxLength": 50 },
+        "term": { "type": "string", "maxLength": 20 },
+        "weekNumber": { "type": "number" },
+        "topic": { "type": "string", "maxLength": 200 },
+        "subTopic": { "type": "string", "maxLength": 200 },
+        "durationMinutes": { "type": "number" },
+        "behavioralObjectives": { "type": "array" },
+        "instructionalMaterials": { "type": "array" },
+        "previousKnowledge": { "type": "string", "maxLength": 1000 },
+        "content": { "type": "string", "maxLength": 12000 },
+        "visualsAndCharts": { "type": "string", "maxLength": 4000 },
+        "teacherActivities": { "type": "array" },
+        "studentActivities": { "type": "array" },
+        "evaluationQuestions": { "type": "array" },
+        "summary": { "type": "string", "maxLength": 1000 },
+        "assignment": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["teacherId", "subjectName", "classGrade", "topic"]
+    },
     "SchoolSettings": {
       "title": "SchoolSettings",
-      "description": "Institutional assessment settings, current academic term and session",
+      "description": "Institutional branding, assessment policies, CA weights, grading scale, and portal controls",
       "type": "object",
       "properties": {
         "schoolName": { "type": "string", "maxLength": 150 },
+        "address": { "type": "string", "maxLength": 300 },
+        "location": { "type": "string", "maxLength": 150 },
+        "motto": { "type": "string", "maxLength": 250 },
+        "principalName": { "type": "string", "maxLength": 120 },
+        "examOfficerName": { "type": "string", "maxLength": 120 },
+        "resultTitle": { "type": "string", "maxLength": 200 },
+        "resultSubtitle": { "type": "string", "maxLength": 200 },
+        "securityNotice": { "type": "string", "maxLength": 500 },
+        "phone": { "type": "string", "maxLength": 60 },
+        "email": { "type": "string", "maxLength": 120 },
+        "website": { "type": "string", "maxLength": 120 },
+        "studentIdPrefix": { "type": "string", "maxLength": 20 },
+        "schoolLogo": { "type": "string" },
         "academicSession": { "type": "string", "maxLength": 30 },
         "currentTerm": { "type": "string", "maxLength": 30 },
         "passMarkPercentage": { "type": "number" },
-        "allowImmediateResultViewing": { "type": "boolean" }
+        "allowImmediateResultViewing": { "type": "boolean" },
+        "announcementBanner": { "type": "string", "maxLength": 1000 },
+        "isStudentPortalActive": { "type": "boolean" },
+        "isTeacherPortalActive": { "type": "boolean" },
+        "enableAiAdvisor": { "type": "boolean" },
+        "enablePracticeCenter": { "type": "boolean" },
+        "enableChatHub": { "type": "boolean" },
+        "enableLessonGenerator": { "type": "boolean" },
+        "caWeights": { "type": "object" },
+        "gradingScale": { "type": "array" },
+        "nextTermBegins": { "type": "string", "maxLength": 80 },
+        "nextTermFees": { "type": "string", "maxLength": 40 },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["schoolName", "academicSession", "currentTerm"]
     },
+    "CloudSyncState": {
+      "title": "CloudSyncState",
+      "description": "Authoritative deletion tombstones and cross-device sync state markers",
+      "type": "object",
+      "properties": {
+        "deletedTeacherIds": { "type": "array" },
+        "deletedStudentIds": { "type": "array" },
+        "deletedExamIds": { "type": "array" },
+        "deletedClassIds": { "type": "array" },
+        "deletedSubjectIds": { "type": "array" },
+        "deletedAdminIds": { "type": "array" },
+        "deletedSubmissionIds": { "type": "array" },
+        "deletedCaRecordIds": { "type": "array" },
+        "deletedLessonNoteIds": { "type": "array" },
+        "deletedQuestionMap": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
     "StaffMember": {
       "title": "StaffMember",
-      "description": "Faculty staff teacher profile with assigned teaching subjects and unique login ID",
+      "description": "Faculty staff teacher profile with assigned teaching subjects, classes, and login ID",
       "type": "object",
       "properties": {
         "uniqueId": { "type": "string", "maxLength": 50 },
@@ -152,7 +308,17 @@
         "email": { "type": "string", "maxLength": 120 },
         "role": { "type": "string", "enum": ["teacher", "hod"] },
         "status": { "type": "string", "enum": ["active", "suspended"] },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "assignedSubjectIds": { "type": "array" },
+        "assignedSubjectNames": { "type": "array" },
+        "assignedClasses": { "type": "array" },
+        "qualification": { "type": "string", "maxLength": 120 },
+        "courseOfStudy": { "type": "string", "maxLength": 120 },
+        "phoneNumber": { "type": "string", "maxLength": 30 },
+        "password": { "type": "string", "maxLength": 120 },
+        "avatarUrl": { "type": "string" },
+        "bio": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uniqueId", "fullName", "email", "status"]
     },
@@ -167,8 +333,11 @@
         "passcode": { "type": "string", "maxLength": 100 },
         "status": { "type": "string", "enum": ["active", "suspended"] },
         "isMainSuperAdmin": { "type": "boolean" },
+        "assignedPermissions": { "type": "array" },
         "phoneNumber": { "type": "string", "maxLength": 30 },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "lastLoginAt": { "type": "string", "format": "date-time" }
       },
       "required": ["email", "fullName", "role", "status"]
     },
@@ -233,12 +402,16 @@
       "description": "Completed student graded test records and analytics"
     },
     "/caRecords/{recordId}": {
-      "schema": "Submission",
+      "schema": "AssessmentRecord",
       "description": "Continuous assessment broadsheet scores, test marks, and academic grades"
     },
     "/termReports/{reportId}": {
-      "schema": "Submission",
+      "schema": "TermReport",
       "description": "End-of-term student bio, psychomotor, skills, remarks, and fees data"
+    },
+    "/lesson_notes/{noteId}": {
+      "schema": "LessonNote",
+      "description": "Saved teacher lesson notes and instructional guides"
     },
     "/chat_messages/{messageId}": {
       "schema": "ChatMessage",
@@ -247,6 +420,10 @@
     "/settings/school": {
       "schema": "SchoolSettings",
       "description": "Global school settings and session configuration"
+    },
+    "/settings/syncState": {
+      "schema": "CloudSyncState",
+      "description": "Authoritative cross-device deletion tombstones and sync markers"
     }
   }
 }

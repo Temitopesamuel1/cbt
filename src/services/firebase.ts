@@ -10,8 +10,7 @@ import {
 import {
   initializeFirestore,
   getFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
+  memoryLocalCache,
   Firestore,
   collection,
   doc,
@@ -19,11 +18,14 @@ import {
   getDoc,
   getDocs,
   getDocFromServer,
+  getDocsFromServer,
   query,
   where,
   deleteDoc,
   updateDoc,
-  onSnapshot
+  onSnapshot,
+  arrayUnion,
+  arrayRemove
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
@@ -45,7 +47,13 @@ import {
   StudentTermReportData,
   DEFAULT_PSYCHOMOTOR,
   DEFAULT_SKILLS,
-  resolveCaWeights
+  resolveCaWeights,
+  CbtExamEntry,
+  CbtTargetComponent,
+  resolveExamTargetComponent,
+  getTargetComponentMax,
+  formatOrdinalExamLabel,
+  enrichSubmissionsWithOrdinals
 } from '../types/cbt';
 import {
   DEFAULT_SCHOOL_CLASSES,
@@ -64,8 +72,8 @@ try {
   dbInstance = initializeFirestore(
     app,
     {
-      experimentalForceLongPolling: true,
-      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+      ignoreUndefinedProperties: true,
+      localCache: memoryLocalCache()
     },
     firebaseConfig.firestoreDatabaseId
   );
@@ -124,7 +132,7 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 }
 
 export async function testConnection(): Promise<boolean> {
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return false;
   }
   try {
@@ -159,11 +167,12 @@ export function sanitizeFirestoreData<T>(value: T): T {
   return value;
 }
 
-// Await Firestore write up to 2s for fast UI response while IndexedDB localCache finishes sync cleanly
+// Await Firestore write cleanly when online (fast offline return if browser offline)
 async function commitFirestoreFast(
   writePromise: Promise<unknown>,
   operationType: OperationType,
-  path: string
+  path: string,
+  timeoutMs = 15000
 ): Promise<void> {
   const guarded = writePromise.catch((error: unknown) => {
     const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
@@ -180,128 +189,269 @@ async function commitFirestoreFast(
     handleFirestoreError(error, operationType, path);
   });
 
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    await Promise.race([guarded, new Promise<void>(resolve => setTimeout(resolve, 150))]);
+    return;
+  }
+
   await Promise.race([
     guarded,
-    new Promise<void>(resolve => setTimeout(resolve, 1800))
+    new Promise<void>(resolve => setTimeout(resolve, timeoutMs))
   ]);
 }
 
 // =========================================================================
 // Institutional Administrators Management (Super Admin & Co-Admins)
 // =========================================================================
-export async function fetchAdmins(): Promise<AdminUser[]> {
-  const path = 'admins';
-  let admins: AdminUser[] = [];
+const pickNewerAdmin = (existing: AdminUser | undefined, incoming: AdminUser): AdminUser => {
+  if (!existing) return incoming;
+  const tExisting = new Date(existing.updatedAt || existing.createdAt || 0).getTime() || 0;
+  const tIncoming = new Date(incoming.updatedAt || incoming.createdAt || 0).getTime() || 0;
+  if (tIncoming >= tExisting) {
+    return { ...existing, ...incoming };
+  }
+  return { ...incoming, ...existing };
+};
 
-  // Read local cache first
+function readLocalAdminsList(): AdminUser[] {
+  const deleted = getTombstoneSet(DELETED_ADMINS_KEY);
   try {
-    const local = localStorage.getItem('prime_edutech_saved_admins');
+    const local = localStorage.getItem(SAVED_ADMINS_KEY);
     if (local) {
-      const parsed: AdminUser[] = JSON.parse(local);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        admins = [...parsed];
+      const parsed = JSON.parse(local);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((a: AdminUser) => a && a.id && !deleted.has(a.id) && !pendingAdminDeletes.has(a.id));
       }
     }
   } catch {}
+  return DEFAULT_ADMINS.filter(a => !deleted.has(a.id) && !pendingAdminDeletes.has(a.id));
+}
 
-  // Fetch live from Firestore
+function writeLocalAdminsList(list: AdminUser[]) {
   try {
-    const snapshot = await getDocs(collection(db, path));
-    if (!snapshot.empty) {
-      const firestoreAdmins: AdminUser[] = [];
-      snapshot.forEach(docSnap => {
-        firestoreAdmins.push({ id: docSnap.id, ...docSnap.data() } as AdminUser);
-      });
+    localStorage.setItem(SAVED_ADMINS_KEY, JSON.stringify(list));
+  } catch {}
+}
 
-      // Merge: Firestore docs take priority, but keep any newly added local admins not yet indexed
-      for (const fAdmin of firestoreAdmins) {
-        const idx = admins.findIndex(
-          a => a.id === fAdmin.id || a.email.toLowerCase() === fAdmin.email.toLowerCase()
-        );
-        if (idx >= 0) {
-          admins[idx] = { ...admins[idx], ...fAdmin };
-        } else {
-          admins.push(fAdmin);
+export async function fetchAdmins(): Promise<AdminUser[]> {
+  const path = 'admins';
+  await fetchCloudSyncState(true).catch(() => null);
+  const deleted = getTombstoneSet(DELETED_ADMINS_KEY);
+  const mergedMap = new Map<string, AdminUser>();
+
+  try {
+    const snapshot = await fetchCollectionAuthoritative(path, true);
+    const isAuthoritative = !snapshot.metadata.fromCache;
+
+    if (!isAuthoritative) {
+      readLocalAdminsList().forEach(a => {
+        if (!deleted.has(a.id) && !pendingAdminDeletes.has(a.id)) {
+          mergedMap.set(a.id, a);
         }
+      });
+    }
+
+    snapshot.forEach(docSnap => {
+      if (deleted.has(docSnap.id) || pendingAdminDeletes.has(docSnap.id)) return;
+      const fAdmin = { id: docSnap.id, ...docSnap.data() } as AdminUser;
+      mergedMap.set(fAdmin.id, pickNewerAdmin(mergedMap.get(fAdmin.id), fAdmin));
+    });
+
+    pendingAdminSaves.forEach((pAdmin, id) => {
+      if (!deleted.has(id) && !pendingAdminDeletes.has(id)) {
+        mergedMap.set(id, pickNewerAdmin(mergedMap.get(id), pAdmin));
+      }
+    });
+
+    const admins = Array.from(mergedMap.values());
+    const hasMain = admins.some(a => a.email.toLowerCase() === 'fathertemitope@gmail.com');
+    if (!hasMain) {
+      const mainAdmin = DEFAULT_ADMINS[0];
+      mergedMap.set(mainAdmin.id, mainAdmin);
+      if (isAuthoritative) {
+        setDoc(doc(db, 'admins', mainAdmin.id), sanitizeFirestoreData(mainAdmin), { merge: true }).catch(() => {});
       }
     }
   } catch (error) {
     console.warn('Firestore fetchAdmins notice (using cache):', error);
+    readLocalAdminsList().forEach(a => {
+      if (!deleted.has(a.id) && !pendingAdminDeletes.has(a.id)) {
+        mergedMap.set(a.id, a);
+      }
+    });
+    pendingAdminSaves.forEach((pAdmin, id) => {
+      if (!deleted.has(id) && !pendingAdminDeletes.has(id)) {
+        mergedMap.set(id, pickNewerAdmin(mergedMap.get(id), pAdmin));
+      }
+    });
+    const admins = Array.from(mergedMap.values());
+    if (!admins.some(a => a.email.toLowerCase() === 'fathertemitope@gmail.com')) {
+      mergedMap.set(DEFAULT_ADMINS[0].id, DEFAULT_ADMINS[0]);
+    }
   }
 
-  // Always ensure the primary Super Admin (fathertemitope@gmail.com) exists
-  const hasMain = admins.some(a => a.email.toLowerCase() === 'fathertemitope@gmail.com');
-  if (!hasMain) {
-    const mainAdmin = DEFAULT_ADMINS[0];
-    admins = [mainAdmin, ...admins];
-    setDoc(doc(db, 'admins', mainAdmin.id), mainAdmin, { merge: true }).catch(() => {});
-  }
-
-  // Ensure all local admins exist in Firestore
-  for (const a of admins) {
-    setDoc(doc(db, 'admins', a.id), a, { merge: true }).catch(() => {});
-  }
-
-  // Update persistent local cache
-  try {
-    localStorage.setItem('prime_edutech_saved_admins', JSON.stringify(admins));
-  } catch {}
-
-  return admins;
+  const finalAdmins = Array.from(mergedMap.values());
+  writeLocalAdminsList(finalAdmins);
+  return finalAdmins;
 }
 
-export async function saveAdmin(admin: AdminUser): Promise<void> {
+export async function saveAdmin(admin: AdminUser): Promise<AdminUser> {
   const cleanEmail = admin.email.trim().toLowerCase();
   const adminId = admin.id || `admin_${cleanEmail.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-  const dataToSave: AdminUser = {
+  pendingAdminDeletes.delete(adminId);
+  removeTombstone(DELETED_ADMINS_KEY, adminId);
+
+  const dataToSave = sanitizeFirestoreData<AdminUser>({
     ...admin,
     id: adminId,
     email: cleanEmail,
-    passcode: admin.passcode || 'admin2025'
-  };
+    phoneNumber: admin.phoneNumber || '',
+    passcode: admin.passcode || 'admin2025',
+    updatedAt: new Date().toISOString()
+  });
 
-  // 1. Immediately update localStorage so state reflects without delay
+  pendingAdminSaves.set(adminId, dataToSave);
+
   try {
-    const stored = localStorage.getItem('prime_edutech_saved_admins');
-    const list: AdminUser[] = stored ? JSON.parse(stored) : [...DEFAULT_ADMINS];
-    const filtered = list.filter(
+    const list = readLocalAdminsList().filter(
       a => a.id !== adminId && a.email.toLowerCase() !== dataToSave.email.toLowerCase()
     );
-    const updated = [dataToSave, ...filtered];
-    localStorage.setItem('prime_edutech_saved_admins', JSON.stringify(updated));
+    writeLocalAdminsList([dataToSave, ...list]);
   } catch {}
 
-  // 2. Persist directly to Firestore
-  try {
-    await setDoc(doc(db, 'admins', adminId), dataToSave, { merge: true });
-  } catch (error) {
-    console.warn('Firestore setDoc warning for admin:', error);
-  }
+  broadcastEntitySync('adminsUpdated', 'ADMINS_UPDATED', { admin: dataToSave, adminId });
+
+  const writePromise = Promise.all([
+    setDoc(doc(db, 'admins', adminId), dataToSave, { merge: true }),
+    clearCloudDeletion('deletedAdminIds', adminId)
+  ]).then(() => {
+    const curr = pendingAdminSaves.get(adminId);
+    if (curr && curr.updatedAt === dataToSave.updatedAt) {
+      pendingAdminSaves.delete(adminId);
+    }
+  });
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, `admins/${adminId}`);
+  return dataToSave;
 }
 
 export async function deleteAdmin(adminId: string): Promise<void> {
-  // Prevent deleting the main super admin
   const admins = await fetchAdmins();
   const target = admins.find(a => a.id === adminId);
   if (target?.isMainSuperAdmin || target?.email.toLowerCase() === 'fathertemitope@gmail.com') {
     throw new Error('The Chief Super Administrator (fathertemitope@gmail.com) is permanently protected and cannot be deleted.');
   }
 
-  // Update localStorage immediately
+  pendingAdminSaves.delete(adminId);
+  pendingAdminDeletes.add(adminId);
+  addTombstone(DELETED_ADMINS_KEY, adminId);
+
   try {
-    const stored = localStorage.getItem('prime_edutech_saved_admins');
-    if (stored) {
-      const list: AdminUser[] = JSON.parse(stored);
-      localStorage.setItem('prime_edutech_saved_admins', JSON.stringify(list.filter(a => a.id !== adminId)));
-    }
+    writeLocalAdminsList(readLocalAdminsList().filter(a => a.id !== adminId));
   } catch {}
 
-  // Delete from Firestore
+  broadcastEntitySync('adminsUpdated', 'ADMINS_UPDATED', { adminId, deleted: true });
+
+  const delPromise = Promise.all([
+    deleteDoc(doc(db, 'admins', adminId)),
+    recordCloudDeletion('deletedAdminIds', [adminId])
+  ]).finally(() => {
+    pendingAdminDeletes.delete(adminId);
+  });
+
+  await commitFirestoreFast(delPromise, OperationType.DELETE, `admins/${adminId}`);
+}
+
+export function subscribeAdmins(callback: (admins: AdminUser[]) => void): () => void {
+  let firestoreList: AdminUser[] = [];
+  let hasServerSnapshot = false;
+  let hasAnyRemote = false;
+
+  const emitMerged = () => {
+    const deleted = getTombstoneSet(DELETED_ADMINS_KEY);
+    const merged = new Map<string, AdminUser>();
+
+    if (!hasServerSnapshot) {
+      readLocalAdminsList().forEach(a => {
+        if (!deleted.has(a.id) && !pendingAdminDeletes.has(a.id)) merged.set(a.id, a);
+      });
+    }
+
+    if (hasAnyRemote) {
+      firestoreList.forEach(fa => {
+        if (!deleted.has(fa.id) && !pendingAdminDeletes.has(fa.id)) {
+          merged.set(fa.id, pickNewerAdmin(merged.get(fa.id), fa));
+        }
+      });
+    }
+
+    pendingAdminSaves.forEach((pa, id) => {
+      if (!deleted.has(id) && !pendingAdminDeletes.has(id)) {
+        merged.set(id, pickNewerAdmin(merged.get(id), pa));
+      }
+    });
+
+    const list = Array.from(merged.values());
+    if (!list.some(a => a.email.toLowerCase() === 'fathertemitope@gmail.com')) {
+      merged.set(DEFAULT_ADMINS[0].id, DEFAULT_ADMINS[0]);
+    }
+
+    const result = Array.from(merged.values());
+    writeLocalAdminsList(result);
+    callback(result);
+  };
+
+  emitMerged();
+  const releaseSyncState = retainSyncStateListener();
+
+  let unsubFirestore: (() => void) | null = null;
   try {
-    await deleteDoc(doc(db, 'admins', adminId));
-  } catch (error) {
-    console.warn('Firestore delete warning for admin:', error);
+    unsubFirestore = onSnapshot(
+      collection(db, 'admins'),
+      { includeMetadataChanges: true },
+      snapshot => {
+        hasAnyRemote = true;
+        if (!snapshot.metadata.fromCache) {
+          hasServerSnapshot = true;
+        }
+        const remote: AdminUser[] = [];
+        snapshot.forEach(docSnap => {
+          remote.push({ id: docSnap.id, ...docSnap.data() } as AdminUser);
+        });
+        firestoreList = remote;
+        emitMerged();
+      },
+      err => {
+        console.warn('Admins snapshot listener fallback:', err);
+      }
+    );
+  } catch {}
+
+  const onSync = () => emitMerged();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('adminsUpdated', onSync);
+    window.addEventListener('storage', onSync);
   }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_sync_channel');
+    bc.onmessage = (ev) => {
+      if (ev.data?.type === 'ADMINS_UPDATED') onSync();
+    };
+  } catch {}
+
+  return () => {
+    releaseSyncState();
+    if (unsubFirestore) unsubFirestore();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('adminsUpdated', onSync);
+      window.removeEventListener('storage', onSync);
+    }
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+  };
 }
 
 export async function verifyAdminLogin(
@@ -366,14 +516,67 @@ export async function verifyAdminLogin(
 }
 
 // =========================================================================
-// Faculty & Staff Management (Real-Time Sync + Offline Cache + Tombstones)
+// Cross-System Cloud Sync State, Tombstones & In-Flight Write Guards
 // =========================================================================
+const SAVED_ADMINS_KEY = 'prime_edutech_saved_admins';
+const DELETED_ADMINS_KEY = 'prime_edutech_deleted_admin_ids';
 const SAVED_TEACHERS_KEY = 'prime_edutech_saved_teachers';
 const DELETED_STAFF_KEY = 'prime_edutech_deleted_staff_ids';
 const SAVED_CLASSES_KEY = 'prime_edutech_saved_classes';
 const DELETED_CLASSES_KEY = 'prime_edutech_deleted_class_ids';
 const SAVED_SUBJECTS_KEY = 'prime_edutech_saved_subjects';
 const DELETED_SUBJECTS_KEY = 'prime_edutech_deleted_subject_ids';
+const SAVED_STUDENTS_KEY = 'prime_edutech_saved_students_roster';
+const DELETED_STUDENTS_KEY = 'prime_edutech_deleted_student_ids';
+const DELETED_EXAMS_KEY = 'prime_cbt_deleted_exam_ids';
+const DELETED_SUBMISSIONS_KEY = 'prime_cbt_deleted_submission_ids';
+const DELETED_CA_RECORDS_KEY = 'prime_edutech_deleted_ca_record_ids';
+const DELETED_LESSON_NOTES_KEY = 'prime_cbt_deleted_lesson_note_ids';
+const BOOTSTRAPPED_KEY = 'prime_cbt_has_bootstrapped_v1';
+
+interface CloudSyncState {
+  hasBootstrapped?: boolean;
+  deletedAdminIds?: string[];
+  deletedExamIds?: string[];
+  deletedStaffIds?: string[];
+  deletedClassIds?: string[];
+  deletedSubjectIds?: string[];
+  deletedStudentIds?: string[];
+  deletedSubmissionIds?: string[];
+  deletedCaRecordIds?: string[];
+  deletedLessonNoteIds?: string[];
+  updatedAt?: string;
+}
+
+type DeletionField =
+  | 'deletedAdminIds'
+  | 'deletedExamIds'
+  | 'deletedStaffIds'
+  | 'deletedClassIds'
+  | 'deletedSubjectIds'
+  | 'deletedStudentIds'
+  | 'deletedSubmissionIds'
+  | 'deletedCaRecordIds'
+  | 'deletedLessonNoteIds';
+
+const pendingAdminSaves = new Map<string, AdminUser>();
+const pendingAdminDeletes = new Set<string>();
+const pendingExamSaves = new Map<string, Examination>();
+const pendingExamDeletes = new Set<string>();
+const pendingStaffSaves = new Map<string, StaffMember>();
+const pendingStaffDeletes = new Set<string>();
+const pendingClassSaves = new Map<string, SchoolClass>();
+const pendingClassDeletes = new Set<string>();
+const pendingSubjectSaves = new Map<string, Subject>();
+const pendingSubjectDeletes = new Set<string>();
+const pendingStudentSaves = new Map<string, Student>();
+const pendingStudentDeletes = new Set<string>();
+const pendingSubmissionSaves = new Map<string, Submission>();
+const pendingSubmissionDeletes = new Set<string>();
+const pendingCaRecordSaves = new Map<string, StudentAssessmentRecord>();
+const pendingCaRecordDeletes = new Set<string>();
+const pendingLessonNoteSaves = new Map<string, LessonNote>();
+const pendingLessonNoteDeletes = new Set<string>();
 
 function getTombstoneSet(storageKey: string): Set<string> {
   try {
@@ -392,6 +595,14 @@ function addTombstone(storageKey: string, id: string) {
   } catch {}
 }
 
+function addTombstonesBatch(storageKey: string, ids: string[]) {
+  try {
+    const set = getTombstoneSet(storageKey);
+    ids.forEach(id => set.add(id));
+    localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
+  } catch {}
+}
+
 function removeTombstone(storageKey: string, id: string) {
   try {
     const set = getTombstoneSet(storageKey);
@@ -399,6 +610,37 @@ function removeTombstone(storageKey: string, id: string) {
       set.delete(id);
       localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
     }
+  } catch {}
+}
+
+function pruneLocalStorageListByIds(storageKey: string, ids: string[]) {
+  if (!ids || ids.length === 0) return;
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (raw) {
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) {
+        const delSet = new Set(ids);
+        localStorage.setItem(
+          storageKey,
+          JSON.stringify(list.filter((item: any) => item && !delSet.has(item.id)))
+        );
+      }
+    }
+  } catch {}
+}
+
+function isSchoolBootstrapped(): boolean {
+  try {
+    return localStorage.getItem(BOOTSTRAPPED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function markSchoolBootstrappedLocal() {
+  try {
+    localStorage.setItem(BOOTSTRAPPED_KEY, 'true');
   } catch {}
 }
 
@@ -413,6 +655,203 @@ function broadcastEntitySync(windowEvent: string, channelType: string, detail: a
   }
 }
 
+function applyCloudSyncState(state?: CloudSyncState | null) {
+  if (!state) return;
+  if (state.hasBootstrapped) {
+    markSchoolBootstrappedLocal();
+  }
+  if (Array.isArray(state.deletedAdminIds) && state.deletedAdminIds.length > 0) {
+    const filtered = state.deletedAdminIds.filter(id => !pendingAdminSaves.has(id));
+    if (filtered.length > 0) {
+      addTombstonesBatch(DELETED_ADMINS_KEY, filtered);
+      pruneLocalStorageListByIds(SAVED_ADMINS_KEY, filtered);
+    }
+  }
+  if (Array.isArray(state.deletedExamIds) && state.deletedExamIds.length > 0) {
+    const filtered = state.deletedExamIds.filter(id => !pendingExamSaves.has(id));
+    if (filtered.length > 0) {
+      addTombstonesBatch(DELETED_EXAMS_KEY, filtered);
+      pruneLocalStorageListByIds('prime_cbt_saved_examinations', filtered);
+    }
+  }
+  if (Array.isArray(state.deletedStaffIds) && state.deletedStaffIds.length > 0) {
+    const filtered = state.deletedStaffIds.filter(id => !pendingStaffSaves.has(id));
+    if (filtered.length > 0) {
+      addTombstonesBatch(DELETED_STAFF_KEY, filtered);
+      pruneLocalStorageListByIds(SAVED_TEACHERS_KEY, filtered);
+    }
+  }
+  if (Array.isArray(state.deletedClassIds) && state.deletedClassIds.length > 0) {
+    const filtered = state.deletedClassIds.filter(id => !pendingClassSaves.has(id));
+    if (filtered.length > 0) {
+      addTombstonesBatch(DELETED_CLASSES_KEY, filtered);
+      pruneLocalStorageListByIds(SAVED_CLASSES_KEY, filtered);
+    }
+  }
+  if (Array.isArray(state.deletedSubjectIds) && state.deletedSubjectIds.length > 0) {
+    const filtered = state.deletedSubjectIds.filter(id => !pendingSubjectSaves.has(id));
+    if (filtered.length > 0) {
+      addTombstonesBatch(DELETED_SUBJECTS_KEY, filtered);
+      pruneLocalStorageListByIds(SAVED_SUBJECTS_KEY, filtered);
+    }
+  }
+  if (Array.isArray(state.deletedStudentIds) && state.deletedStudentIds.length > 0) {
+    const filtered = state.deletedStudentIds.filter(id => !pendingStudentSaves.has(id));
+    if (filtered.length > 0) {
+      addTombstonesBatch(DELETED_STUDENTS_KEY, filtered);
+      pruneLocalStorageListByIds(SAVED_STUDENTS_KEY, filtered);
+    }
+  }
+  if (Array.isArray(state.deletedSubmissionIds) && state.deletedSubmissionIds.length > 0) {
+    const filtered = state.deletedSubmissionIds.filter(id => !pendingSubmissionSaves.has(id));
+    if (filtered.length > 0) {
+      addTombstonesBatch(DELETED_SUBMISSIONS_KEY, filtered);
+      pruneLocalStorageListByIds('prime_cbt_submissions', filtered);
+    }
+  }
+  if (Array.isArray(state.deletedCaRecordIds) && state.deletedCaRecordIds.length > 0) {
+    const filtered = state.deletedCaRecordIds.filter(id => !pendingCaRecordSaves.has(id));
+    if (filtered.length > 0) {
+      addTombstonesBatch(DELETED_CA_RECORDS_KEY, filtered);
+      pruneLocalStorageListByIds('prime_edutech_ca_records', filtered);
+    }
+  }
+  if (Array.isArray(state.deletedLessonNoteIds) && state.deletedLessonNoteIds.length > 0) {
+    const filtered = state.deletedLessonNoteIds.filter(id => !pendingLessonNoteSaves.has(id));
+    if (filtered.length > 0) {
+      addTombstonesBatch(DELETED_LESSON_NOTES_KEY, filtered);
+      pruneLocalStorageListByIds('prime_cbt_saved_lesson_notes', filtered);
+    }
+  }
+}
+
+async function fetchCloudSyncState(forceServer = false): Promise<CloudSyncState | null> {
+  try {
+    const ref = doc(db, 'settings', 'syncState');
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    let snap;
+    if (forceServer && isOnline) {
+      try {
+        snap = await getDocFromServer(ref);
+      } catch {
+        snap = await getDoc(ref);
+      }
+    } else {
+      snap = await getDoc(ref);
+    }
+    if (snap.exists()) {
+      const data = snap.data() as CloudSyncState;
+      applyCloudSyncState(data);
+      return data;
+    }
+  } catch (err) {
+    console.warn('Cloud syncState fetch notice:', err);
+  }
+  return null;
+}
+
+async function fetchCollectionAuthoritative(collectionPath: string, forceServer = false) {
+  const colRef = collection(db, collectionPath);
+  const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+  if (isOnline && forceServer) {
+    try {
+      return await getDocsFromServer(colRef);
+    } catch {
+      return await getDocs(colRef);
+    }
+  }
+  if (isOnline) {
+    try {
+      return await getDocsFromServer(colRef);
+    } catch {
+      return await getDocs(colRef);
+    }
+  }
+  return await getDocs(colRef);
+}
+
+async function recordCloudDeletion(field: DeletionField, ids: string[]): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  markSchoolBootstrappedLocal();
+  try {
+    await setDoc(
+      doc(db, 'settings', 'syncState'),
+      {
+        hasBootstrapped: true,
+        [field]: arrayUnion(...ids),
+        updatedAt: new Date().toISOString()
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn(`Cloud tombstone sync warning (${field}):`, err);
+  }
+}
+
+async function clearCloudDeletion(field: DeletionField, id: string): Promise<void> {
+  if (!id) return;
+  markSchoolBootstrappedLocal();
+  try {
+    await setDoc(
+      doc(db, 'settings', 'syncState'),
+      {
+        hasBootstrapped: true,
+        [field]: arrayRemove(id),
+        updatedAt: new Date().toISOString()
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn(`Cloud tombstone clear warning (${field}):`, err);
+  }
+}
+
+let syncStateUnsub: (() => void) | null = null;
+let syncStateSubscribers = 0;
+
+function retainSyncStateListener(): () => void {
+  syncStateSubscribers++;
+  if (!syncStateUnsub) {
+    try {
+      syncStateUnsub = onSnapshot(
+        doc(db, 'settings', 'syncState'),
+        { includeMetadataChanges: true },
+        snap => {
+          if (snap.exists()) {
+            applyCloudSyncState(snap.data() as CloudSyncState);
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('adminsUpdated', { detail: { type: 'SYNC_STATE' } }));
+              window.dispatchEvent(new CustomEvent('prime_cbt_exams_updated', { detail: { type: 'SYNC_STATE' } }));
+              window.dispatchEvent(new CustomEvent('staffUpdated', { detail: { type: 'SYNC_STATE' } }));
+              window.dispatchEvent(new CustomEvent('classesUpdated', { detail: { type: 'SYNC_STATE' } }));
+              window.dispatchEvent(new CustomEvent('subjectsUpdated', { detail: { type: 'SYNC_STATE' } }));
+              window.dispatchEvent(new CustomEvent('studentsUpdated', { detail: { type: 'SYNC_STATE' } }));
+              window.dispatchEvent(new CustomEvent('caRecordsUpdated', { detail: { type: 'SYNC_STATE' } }));
+              window.dispatchEvent(new CustomEvent('lessonNotesUpdated', { detail: { type: 'SYNC_STATE' } }));
+            }
+          }
+        },
+        err => {
+          console.warn('SyncState listener fallback:', err);
+        }
+      );
+    } catch {}
+  }
+
+  return () => {
+    syncStateSubscribers = Math.max(0, syncStateSubscribers - 1);
+    if (syncStateSubscribers === 0 && syncStateUnsub) {
+      try {
+        syncStateUnsub();
+      } catch {}
+      syncStateUnsub = null;
+    }
+  };
+}
+
+// =========================================================================
+// Faculty & Staff Management (Authoritative Cloud Sync + Offline Cache)
+// =========================================================================
 const pickNewerStaff = (existing: StaffMember | undefined, incoming: StaffMember): StaffMember => {
   if (!existing) return incoming;
   const tExisting = new Date(existing.updatedAt || existing.createdAt || 0).getTime() || 0;
@@ -433,11 +872,12 @@ function readLocalStaffList(): StaffMember[] {
     if (local) {
       const parsed = JSON.parse(local);
       if (Array.isArray(parsed)) {
-        return parsed.filter((s: StaffMember) => s && s.id && !deleted.has(s.id));
+        return parsed.filter((s: StaffMember) => s && s.id && !deleted.has(s.id) && !pendingStaffDeletes.has(s.id));
       }
     }
   } catch {}
-  return DEFAULT_STAFF.filter(s => !deleted.has(s.id));
+  if (isSchoolBootstrapped()) return [];
+  return DEFAULT_STAFF.filter(s => !deleted.has(s.id) && !pendingStaffDeletes.has(s.id));
 }
 
 function writeLocalStaffList(list: StaffMember[]) {
@@ -448,32 +888,45 @@ function writeLocalStaffList(list: StaffMember[]) {
 
 export async function fetchStaffMembers(): Promise<StaffMember[]> {
   const path = 'teachers';
+  await fetchCloudSyncState(true).catch(() => null);
   const deleted = getTombstoneSet(DELETED_STAFF_KEY);
   const mergedMap = new Map<string, StaffMember>();
 
-  // 1. Read local cache first
-  const localStaff = readLocalStaffList();
-  for (const s of localStaff) {
-    if (!deleted.has(s.id)) mergedMap.set(s.id, s);
-  }
-
-  // 2. Fetch live from Firestore
   try {
-    const snapshot = await getDocs(collection(db, path));
-    if (!snapshot.empty) {
-      snapshot.forEach(docSnap => {
-        if (deleted.has(docSnap.id)) return;
-        const fStaff = { id: docSnap.id, ...docSnap.data() } as StaffMember;
-        mergedMap.set(fStaff.id, pickNewerStaff(mergedMap.get(fStaff.id), fStaff));
+    const snapshot = await fetchCollectionAuthoritative(path, true);
+    const isAuthoritative = !snapshot.metadata.fromCache;
+
+    if (!isAuthoritative) {
+      readLocalStaffList().forEach(s => {
+        if (!deleted.has(s.id) && !pendingStaffDeletes.has(s.id)) mergedMap.set(s.id, s);
       });
-    } else if (mergedMap.size === 0) {
+    }
+
+    snapshot.forEach(docSnap => {
+      if (deleted.has(docSnap.id) || pendingStaffDeletes.has(docSnap.id)) return;
+      const fStaff = { id: docSnap.id, ...docSnap.data() } as StaffMember;
+      mergedMap.set(fStaff.id, pickNewerStaff(mergedMap.get(fStaff.id), fStaff));
+    });
+
+    pendingStaffSaves.forEach((pStaff, id) => {
+      if (!deleted.has(id) && !pendingStaffDeletes.has(id)) {
+        mergedMap.set(id, pickNewerStaff(mergedMap.get(id), pStaff));
+      }
+    });
+
+    if (mergedMap.size === 0 && !isAuthoritative && !isSchoolBootstrapped()) {
       DEFAULT_STAFF.filter(s => !deleted.has(s.id)).forEach(s => mergedMap.set(s.id, s));
     }
   } catch (error) {
     console.warn('Fallback to cached staff roster:', error);
-    if (mergedMap.size === 0) {
-      DEFAULT_STAFF.filter(s => !deleted.has(s.id)).forEach(s => mergedMap.set(s.id, s));
-    }
+    readLocalStaffList().forEach(s => {
+      if (!deleted.has(s.id) && !pendingStaffDeletes.has(s.id)) mergedMap.set(s.id, s);
+    });
+    pendingStaffSaves.forEach((pStaff, id) => {
+      if (!deleted.has(id) && !pendingStaffDeletes.has(id)) {
+        mergedMap.set(id, pickNewerStaff(mergedMap.get(id), pStaff));
+      }
+    });
   }
 
   const finalStaff = Array.from(mergedMap.values());
@@ -483,6 +936,7 @@ export async function fetchStaffMembers(): Promise<StaffMember[]> {
 
 export async function saveStaffMember(staff: StaffMember): Promise<StaffMember> {
   const path = `teachers/${staff.id}`;
+  pendingStaffDeletes.delete(staff.id);
   removeTombstone(DELETED_STAFF_KEY, staff.id);
 
   const normalizedUniqueId =
@@ -499,6 +953,8 @@ export async function saveStaffMember(staff: StaffMember): Promise<StaffMember> 
     updatedAt: new Date().toISOString()
   });
 
+  pendingStaffSaves.set(cleanStaff.id, cleanStaff);
+
   // 1. Update local cache immediately
   try {
     const list = readLocalStaffList();
@@ -514,18 +970,26 @@ export async function saveStaffMember(staff: StaffMember): Promise<StaffMember> 
   // 2. Broadcast real-time update immediately across portals & tabs
   broadcastEntitySync('staffUpdated', 'STAFF_UPDATED', { staff: cleanStaff, staffId: cleanStaff.id });
 
-  // 3. Persist to Firestore fast (queued in IndexedDB immediately + synced to backend)
-  await commitFirestoreFast(
+  // 3. Persist to Firestore cleanly and clear tombstone if any
+  const writePromise = Promise.all([
     setDoc(doc(db, 'teachers', cleanStaff.id), cleanStaff, { merge: true }),
-    OperationType.WRITE,
-    path
-  );
+    clearCloudDeletion('deletedStaffIds', cleanStaff.id)
+  ]).then(() => {
+    const curr = pendingStaffSaves.get(cleanStaff.id);
+    if (curr && curr.updatedAt === cleanStaff.updatedAt) {
+      pendingStaffSaves.delete(cleanStaff.id);
+    }
+  });
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, path);
 
   return cleanStaff;
 }
 
 export async function deleteStaffMember(staffId: string): Promise<void> {
   const path = `teachers/${staffId}`;
+  pendingStaffSaves.delete(staffId);
+  pendingStaffDeletes.add(staffId);
   addTombstone(DELETED_STAFF_KEY, staffId);
 
   try {
@@ -535,32 +999,44 @@ export async function deleteStaffMember(staffId: string): Promise<void> {
 
   broadcastEntitySync('staffUpdated', 'STAFF_UPDATED', { staffId, deleted: true });
 
-  await commitFirestoreFast(
+  const delPromise = Promise.all([
     deleteDoc(doc(db, 'teachers', staffId)),
-    OperationType.DELETE,
-    path
-  );
+    recordCloudDeletion('deletedStaffIds', [staffId])
+  ]).finally(() => {
+    pendingStaffDeletes.delete(staffId);
+  });
+
+  await commitFirestoreFast(delPromise, OperationType.DELETE, path);
 }
 
 export function subscribeStaffMembers(callback: (staff: StaffMember[]) => void): () => void {
   let firestoreList: StaffMember[] = [];
-  let hasRemote = false;
+  let hasServerSnapshot = false;
+  let hasAnyRemote = false;
 
   const emitMerged = () => {
     const deleted = getTombstoneSet(DELETED_STAFF_KEY);
     const merged = new Map<string, StaffMember>();
 
-    readLocalStaffList().forEach(s => {
-      if (!deleted.has(s.id)) merged.set(s.id, s);
-    });
+    if (!hasServerSnapshot) {
+      readLocalStaffList().forEach(s => {
+        if (!deleted.has(s.id) && !pendingStaffDeletes.has(s.id)) merged.set(s.id, s);
+      });
+    }
 
-    if (hasRemote) {
+    if (hasAnyRemote) {
       firestoreList.forEach(fs => {
-        if (!deleted.has(fs.id)) {
+        if (!deleted.has(fs.id) && !pendingStaffDeletes.has(fs.id)) {
           merged.set(fs.id, pickNewerStaff(merged.get(fs.id), fs));
         }
       });
     }
+
+    pendingStaffSaves.forEach((pStaff, id) => {
+      if (!deleted.has(id) && !pendingStaffDeletes.has(id)) {
+        merged.set(id, pickNewerStaff(merged.get(id), pStaff));
+      }
+    });
 
     const result = Array.from(merged.values());
     writeLocalStaffList(result);
@@ -570,12 +1046,18 @@ export function subscribeStaffMembers(callback: (staff: StaffMember[]) => void):
   // Immediate local emit
   emitMerged();
 
+  const releaseSyncState = retainSyncStateListener();
+
   let unsubFirestore: (() => void) | null = null;
   try {
     unsubFirestore = onSnapshot(
       collection(db, 'teachers'),
+      { includeMetadataChanges: true },
       snapshot => {
-        hasRemote = true;
+        hasAnyRemote = true;
+        if (!snapshot.metadata.fromCache) {
+          hasServerSnapshot = true;
+        }
         const remote: StaffMember[] = [];
         snapshot.forEach(docSnap => {
           remote.push({ id: docSnap.id, ...docSnap.data() } as StaffMember);
@@ -606,6 +1088,7 @@ export function subscribeStaffMembers(callback: (staff: StaffMember[]) => void):
   } catch {}
 
   return () => {
+    releaseSyncState();
     if (unsubFirestore) unsubFirestore();
     if (typeof window !== 'undefined') {
       window.removeEventListener('staffUpdated', onSync);
@@ -671,7 +1154,7 @@ export async function authenticateStaffWithCredentials(
     console.warn('Teacher lookup from Firestore failed, checking local default staff:', err);
   }
 
-  // 3. Fallback to default staff roster (only if not deleted)
+  // 3. Fallback to default staff roster (only if not deleted and not bootstrapped)
   if (!matchedStaff) {
     const deleted = getTombstoneSet(DELETED_STAFF_KEY);
     const local = DEFAULT_STAFF.find(
@@ -753,6 +1236,8 @@ export async function updateTeacherProfile(staffId: string, updates: Partial<Sta
     writeLocalStaffList(list);
   } catch {}
 
+  pendingStaffSaves.set(staffId, mergedStaff);
+
   // Update active session if it belongs to this teacher
   try {
     const activeRaw = sessionStorage.getItem('prime_edutech_active_teacher');
@@ -769,11 +1254,13 @@ export async function updateTeacherProfile(staffId: string, updates: Partial<Sta
   broadcastEntitySync('staffUpdated', 'STAFF_UPDATED', { staff: mergedStaff, staffId });
 
   // 3. Persist to Firestore
-  await commitFirestoreFast(
-    setDoc(doc(db, 'teachers', staffId), cleanUpdates, { merge: true }),
-    OperationType.WRITE,
-    path
-  );
+  const writePromise = setDoc(doc(db, 'teachers', staffId), cleanUpdates, { merge: true }).then(() => {
+    const curr = pendingStaffSaves.get(staffId);
+    if (curr && curr.updatedAt === mergedStaff.updatedAt) {
+      pendingStaffSaves.delete(staffId);
+    }
+  });
+  await commitFirestoreFast(writePromise, OperationType.WRITE, path);
 
   return mergedStaff;
 }
@@ -787,7 +1274,7 @@ export async function logoutTeacher(): Promise<void> {
 }
 
 // =========================================================================
-// Classes & Subjects Management (Real-Time Sync + Offline Cache + Tombstones)
+// Classes & Subjects Management (Authoritative Cloud Sync + Offline Cache)
 // =========================================================================
 function readLocalClassesList(): SchoolClass[] {
   const deleted = getTombstoneSet(DELETED_CLASSES_KEY);
@@ -796,11 +1283,12 @@ function readLocalClassesList(): SchoolClass[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        return parsed.filter((c: SchoolClass) => c && c.id && !deleted.has(c.id));
+        return parsed.filter((c: SchoolClass) => c && c.id && !deleted.has(c.id) && !pendingClassDeletes.has(c.id));
       }
     }
   } catch {}
-  return DEFAULT_SCHOOL_CLASSES.filter(c => !deleted.has(c.id));
+  if (isSchoolBootstrapped()) return [];
+  return DEFAULT_SCHOOL_CLASSES.filter(c => !deleted.has(c.id) && !pendingClassDeletes.has(c.id));
 }
 
 function writeLocalClassesList(list: SchoolClass[]) {
@@ -811,29 +1299,41 @@ function writeLocalClassesList(list: SchoolClass[]) {
 
 export async function fetchSchoolClasses(): Promise<SchoolClass[]> {
   const path = 'classes';
+  await fetchCloudSyncState(true).catch(() => null);
   const deleted = getTombstoneSet(DELETED_CLASSES_KEY);
   const mergedMap = new Map<string, SchoolClass>();
 
-  readLocalClassesList().forEach(c => {
-    if (!deleted.has(c.id)) mergedMap.set(c.id, c);
-  });
-
   try {
-    const snapshot = await getDocs(collection(db, path));
-    if (!snapshot.empty) {
-      snapshot.forEach(docSnap => {
-        if (deleted.has(docSnap.id)) return;
-        const fc = { id: docSnap.id, ...docSnap.data() } as SchoolClass;
-        mergedMap.set(fc.id, { ...(mergedMap.get(fc.id) || {}), ...fc });
+    const snapshot = await fetchCollectionAuthoritative(path, true);
+    const isAuthoritative = !snapshot.metadata.fromCache;
+
+    if (!isAuthoritative) {
+      readLocalClassesList().forEach(c => {
+        if (!deleted.has(c.id) && !pendingClassDeletes.has(c.id)) mergedMap.set(c.id, c);
       });
-    } else if (mergedMap.size === 0) {
+    }
+
+    snapshot.forEach(docSnap => {
+      if (deleted.has(docSnap.id) || pendingClassDeletes.has(docSnap.id)) return;
+      const fc = { id: docSnap.id, ...docSnap.data() } as SchoolClass;
+      mergedMap.set(fc.id, { ...(mergedMap.get(fc.id) || {}), ...fc });
+    });
+
+    pendingClassSaves.forEach((pc, id) => {
+      if (!deleted.has(id) && !pendingClassDeletes.has(id)) mergedMap.set(id, pc);
+    });
+
+    if (mergedMap.size === 0 && !isAuthoritative && !isSchoolBootstrapped()) {
       DEFAULT_SCHOOL_CLASSES.filter(c => !deleted.has(c.id)).forEach(c => mergedMap.set(c.id, c));
     }
   } catch (error) {
     console.warn('Fallback to cached school classes:', error);
-    if (mergedMap.size === 0) {
-      DEFAULT_SCHOOL_CLASSES.filter(c => !deleted.has(c.id)).forEach(c => mergedMap.set(c.id, c));
-    }
+    readLocalClassesList().forEach(c => {
+      if (!deleted.has(c.id) && !pendingClassDeletes.has(c.id)) mergedMap.set(c.id, c);
+    });
+    pendingClassSaves.forEach((pc, id) => {
+      if (!deleted.has(id) && !pendingClassDeletes.has(id)) mergedMap.set(id, pc);
+    });
   }
 
   const finalClasses = Array.from(mergedMap.values());
@@ -843,8 +1343,13 @@ export async function fetchSchoolClasses(): Promise<SchoolClass[]> {
 
 export async function saveSchoolClass(c: SchoolClass): Promise<void> {
   const path = `classes/${c.id}`;
+  pendingClassDeletes.delete(c.id);
   removeTombstone(DELETED_CLASSES_KEY, c.id);
-  const cleanClass = sanitizeFirestoreData(c);
+  const cleanClass = sanitizeFirestoreData<SchoolClass>({
+    ...c,
+    updatedAt: new Date().toISOString()
+  });
+  pendingClassSaves.set(cleanClass.id, cleanClass);
 
   try {
     const list = readLocalClassesList();
@@ -856,15 +1361,23 @@ export async function saveSchoolClass(c: SchoolClass): Promise<void> {
 
   broadcastEntitySync('classesUpdated', 'CLASSES_UPDATED', { classObj: cleanClass, classId: cleanClass.id });
 
-  await commitFirestoreFast(
+  const writePromise = Promise.all([
     setDoc(doc(db, 'classes', cleanClass.id), cleanClass, { merge: true }),
-    OperationType.WRITE,
-    path
-  );
+    clearCloudDeletion('deletedClassIds', cleanClass.id)
+  ]).then(() => {
+    const curr = pendingClassSaves.get(cleanClass.id);
+    if (curr && curr.updatedAt === cleanClass.updatedAt) {
+      pendingClassSaves.delete(cleanClass.id);
+    }
+  });
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, path);
 }
 
 export async function deleteSchoolClass(classId: string): Promise<void> {
   const path = `classes/${classId}`;
+  pendingClassSaves.delete(classId);
+  pendingClassDeletes.add(classId);
   addTombstone(DELETED_CLASSES_KEY, classId);
 
   try {
@@ -874,41 +1387,57 @@ export async function deleteSchoolClass(classId: string): Promise<void> {
 
   broadcastEntitySync('classesUpdated', 'CLASSES_UPDATED', { classId, deleted: true });
 
-  await commitFirestoreFast(
+  const delPromise = Promise.all([
     deleteDoc(doc(db, 'classes', classId)),
-    OperationType.DELETE,
-    path
-  );
+    recordCloudDeletion('deletedClassIds', [classId])
+  ]).finally(() => {
+    pendingClassDeletes.delete(classId);
+  });
+
+  await commitFirestoreFast(delPromise, OperationType.DELETE, path);
 }
 
 export function subscribeSchoolClasses(callback: (classes: SchoolClass[]) => void): () => void {
   let firestoreList: SchoolClass[] = [];
-  let hasRemote = false;
+  let hasServerSnapshot = false;
+  let hasAnyRemote = false;
 
   const emitMerged = () => {
     const deleted = getTombstoneSet(DELETED_CLASSES_KEY);
     const merged = new Map<string, SchoolClass>();
-    readLocalClassesList().forEach(c => {
-      if (!deleted.has(c.id)) merged.set(c.id, c);
-    });
-    if (hasRemote) {
-      firestoreList.forEach(fc => {
-        if (!deleted.has(fc.id)) merged.set(fc.id, { ...(merged.get(fc.id) || {}), ...fc });
+    if (!hasServerSnapshot) {
+      readLocalClassesList().forEach(c => {
+        if (!deleted.has(c.id) && !pendingClassDeletes.has(c.id)) merged.set(c.id, c);
       });
     }
+    if (hasAnyRemote) {
+      firestoreList.forEach(fc => {
+        if (!deleted.has(fc.id) && !pendingClassDeletes.has(fc.id)) {
+          merged.set(fc.id, { ...(merged.get(fc.id) || {}), ...fc });
+        }
+      });
+    }
+    pendingClassSaves.forEach((pc, id) => {
+      if (!deleted.has(id) && !pendingClassDeletes.has(id)) merged.set(id, pc);
+    });
     const result = Array.from(merged.values());
     writeLocalClassesList(result);
     callback(result);
   };
 
   emitMerged();
+  const releaseSyncState = retainSyncStateListener();
 
   let unsubFirestore: (() => void) | null = null;
   try {
     unsubFirestore = onSnapshot(
       collection(db, 'classes'),
+      { includeMetadataChanges: true },
       snapshot => {
-        hasRemote = true;
+        hasAnyRemote = true;
+        if (!snapshot.metadata.fromCache) {
+          hasServerSnapshot = true;
+        }
         const remote: SchoolClass[] = [];
         snapshot.forEach(docSnap => {
           remote.push({ id: docSnap.id, ...docSnap.data() } as SchoolClass);
@@ -937,6 +1466,7 @@ export function subscribeSchoolClasses(callback: (classes: SchoolClass[]) => voi
   } catch {}
 
   return () => {
+    releaseSyncState();
     if (unsubFirestore) unsubFirestore();
     if (typeof window !== 'undefined') {
       window.removeEventListener('classesUpdated', onSync);
@@ -955,11 +1485,12 @@ function readLocalSubjectsList(): Subject[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        return parsed.filter((s: Subject) => s && s.id && !deleted.has(s.id));
+        return parsed.filter((s: Subject) => s && s.id && !deleted.has(s.id) && !pendingSubjectDeletes.has(s.id));
       }
     }
   } catch {}
-  return DEFAULT_SUBJECTS.filter(s => !deleted.has(s.id));
+  if (isSchoolBootstrapped()) return [];
+  return DEFAULT_SUBJECTS.filter(s => !deleted.has(s.id) && !pendingSubjectDeletes.has(s.id));
 }
 
 function writeLocalSubjectsList(list: Subject[]) {
@@ -970,29 +1501,41 @@ function writeLocalSubjectsList(list: Subject[]) {
 
 export async function fetchSubjects(): Promise<Subject[]> {
   const path = 'subjects';
+  await fetchCloudSyncState(true).catch(() => null);
   const deleted = getTombstoneSet(DELETED_SUBJECTS_KEY);
   const mergedMap = new Map<string, Subject>();
 
-  readLocalSubjectsList().forEach(s => {
-    if (!deleted.has(s.id)) mergedMap.set(s.id, s);
-  });
-
   try {
-    const snapshot = await getDocs(collection(db, path));
-    if (!snapshot.empty) {
-      snapshot.forEach(docSnap => {
-        if (deleted.has(docSnap.id)) return;
-        const fs = { id: docSnap.id, ...docSnap.data() } as Subject;
-        mergedMap.set(fs.id, { ...(mergedMap.get(fs.id) || {}), ...fs });
+    const snapshot = await fetchCollectionAuthoritative(path, true);
+    const isAuthoritative = !snapshot.metadata.fromCache;
+
+    if (!isAuthoritative) {
+      readLocalSubjectsList().forEach(s => {
+        if (!deleted.has(s.id) && !pendingSubjectDeletes.has(s.id)) mergedMap.set(s.id, s);
       });
-    } else if (mergedMap.size === 0) {
+    }
+
+    snapshot.forEach(docSnap => {
+      if (deleted.has(docSnap.id) || pendingSubjectDeletes.has(docSnap.id)) return;
+      const fs = { id: docSnap.id, ...docSnap.data() } as Subject;
+      mergedMap.set(fs.id, { ...(mergedMap.get(fs.id) || {}), ...fs });
+    });
+
+    pendingSubjectSaves.forEach((ps, id) => {
+      if (!deleted.has(id) && !pendingSubjectDeletes.has(id)) mergedMap.set(id, ps);
+    });
+
+    if (mergedMap.size === 0 && !isAuthoritative && !isSchoolBootstrapped()) {
       DEFAULT_SUBJECTS.filter(s => !deleted.has(s.id)).forEach(s => mergedMap.set(s.id, s));
     }
   } catch (error) {
     console.warn('Fallback to cached subjects:', error);
-    if (mergedMap.size === 0) {
-      DEFAULT_SUBJECTS.filter(s => !deleted.has(s.id)).forEach(s => mergedMap.set(s.id, s));
-    }
+    readLocalSubjectsList().forEach(s => {
+      if (!deleted.has(s.id) && !pendingSubjectDeletes.has(s.id)) mergedMap.set(s.id, s);
+    });
+    pendingSubjectSaves.forEach((ps, id) => {
+      if (!deleted.has(id) && !pendingSubjectDeletes.has(id)) mergedMap.set(id, ps);
+    });
   }
 
   const finalSubjects = Array.from(mergedMap.values());
@@ -1002,8 +1545,13 @@ export async function fetchSubjects(): Promise<Subject[]> {
 
 export async function saveSubject(sub: Subject): Promise<void> {
   const path = `subjects/${sub.id}`;
+  pendingSubjectDeletes.delete(sub.id);
   removeTombstone(DELETED_SUBJECTS_KEY, sub.id);
-  const cleanSub = sanitizeFirestoreData(sub);
+  const cleanSub = sanitizeFirestoreData<Subject>({
+    ...sub,
+    updatedAt: new Date().toISOString()
+  });
+  pendingSubjectSaves.set(cleanSub.id, cleanSub);
 
   try {
     const list = readLocalSubjectsList();
@@ -1015,15 +1563,23 @@ export async function saveSubject(sub: Subject): Promise<void> {
 
   broadcastEntitySync('subjectsUpdated', 'SUBJECTS_UPDATED', { subject: cleanSub, subjectId: cleanSub.id });
 
-  await commitFirestoreFast(
+  const writePromise = Promise.all([
     setDoc(doc(db, 'subjects', cleanSub.id), cleanSub, { merge: true }),
-    OperationType.WRITE,
-    path
-  );
+    clearCloudDeletion('deletedSubjectIds', cleanSub.id)
+  ]).then(() => {
+    const curr = pendingSubjectSaves.get(cleanSub.id);
+    if (curr && curr.updatedAt === cleanSub.updatedAt) {
+      pendingSubjectSaves.delete(cleanSub.id);
+    }
+  });
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, path);
 }
 
 export async function deleteSubject(subjectId: string): Promise<void> {
   const path = `subjects/${subjectId}`;
+  pendingSubjectSaves.delete(subjectId);
+  pendingSubjectDeletes.add(subjectId);
   addTombstone(DELETED_SUBJECTS_KEY, subjectId);
 
   try {
@@ -1033,41 +1589,57 @@ export async function deleteSubject(subjectId: string): Promise<void> {
 
   broadcastEntitySync('subjectsUpdated', 'SUBJECTS_UPDATED', { subjectId, deleted: true });
 
-  await commitFirestoreFast(
+  const delPromise = Promise.all([
     deleteDoc(doc(db, 'subjects', subjectId)),
-    OperationType.DELETE,
-    path
-  );
+    recordCloudDeletion('deletedSubjectIds', [subjectId])
+  ]).finally(() => {
+    pendingSubjectDeletes.delete(subjectId);
+  });
+
+  await commitFirestoreFast(delPromise, OperationType.DELETE, path);
 }
 
 export function subscribeSubjects(callback: (subjects: Subject[]) => void): () => void {
   let firestoreList: Subject[] = [];
-  let hasRemote = false;
+  let hasServerSnapshot = false;
+  let hasAnyRemote = false;
 
   const emitMerged = () => {
     const deleted = getTombstoneSet(DELETED_SUBJECTS_KEY);
     const merged = new Map<string, Subject>();
-    readLocalSubjectsList().forEach(s => {
-      if (!deleted.has(s.id)) merged.set(s.id, s);
-    });
-    if (hasRemote) {
-      firestoreList.forEach(fs => {
-        if (!deleted.has(fs.id)) merged.set(fs.id, { ...(merged.get(fs.id) || {}), ...fs });
+    if (!hasServerSnapshot) {
+      readLocalSubjectsList().forEach(s => {
+        if (!deleted.has(s.id) && !pendingSubjectDeletes.has(s.id)) merged.set(s.id, s);
       });
     }
+    if (hasAnyRemote) {
+      firestoreList.forEach(fs => {
+        if (!deleted.has(fs.id) && !pendingSubjectDeletes.has(fs.id)) {
+          merged.set(fs.id, { ...(merged.get(fs.id) || {}), ...fs });
+        }
+      });
+    }
+    pendingSubjectSaves.forEach((ps, id) => {
+      if (!deleted.has(id) && !pendingSubjectDeletes.has(id)) merged.set(id, ps);
+    });
     const result = Array.from(merged.values());
     writeLocalSubjectsList(result);
     callback(result);
   };
 
   emitMerged();
+  const releaseSyncState = retainSyncStateListener();
 
   let unsubFirestore: (() => void) | null = null;
   try {
     unsubFirestore = onSnapshot(
       collection(db, 'subjects'),
+      { includeMetadataChanges: true },
       snapshot => {
-        hasRemote = true;
+        hasAnyRemote = true;
+        if (!snapshot.metadata.fromCache) {
+          hasServerSnapshot = true;
+        }
         const remote: Subject[] = [];
         snapshot.forEach(docSnap => {
           remote.push({ id: docSnap.id, ...docSnap.data() } as Subject);
@@ -1096,6 +1668,7 @@ export function subscribeSubjects(callback: (subjects: Subject[]) => void): () =
   } catch {}
 
   return () => {
+    releaseSyncState();
     if (unsubFirestore) unsubFirestore();
     if (typeof window !== 'undefined') {
       window.removeEventListener('subjectsUpdated', onSync);
@@ -1108,108 +1681,172 @@ export function subscribeSubjects(callback: (subjects: Subject[]) => void): () =
 }
 
 // School Settings
+let pendingSchoolSettingsSave: SchoolSettings | null = null;
+
+function normalizeSchoolSettingsData(raw?: Partial<SchoolSettings> | null): SchoolSettings {
+  return {
+    ...DEFAULT_SCHOOL_SETTINGS,
+    ...(raw || {}),
+    caWeights: resolveCaWeights(raw?.caWeights)
+  };
+}
+
 export async function fetchSchoolSettings(): Promise<SchoolSettings> {
-  const path = 'settings/school';
   let localCached: SchoolSettings | null = null;
   try {
     const raw = localStorage.getItem('prime_edutech_school_settings');
     if (raw) {
-      const parsed = JSON.parse(raw) as SchoolSettings;
-      localCached = { ...parsed, caWeights: resolveCaWeights(parsed.caWeights) };
+      localCached = normalizeSchoolSettingsData(JSON.parse(raw) as SchoolSettings);
     }
   } catch {}
 
   try {
-    const snap = await getDoc(doc(db, 'settings', 'school'));
+    const ref = doc(db, 'settings', 'school');
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const snap = isOnline
+      ? await getDocFromServer(ref).catch(() => getDoc(ref))
+      : await getDoc(ref);
+
     if (snap.exists()) {
       const data = snap.data() as SchoolSettings;
-      const normalizedWeights = resolveCaWeights(data.caWeights);
-      if (!data.schoolName || data.schoolName === 'PRIME EDUTECH' || !data.address) {
-        const merged: SchoolSettings = {
-          ...DEFAULT_SCHOOL_SETTINGS,
+      if (!data.schoolName || data.schoolName === 'PRIME EDUTECH') {
+        const merged = normalizeSchoolSettingsData({
           ...data,
           schoolName: "Honey's World High School",
-          address: 'Gaa Ajanaku, Ilorin, Kwara State',
-          location: 'Ilorin, Kwara State, Nigeria',
-          caWeights: normalizedWeights
-        };
+          address: data.address !== undefined ? data.address : DEFAULT_SCHOOL_SETTINGS.address,
+          location: data.location !== undefined ? data.location : DEFAULT_SCHOOL_SETTINGS.location
+        });
         saveSchoolSettings(merged).catch(() => {});
         return merged;
       }
-      const normalized: SchoolSettings = {
-        ...(localCached || DEFAULT_SCHOOL_SETTINGS),
-        ...data,
-        caWeights: normalizedWeights
-      };
+      const normalized = normalizeSchoolSettingsData(
+        pendingSchoolSettingsSave &&
+        new Date(pendingSchoolSettingsSave.updatedAt || 0).getTime() > new Date(data.updatedAt || 0).getTime()
+          ? pendingSchoolSettingsSave
+          : data
+      );
       try {
         localStorage.setItem('prime_edutech_school_settings', JSON.stringify(normalized));
       } catch {}
       return normalized;
     }
     if (localCached) return localCached;
-    const defaultWithWeights: SchoolSettings = {
-      ...DEFAULT_SCHOOL_SETTINGS,
-      caWeights: resolveCaWeights(DEFAULT_SCHOOL_SETTINGS.caWeights)
-    };
+    const defaultWithWeights = normalizeSchoolSettingsData(DEFAULT_SCHOOL_SETTINGS);
     saveSchoolSettings(defaultWithWeights).catch(() => {});
     return defaultWithWeights;
-  } catch (error) {
-    return localCached || {
-      ...DEFAULT_SCHOOL_SETTINGS,
-      caWeights: resolveCaWeights(DEFAULT_SCHOOL_SETTINGS.caWeights)
-    };
+  } catch {
+    return localCached || normalizeSchoolSettingsData(DEFAULT_SCHOOL_SETTINGS);
   }
 }
 
 export async function saveSchoolSettings(settings: SchoolSettings): Promise<void> {
   const path = 'settings/school';
+  const cleanSettings = sanitizeFirestoreData<SchoolSettings>({
+    ...settings,
+    address: settings.address ?? '',
+    location: settings.location ?? '',
+    motto: settings.motto ?? '',
+    nextTermBegins: settings.nextTermBegins ?? '',
+    nextTermFees: settings.nextTermFees ?? '',
+    caWeights: resolveCaWeights(settings.caWeights),
+    updatedAt: new Date().toISOString()
+  });
+  pendingSchoolSettingsSave = cleanSettings;
+
   try {
-    localStorage.setItem('prime_edutech_school_settings', JSON.stringify(settings));
+    localStorage.setItem('prime_edutech_school_settings', JSON.stringify(cleanSettings));
   } catch {}
+
+  broadcastEntitySync('schoolSettingsUpdated', 'SCHOOL_SETTINGS_UPDATED', cleanSettings);
+
+  const writePromise = setDoc(doc(db, 'settings', 'school'), cleanSettings, { merge: true }).then(() => {
+    if (pendingSchoolSettingsSave?.updatedAt === cleanSettings.updatedAt) {
+      pendingSchoolSettingsSave = null;
+    }
+  });
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, path);
+}
+
+export function subscribeSchoolSettings(callback: (settings: SchoolSettings) => void): () => void {
+  const emitLocal = () => {
+    try {
+      const raw = localStorage.getItem('prime_edutech_school_settings');
+      if (raw) {
+        callback(normalizeSchoolSettingsData(JSON.parse(raw) as SchoolSettings));
+        return;
+      }
+    } catch {}
+    callback(normalizeSchoolSettingsData(DEFAULT_SCHOOL_SETTINGS));
+  };
+
+  emitLocal();
+
+  let unsubFirestore: (() => void) | null = null;
   try {
-    await setDoc(doc(db, 'settings', 'school'), settings, { merge: true });
-  } catch (error) {
-    console.warn('Firestore settings write warning (saved locally):', error);
-  }
+    unsubFirestore = onSnapshot(
+      doc(db, 'settings', 'school'),
+      { includeMetadataChanges: true },
+      snap => {
+        if (!snap.exists()) return;
+        const remote = normalizeSchoolSettingsData(snap.data() as SchoolSettings);
+        const current =
+          pendingSchoolSettingsSave &&
+          new Date(pendingSchoolSettingsSave.updatedAt || 0).getTime() > new Date(remote.updatedAt || 0).getTime()
+            ? pendingSchoolSettingsSave
+            : remote;
+        try {
+          localStorage.setItem('prime_edutech_school_settings', JSON.stringify(current));
+        } catch {}
+        callback(current);
+      },
+      err => {
+        console.warn('School settings snapshot fallback:', err);
+      }
+    );
+  } catch {}
+
+  const onSync = () => emitLocal();
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('schoolSettingsUpdated', { detail: settings }));
+    window.addEventListener('schoolSettingsUpdated', onSync);
+    window.addEventListener('storage', onSync);
   }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_sync_channel');
+    bc.onmessage = (ev) => {
+      if (ev.data?.type === 'SCHOOL_SETTINGS_UPDATED') onSync();
+    };
+  } catch {}
+
+  return () => {
+    if (unsubFirestore) unsubFirestore();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('schoolSettingsUpdated', onSync);
+      window.removeEventListener('storage', onSync);
+    }
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+  };
 }
 
 // Examination Tombstones & Cross-Tab Broadcast Sync
-const DELETED_EXAMS_KEY = 'prime_cbt_deleted_exam_ids';
-
 export function getDeletedExamIds(): Set<string> {
-  try {
-    const raw = localStorage.getItem(DELETED_EXAMS_KEY);
-    return raw ? new Set(JSON.parse(raw)) : new Set();
-  } catch (e) {
-    return new Set();
-  }
+  return getTombstoneSet(DELETED_EXAMS_KEY);
 }
 
 export function markExamAsDeleted(examId: string) {
-  try {
-    const ids = getDeletedExamIds();
-    ids.add(examId);
-    localStorage.setItem(DELETED_EXAMS_KEY, JSON.stringify(Array.from(ids)));
-  } catch (e) {}
+  addTombstone(DELETED_EXAMS_KEY, examId);
 }
 
 export function markExamsAsDeletedBatch(examIds: string[]) {
-  try {
-    const ids = getDeletedExamIds();
-    examIds.forEach(id => ids.add(id));
-    localStorage.setItem(DELETED_EXAMS_KEY, JSON.stringify(Array.from(ids)));
-  } catch (e) {}
+  addTombstonesBatch(DELETED_EXAMS_KEY, examIds);
 }
 
 export function unmarkExamAsDeleted(examId: string) {
-  try {
-    const ids = getDeletedExamIds();
-    ids.delete(examId);
-    localStorage.setItem(DELETED_EXAMS_KEY, JSON.stringify(Array.from(ids)));
-  } catch (e) {}
+  removeTombstone(DELETED_EXAMS_KEY, examId);
 }
 
 export function broadcastExamSync(type = 'EXAMS_UPDATED', payload: any = {}) {
@@ -1224,120 +1861,268 @@ export function broadcastExamSync(type = 'EXAMS_UPDATED', payload: any = {}) {
   }
 }
 
-// Examination Service methods
-export async function fetchExaminations(filterPublishedOnly = false): Promise<Examination[]> {
-  const path = 'examinations';
-  const deletedIds = getDeletedExamIds();
+const pickNewerExam = (a: Examination | undefined, b: Examination): Examination => {
+  if (!a) return b;
+  const tA = new Date(a.updatedAt || a.createdAt || 0).getTime() || 0;
+  const tB = new Date(b.updatedAt || b.createdAt || 0).getTime() || 0;
+  return tB >= tA ? b : a;
+};
 
-  // Read local cache first for instant speed
-  let cached: Examination[] = [];
+const readLocalExaminations = (): Examination[] => {
   try {
     const raw = localStorage.getItem('prime_cbt_saved_examinations');
     if (raw) {
-      cached = JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
     }
-  } catch (e) {
-    // ignore
-  }
+  } catch {}
+  return [];
+};
 
-  // Filter out any tombstoned/deleted exams
-  cached = cached.filter(e => !deletedIds.has(e.id));
+const writeLocalExaminations = (exams: Examination[]) => {
+  try {
+    localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(exams));
+  } catch {}
+};
+
+// Examination Service methods (Authoritative Cloud Sync)
+export async function fetchExaminations(
+  filterPublishedOnly = false,
+  forceServer = true
+): Promise<Examination[]> {
+  const path = 'examinations';
+  await fetchCloudSyncState(forceServer).catch(() => null);
+  const deletedIds = getDeletedExamIds();
 
   try {
-    let q;
-    if (filterPublishedOnly) {
-      q = query(collection(db, path), where('status', '==', 'published'));
-    } else {
-      q = collection(db, path);
-    }
-    const snapshot = await getDocs(q);
-    if (!snapshot.empty) {
-      const firestoreExams: Examination[] = [];
-      snapshot.forEach(docSnap => {
-        if (!deletedIds.has(docSnap.id)) {
-          firestoreExams.push({ id: docSnap.id, ...docSnap.data() } as Examination);
+    const snapshot = await fetchCollectionAuthoritative(path, forceServer);
+    const isAuthoritative = !snapshot.metadata.fromCache;
+    const latestDeleted = getDeletedExamIds();
+    const mergedMap: Record<string, Examination> = {};
+
+    if (!isAuthoritative) {
+      readLocalExaminations().forEach(e => {
+        if (!latestDeleted.has(e.id) && !pendingExamDeletes.has(e.id)) {
+          mergedMap[e.id] = pickNewerExam(mergedMap[e.id], e);
         }
       });
-
-      // Build authoritative map
-      const mergedMap: Record<string, Examination> = {};
-      DEFAULT_EXAMINATIONS.forEach(e => {
-        if (!deletedIds.has(e.id)) mergedMap[e.id] = e;
-      });
-      cached.forEach(e => {
-        if (!deletedIds.has(e.id)) mergedMap[e.id] = e;
-      });
-      firestoreExams.forEach(e => {
-        if (!deletedIds.has(e.id)) mergedMap[e.id] = e;
-      });
-
-      const finalExams = Object.values(mergedMap)
-        .filter(e => !deletedIds.has(e.id))
-        .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-
-      localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(finalExams));
-      return filterPublishedOnly ? finalExams.filter(e => e.status === 'published') : finalExams;
     }
+
+    snapshot.forEach(docSnap => {
+      if (!latestDeleted.has(docSnap.id) && !pendingExamDeletes.has(docSnap.id)) {
+        const remoteExam = { id: docSnap.id, ...docSnap.data() } as Examination;
+        mergedMap[docSnap.id] = pickNewerExam(mergedMap[docSnap.id], remoteExam);
+      }
+    });
+
+    pendingExamSaves.forEach((pExam, id) => {
+      if (!latestDeleted.has(id) && !pendingExamDeletes.has(id)) {
+        mergedMap[id] = pickNewerExam(mergedMap[id], pExam);
+      }
+    });
+
+    const finalExams = Object.values(mergedMap)
+      .filter(e => !latestDeleted.has(e.id) && !pendingExamDeletes.has(e.id))
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+    writeLocalExaminations(finalExams);
+    return filterPublishedOnly
+      ? finalExams.filter(e => (e.status || '').trim().toLowerCase() === 'published')
+      : finalExams;
   } catch (error) {
     console.warn('Network fallback for examinations:', error);
   }
 
-  // Fallback to cache + non-deleted defaults
-  const mergedMap: Record<string, Examination> = {};
-  DEFAULT_EXAMINATIONS.forEach(e => {
-    if (!deletedIds.has(e.id)) mergedMap[e.id] = e;
+  const cachedMap: Record<string, Examination> = {};
+  readLocalExaminations().forEach(e => {
+    if (!deletedIds.has(e.id) && !pendingExamDeletes.has(e.id)) {
+      cachedMap[e.id] = pickNewerExam(cachedMap[e.id], e);
+    }
   });
-  cached.forEach(e => {
-    if (!deletedIds.has(e.id)) mergedMap[e.id] = e;
+  pendingExamSaves.forEach((pExam, id) => {
+    if (!deletedIds.has(id) && !pendingExamDeletes.has(id)) {
+      cachedMap[id] = pickNewerExam(cachedMap[id], pExam);
+    }
   });
-  const finalExams = Object.values(mergedMap)
-    .filter(e => !deletedIds.has(e.id))
+  const finalExams = Object.values(cachedMap)
     .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
 
-  return filterPublishedOnly ? finalExams.filter(e => e.status === 'published') : finalExams;
+  return filterPublishedOnly
+    ? finalExams.filter(e => (e.status || '').trim().toLowerCase() === 'published')
+    : finalExams;
+}
+
+export function subscribeExaminations(
+  filterPublishedOnly: boolean,
+  callback: (exams: Examination[]) => void
+): () => void {
+  let firestoreExams: Examination[] = [];
+  let hasAnyRemote = false;
+  let hasServerSnapshot = false;
+
+  const emitMerged = () => {
+    const deletedIds = getDeletedExamIds();
+    const mergedMap: Record<string, Examination> = {};
+
+    // Before first authoritative server response arrives (or while offline), render local cache
+    if (!hasServerSnapshot) {
+      readLocalExaminations().forEach(e => {
+        if (!deletedIds.has(e.id) && !pendingExamDeletes.has(e.id)) {
+          mergedMap[e.id] = pickNewerExam(mergedMap[e.id], e);
+        }
+      });
+    }
+
+    if (hasAnyRemote) {
+      firestoreExams.forEach(e => {
+        if (!deletedIds.has(e.id) && !pendingExamDeletes.has(e.id)) {
+          mergedMap[e.id] = pickNewerExam(mergedMap[e.id], e);
+        }
+      });
+    }
+
+    // Always preserve active in-flight writes in this tab until settled on server
+    pendingExamSaves.forEach((pExam, id) => {
+      if (!deletedIds.has(id) && !pendingExamDeletes.has(id)) {
+        mergedMap[id] = pickNewerExam(mergedMap[id], pExam);
+      }
+    });
+
+    const sorted = Object.values(mergedMap)
+      .filter(e => !deletedIds.has(e.id) && !pendingExamDeletes.has(e.id))
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+    writeLocalExaminations(sorted);
+    callback(
+      filterPublishedOnly
+        ? sorted.filter(e => (e.status || '').trim().toLowerCase() === 'published')
+        : sorted
+    );
+  };
+
+  // Immediate local emit while waiting for live server snapshot
+  emitMerged();
+
+  const releaseSyncState = retainSyncStateListener();
+
+  let syncedStateOnCache = false;
+  let unsubFirestore: (() => void) | null = null;
+  try {
+    unsubFirestore = onSnapshot(
+      collection(db, 'examinations'),
+      { includeMetadataChanges: true },
+      snapshot => {
+        hasAnyRemote = true;
+        if (!snapshot.metadata.fromCache) {
+          hasServerSnapshot = true;
+        } else if (!syncedStateOnCache && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+          syncedStateOnCache = true;
+          fetchCloudSyncState(true).then(() => emitMerged()).catch(() => {});
+        }
+        const deletedIds = getDeletedExamIds();
+        const list: Examination[] = [];
+        snapshot.forEach(docSnap => {
+          if (!deletedIds.has(docSnap.id) && !pendingExamDeletes.has(docSnap.id)) {
+            list.push({ id: docSnap.id, ...docSnap.data() } as Examination);
+          }
+        });
+        firestoreExams = list;
+        emitMerged();
+      },
+      err => {
+        console.warn('Examinations real-time listener fallback:', err);
+      }
+    );
+  } catch (err) {
+    console.warn('Unable to attach examinations snapshot:', err);
+  }
+
+  const onSync = () => emitMerged();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('prime_cbt_exams_updated', onSync);
+    window.addEventListener('storage', onSync);
+  }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_sync_channel');
+    bc.onmessage = (ev) => {
+      if (
+        ev.data?.type === 'EXAM_SAVED' ||
+        ev.data?.type === 'EXAM_DELETED' ||
+        ev.data?.type === 'EXAMS_BATCH_DELETED' ||
+        ev.data?.type === 'EXAMS_UPDATED' ||
+        ev.data?.type === 'TIMER_RESTARTED'
+      ) {
+        onSync();
+      }
+    };
+  } catch {}
+
+  return () => {
+    releaseSyncState();
+    if (unsubFirestore) unsubFirestore();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('prime_cbt_exams_updated', onSync);
+      window.removeEventListener('storage', onSync);
+    }
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+  };
 }
 
 export async function getExaminationById(examId: string): Promise<Examination | null> {
   const deletedIds = getDeletedExamIds();
-  if (deletedIds.has(examId)) return null;
+  if (deletedIds.has(examId) || pendingExamDeletes.has(examId)) return null;
 
-  const path = `examinations/${examId}`;
-  try {
-    const raw = localStorage.getItem('prime_cbt_saved_examinations');
-    if (raw) {
-      const list: Examination[] = JSON.parse(raw);
-      const match = list.find(e => e.id === examId);
-      if (match && !deletedIds.has(match.id)) return match;
-    }
-  } catch (e) {
-    // ignore
-  }
+  const pending = pendingExamSaves.get(examId);
+  if (pending) return pending;
 
   try {
-    const snap = await getDoc(doc(db, 'examinations', examId));
-    if (snap.exists() && !deletedIds.has(snap.id)) {
+    const ref = doc(db, 'examinations', examId);
+    const snap = (typeof navigator === 'undefined' || navigator.onLine !== false)
+      ? await getDocFromServer(ref).catch(() => getDoc(ref))
+      : await getDoc(ref);
+    if (snap.exists() && !getDeletedExamIds().has(snap.id)) {
       return { id: snap.id, ...snap.data() } as Examination;
     }
-  } catch (error) {
-    // ignore
-  }
+    if (!snap.metadata.fromCache) {
+      return null;
+    }
+  } catch {}
 
-  const def = DEFAULT_EXAMINATIONS.find(e => e.id === examId);
-  return def && !deletedIds.has(def.id) ? def : null;
+  try {
+    const list = readLocalExaminations();
+    const match = list.find(e => e.id === examId);
+    if (match && !deletedIds.has(match.id)) return match;
+  } catch {}
+
+  return null;
 }
 
 export async function saveExamination(exam: Examination): Promise<void> {
   // Clear any tombstone for this exam ID
+  pendingExamDeletes.delete(exam.id);
   unmarkExamAsDeleted(exam.id);
-  const cleanExam = sanitizeFirestoreData(exam);
+  markSchoolBootstrappedLocal();
 
-  // 1. Immediately mirror to localStorage so UI never blocks or fails
+  // Explicitly preserve empty string for cleared dates so merge:true overwrites stale dates in Firestore
+  const normalizedExam: Examination = {
+    ...exam,
+    startDate: (exam.startDate || '').trim(),
+    endDate: (exam.endDate || '').trim(),
+    updatedAt: new Date().toISOString()
+  };
+  const cleanExam = sanitizeFirestoreData(normalizedExam);
+  pendingExamSaves.set(cleanExam.id, cleanExam);
+
+  // 1. Immediately mirror to localStorage without resurrecting default exams
   try {
-    const raw = localStorage.getItem('prime_cbt_saved_examinations');
-    const list: Examination[] = raw ? JSON.parse(raw) : [...DEFAULT_EXAMINATIONS];
+    const list = readLocalExaminations();
     const filtered = list.filter(e => e.id !== cleanExam.id);
     const updated = [cleanExam, ...filtered];
-    localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(updated));
+    writeLocalExaminations(updated);
   } catch (err) {
     console.warn('LocalStorage exam cache error:', err);
   }
@@ -1345,18 +2130,35 @@ export async function saveExamination(exam: Examination): Promise<void> {
   // 2. Broadcast immediately to student portals and all browser tabs
   broadcastExamSync('EXAM_SAVED', { examId: cleanExam.id, status: cleanExam.status });
 
-  // 3. Sync to Firestore cleanly
+  // 3. Sync directly to Firestore and remove any cloud deletion tombstone
   const path = `examinations/${cleanExam.id}`;
+  const writePromise = Promise.all([
+    setDoc(doc(db, 'examinations', cleanExam.id), cleanExam, { merge: true }),
+    clearCloudDeletion('deletedExamIds', cleanExam.id)
+  ]).then(() => {
+    const curr = pendingExamSaves.get(cleanExam.id);
+    if (curr && curr.updatedAt === cleanExam.updatedAt) {
+      pendingExamSaves.delete(cleanExam.id);
+    }
+  });
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, path);
+}
+
+async function deleteExamQuestionsSubcollection(examId: string): Promise<void> {
   try {
-    await setDoc(doc(db, 'examinations', cleanExam.id), cleanExam, { merge: true });
-  } catch (error) {
-    console.warn('Firestore examination write fallback:', error);
-  }
+    const qSnap = await getDocs(collection(db, 'examinations', examId, 'questions'));
+    if (!qSnap.empty) {
+      await Promise.all(qSnap.docs.map(d => deleteDoc(d.ref).catch(() => {})));
+    }
+  } catch {}
 }
 
 export async function deleteExamination(examId: string): Promise<void> {
-  // Permanently mark tombstone
+  pendingExamSaves.delete(examId);
+  pendingExamDeletes.add(examId);
   markExamAsDeleted(examId);
+  markSchoolBootstrappedLocal();
 
   // Update localStorage immediately
   try {
@@ -1365,25 +2167,33 @@ export async function deleteExamination(examId: string): Promise<void> {
       const list: Examination[] = JSON.parse(raw);
       localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(list.filter(e => e.id !== examId)));
     }
-  } catch (e) {
-    // ignore
-  }
+    localStorage.removeItem(`prime_cbt_questions_${examId}`);
+  } catch (e) {}
 
   // Broadcast deletion to student portals and tabs immediately
   broadcastExamSync('EXAM_DELETED', { examId });
 
   const path = `examinations/${examId}`;
-  try {
-    await deleteDoc(doc(db, 'examinations', examId));
-  } catch (error) {
-    console.warn('Firestore examination delete error:', error);
-  }
+  const delPromise = Promise.all([
+    deleteDoc(doc(db, 'examinations', examId)),
+    deleteExamQuestionsSubcollection(examId),
+    recordCloudDeletion('deletedExamIds', [examId])
+  ]).finally(() => {
+    pendingExamDeletes.delete(examId);
+  });
+
+  await commitFirestoreFast(delPromise, OperationType.DELETE, path, 12000);
 }
 
 // Mass Delete Examinations
 export async function deleteExaminationsBatch(examIds: string[]): Promise<void> {
   if (!examIds || examIds.length === 0) return;
+  examIds.forEach(id => {
+    pendingExamSaves.delete(id);
+    pendingExamDeletes.add(id);
+  });
   markExamsAsDeletedBatch(examIds);
+  markSchoolBootstrappedLocal();
 
   const idSet = new Set(examIds);
   try {
@@ -1392,29 +2202,31 @@ export async function deleteExaminationsBatch(examIds: string[]): Promise<void> 
       const list: Examination[] = JSON.parse(raw);
       localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(list.filter(e => !idSet.has(e.id))));
     }
-  } catch (e) {
-    // ignore
-  }
+    examIds.forEach(id => localStorage.removeItem(`prime_cbt_questions_${id}`));
+  } catch (e) {}
 
   // Broadcast mass deletion immediately
   broadcastExamSync('EXAMS_BATCH_DELETED', { examIds });
 
-  await Promise.all(
-    examIds.map(async (id) => {
-      try {
-        await deleteDoc(doc(db, 'examinations', id));
-      } catch (e) {
-        console.warn('Batch delete error for exam:', id, e);
-      }
-    })
-  );
+  const delPromise = Promise.all([
+    ...examIds.map(async (id) => {
+      await deleteDoc(doc(db, 'examinations', id));
+      await deleteExamQuestionsSubcollection(id);
+    }),
+    recordCloudDeletion('deletedExamIds', examIds)
+  ]).finally(() => {
+    examIds.forEach(id => pendingExamDeletes.delete(id));
+  });
+
+  await commitFirestoreFast(delPromise, OperationType.DELETE, 'examinations/batch', 12000);
 }
 
-// Restart Student Exam Timer & Reset Attempt
+// Restart Student Exam Timer & Unlock Retake (Preserves all prior exam submissions as 1st Exam, 2nd Exam, etc.)
 export async function restartStudentExamTimer(studentId: string, examId: string): Promise<void> {
   const attemptId = `attempt_${studentId}_${examId}`;
+  const now = new Date().toISOString();
 
-  // 1. Clear local attempt & timer cache
+  // 1. Clear local active timer/answers cache (keep past submissions intact!)
   try {
     localStorage.removeItem(`prime_cbt_attempt_${attemptId}`);
     localStorage.removeItem(`cbt_timer_${attemptId}`);
@@ -1423,122 +2235,179 @@ export async function restartStudentExamTimer(studentId: string, examId: string)
     sessionStorage.removeItem(`prime_cbt_attempt_${attemptId}`);
   } catch (e) {}
 
-  // 2. Remove submission from local cache
-  try {
-    const rawSubs = localStorage.getItem('prime_cbt_submissions');
-    if (rawSubs) {
-      const list: Submission[] = JSON.parse(rawSubs);
-      const filtered = list.filter(s => !(s.studentId === studentId && s.examId === examId));
-      localStorage.setItem('prime_cbt_submissions', JSON.stringify(filtered));
-    }
-  } catch (e) {}
+  const retakeAttempt: ExamAttempt = {
+    id: attemptId,
+    examId,
+    studentId,
+    studentAdmissionNumber: '',
+    studentName: '',
+    startTime: now,
+    endTime: now,
+    status: 'retake_granted',
+    savedAnswers: {},
+    flaggedQuestions: {},
+    lastHeartbeatAt: now,
+    retakeGrantedAt: now
+  };
 
-  // 3. Broadcast immediately so student screen/portal resets timer right now
+  try {
+    localStorage.setItem(`prime_cbt_attempt_${attemptId}`, JSON.stringify(retakeAttempt));
+  } catch {}
+
+  // 2. Broadcast immediately so student dashboard/screen enables retake right now
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('prime_cbt_timer_restarted', { detail: { studentId, examId } }));
-    window.dispatchEvent(new CustomEvent('prime_cbt_exams_updated'));
+    window.dispatchEvent(new CustomEvent('prime_cbt_timer_restarted', { detail: { studentId, examId, retakeGrantedAt: now } }));
+    window.dispatchEvent(new CustomEvent('prime_cbt_exams_updated', { detail: { type: 'TIMER_RESTARTED', studentId, examId } }));
     window.dispatchEvent(new Event('storage'));
     try {
       const bc = new BroadcastChannel('prime_cbt_sync_channel');
-      bc.postMessage({ type: 'TIMER_RESTARTED', studentId, examId, timestamp: Date.now() });
+      bc.postMessage({ type: 'TIMER_RESTARTED', studentId, examId, retakeGrantedAt: now, timestamp: Date.now() });
       bc.close();
     } catch (e) {}
   }
 
-  // 4. Delete attempt from Firestore 'attempts' collection
-  try {
-    await deleteDoc(doc(db, 'attempts', attemptId));
-  } catch (err) {
-    console.warn('Error deleting attempt from Firestore:', err);
-  }
-
-  // 5. Delete any submissions in Firestore
-  try {
-    const q = query(
-      collection(db, 'submissions'),
-      where('studentId', '==', studentId),
-      where('examId', '==', examId)
-    );
-    const snap = await getDocs(q);
-    const delPromises: Promise<any>[] = [];
-    snap.forEach(d => delPromises.push(deleteDoc(d.ref)));
-    await Promise.all(delPromises);
-  } catch (err) {
-    console.warn('Error deleting submission from Firestore on timer restart:', err);
-  }
+  // 3. Persist retake unlock on attempts/{attemptId} in Firestore (prior submissions stay preserved)
+  await commitFirestoreFast(
+    setDoc(doc(db, 'attempts', attemptId), sanitizeFirestoreData(retakeAttempt), { merge: true }),
+    OperationType.WRITE,
+    `attempts/${attemptId}`
+  );
 }
 
-// Question Service methods
-export async function fetchQuestions(examId: string): Promise<Question[]> {
-  const path = `examinations/${examId}/questions`;
-  // Read local cache first
+export async function markExamAttemptSubmitted(attemptId: string): Promise<void> {
+  const now = new Date().toISOString();
   try {
-    const raw = localStorage.getItem(`prime_cbt_questions_${examId}`);
-    if (raw) {
-      const parsed: Question[] = JSON.parse(raw);
-      if (parsed.length > 0) return parsed.sort((a, b) => a.questionNumber - b.questionNumber);
+    localStorage.removeItem(`prime_cbt_attempt_${attemptId}`);
+  } catch {}
+  await commitFirestoreFast(
+    setDoc(
+      doc(db, 'attempts', attemptId),
+      { status: 'submitted', lastHeartbeatAt: now },
+      { merge: true }
+    ),
+    OperationType.WRITE,
+    `attempts/${attemptId}`
+  );
+}
+
+export async function fetchStudentAttempts(studentId: string): Promise<ExamAttempt[]> {
+  const map = new Map<string, ExamAttempt>();
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(`prime_cbt_attempt_attempt_${studentId}_`)) {
+        const raw = localStorage.getItem(k);
+        if (raw) {
+          const parsed = JSON.parse(raw) as ExamAttempt;
+          if (parsed && parsed.id) map.set(parsed.id, parsed);
+        }
+      }
     }
-  } catch (e) {
-    // ignore
-  }
+  } catch {}
 
   try {
-    const snapshot = await getDocs(collection(db, 'examinations', examId, 'questions'));
-    if (!snapshot.empty) {
+    const q = query(collection(db, 'attempts'), where('studentId', '==', studentId));
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const snap = isOnline ? await getDocsFromServer(q).catch(() => getDocs(q)) : await getDocs(q);
+    snap.forEach(d => {
+      const data = { id: d.id, ...d.data() } as ExamAttempt;
+      map.set(d.id, data);
+    });
+  } catch {}
+
+  return Array.from(map.values());
+}
+
+// Question Service methods (Server-First Sync across Systems)
+export async function fetchQuestions(examId: string): Promise<Question[]> {
+  if (getDeletedExamIds().has(examId) || pendingExamDeletes.has(examId)) {
+    return [];
+  }
+
+  const colRef = collection(db, 'examinations', examId, 'questions');
+  const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+
+  try {
+    const snapshot = isOnline
+      ? await getDocsFromServer(colRef).catch(() => getDocs(colRef))
+      : await getDocs(colRef);
+
+    if (!snapshot.metadata.fromCache) {
       const questions: Question[] = [];
       snapshot.forEach(docSnap => {
         questions.push({ id: docSnap.id, ...docSnap.data() } as Question);
       });
       const sorted = questions.sort((a, b) => a.questionNumber - b.questionNumber);
-      localStorage.setItem(`prime_cbt_questions_${examId}`, JSON.stringify(sorted));
+      try {
+        localStorage.setItem(`prime_cbt_questions_${examId}`, JSON.stringify(sorted));
+      } catch {}
       return sorted;
     }
   } catch (error) {
-    console.warn('Fallback to default questions for exam:', examId);
+    console.warn('Firestore questions fetch fallback to local cache:', examId, error);
   }
 
-  const defaults = DEFAULT_QUESTIONS_MAP[examId] || [];
-  return defaults;
+  try {
+    const raw = localStorage.getItem(`prime_cbt_questions_${examId}`);
+    if (raw) {
+      const parsed: Question[] = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.sort((a, b) => a.questionNumber - b.questionNumber);
+    }
+  } catch {}
+
+  if (!isSchoolBootstrapped()) {
+    return DEFAULT_QUESTIONS_MAP[examId] || [];
+  }
+  return [];
 }
 
 export async function saveQuestion(examId: string, question: Question): Promise<void> {
+  const cleanQuestion = sanitizeFirestoreData(question);
+  let totalCount = 1;
+
   // Update local cache
   try {
     const raw = localStorage.getItem(`prime_cbt_questions_${examId}`);
-    const list: Question[] = raw ? JSON.parse(raw) : (DEFAULT_QUESTIONS_MAP[examId] || []);
-    const filtered = list.filter(q => q.id !== question.id);
-    const updated = [...filtered, question].sort((a, b) => a.questionNumber - b.questionNumber);
+    const list: Question[] = raw ? JSON.parse(raw) : [];
+    const filtered = list.filter(q => q.id !== cleanQuestion.id);
+    const updated = [...filtered, cleanQuestion].sort((a, b) => a.questionNumber - b.questionNumber);
+    totalCount = updated.length;
     localStorage.setItem(`prime_cbt_questions_${examId}`, JSON.stringify(updated));
-  } catch (e) {
-    // ignore
-  }
+  } catch {}
 
-  const path = `examinations/${examId}/questions/${question.id}`;
-  try {
-    await setDoc(doc(db, 'examinations', examId, 'questions', question.id), question, { merge: true });
-  } catch (error) {
-    console.warn('Firestore question write fallback:', error);
-  }
+  const path = `examinations/${examId}/questions/${cleanQuestion.id}`;
+  const writePromise = Promise.all([
+    setDoc(doc(db, 'examinations', examId, 'questions', cleanQuestion.id), cleanQuestion, { merge: true }),
+    setDoc(
+      doc(db, 'examinations', examId),
+      { totalQuestions: totalCount, updatedAt: new Date().toISOString() },
+      { merge: true }
+    ).catch(() => {})
+  ]);
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, path);
+  broadcastExamSync('EXAM_SAVED', { examId });
 }
 
-// Batch save questions with explicit Replace vs Append control
+// Batch save questions with explicit Replace vs Append control (also deletes replaced questions in Firestore)
 export async function saveQuestionsBatch(examId: string, newQuestions: Question[], replaceExisting = true): Promise<void> {
+  const cleanNew = newQuestions.map(q => sanitizeFirestoreData(q));
   let finalList: Question[] = [];
+
   try {
     if (replaceExisting) {
-      finalList = [...newQuestions];
+      finalList = [...cleanNew];
     } else {
       const raw = localStorage.getItem(`prime_cbt_questions_${examId}`);
-      const list: Question[] = raw ? JSON.parse(raw) : (DEFAULT_QUESTIONS_MAP[examId] || []);
-      finalList = [...list, ...newQuestions];
+      const list: Question[] = raw ? JSON.parse(raw) : [];
+      const newIds = new Set(cleanNew.map(q => q.id));
+      finalList = [...list.filter(q => !newIds.has(q.id)), ...cleanNew];
     }
     finalList.sort((a, b) => a.questionNumber - b.questionNumber);
     localStorage.setItem(`prime_cbt_questions_${examId}`, JSON.stringify(finalList));
-  } catch (e) {
-    // ignore
-  }
+  } catch {}
 
-  // Update exam's totalQuestions in examination record
+  // Update exam's totalQuestions in local cache
   try {
     const rawExams = localStorage.getItem('prime_cbt_saved_examinations');
     if (rawExams) {
@@ -1546,42 +2415,100 @@ export async function saveQuestionsBatch(examId: string, newQuestions: Question[
       const target = exams.find(e => e.id === examId);
       if (target) {
         target.totalQuestions = finalList.length;
+        target.updatedAt = new Date().toISOString();
         localStorage.setItem('prime_cbt_saved_examinations', JSON.stringify(exams));
       }
     }
-  } catch (e) {
-    // ignore
-  }
+  } catch {}
 
-  // Parallel write to Firestore
-  await Promise.all(
-    newQuestions.map(async (q) => {
+  const syncBatch = async () => {
+    if (replaceExisting) {
       try {
-        await setDoc(doc(db, 'examinations', examId, 'questions', q.id), q, { merge: true });
-      } catch (err) {
-        console.warn('Firestore batch question write error:', err);
-      }
-    })
-  );
+        const existingSnap = await getDocs(collection(db, 'examinations', examId, 'questions'));
+        const keepIds = new Set(cleanNew.map(q => q.id));
+        const deletes: Promise<unknown>[] = [];
+        existingSnap.forEach(d => {
+          if (!keepIds.has(d.id)) {
+            deletes.push(deleteDoc(d.ref).catch(() => {}));
+          }
+        });
+        await Promise.all(deletes);
+      } catch {}
+    }
+
+    await Promise.all(
+      cleanNew.map(q =>
+        setDoc(doc(db, 'examinations', examId, 'questions', q.id), q, { merge: true }).catch(err => {
+          console.warn('Firestore batch question write error:', err);
+        })
+      )
+    );
+
+    await setDoc(
+      doc(db, 'examinations', examId),
+      { totalQuestions: finalList.length, updatedAt: new Date().toISOString() },
+      { merge: true }
+    ).catch(() => {});
+  };
+
+  await commitFirestoreFast(syncBatch(), OperationType.WRITE, `examinations/${examId}/questions`);
+  broadcastExamSync('EXAM_SAVED', { examId });
 }
 
 export async function deleteQuestion(examId: string, questionId: string): Promise<void> {
+  let remainingCount: number | null = null;
   try {
     const raw = localStorage.getItem(`prime_cbt_questions_${examId}`);
     if (raw) {
       const list: Question[] = JSON.parse(raw);
-      localStorage.setItem(`prime_cbt_questions_${examId}`, JSON.stringify(list.filter(q => q.id !== questionId)));
+      const updated = list.filter(q => q.id !== questionId);
+      remainingCount = updated.length;
+      localStorage.setItem(`prime_cbt_questions_${examId}`, JSON.stringify(updated));
     }
-  } catch (e) {
-    // ignore
-  }
+  } catch {}
 
   const path = `examinations/${examId}/questions/${questionId}`;
-  try {
+  const runDelete = async () => {
     await deleteDoc(doc(db, 'examinations', examId, 'questions', questionId));
-  } catch (error) {
-    console.warn('Firestore question delete error:', error);
-  }
+    if (remainingCount === null) {
+      try {
+        const colRef = collection(db, 'examinations', examId, 'questions');
+        const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+        const snap = isOnline
+          ? await getDocsFromServer(colRef).catch(() => getDocs(colRef))
+          : await getDocs(colRef);
+        const remaining: Question[] = [];
+        snap.forEach(d => {
+          if (d.id !== questionId) remaining.push({ id: d.id, ...d.data() } as Question);
+        });
+        remainingCount = remaining.length;
+        try {
+          localStorage.setItem(
+            `prime_cbt_questions_${examId}`,
+            JSON.stringify(remaining.sort((a, b) => a.questionNumber - b.questionNumber))
+          );
+        } catch {}
+      } catch {}
+    }
+
+    if (remainingCount !== null) {
+      const now = new Date().toISOString();
+      try {
+        const exams = readLocalExaminations().map(e =>
+          e.id === examId ? { ...e, totalQuestions: remainingCount!, updatedAt: now } : e
+        );
+        writeLocalExaminations(exams);
+      } catch {}
+      await setDoc(
+        doc(db, 'examinations', examId),
+        { totalQuestions: remainingCount, updatedAt: now },
+        { merge: true }
+      ).catch(() => {});
+    }
+  };
+
+  await commitFirestoreFast(runDelete(), OperationType.DELETE, path);
+  broadcastExamSync('EXAM_SAVED', { examId });
 }
 
 // -------------------------------------------------------------
@@ -1859,187 +2786,408 @@ export async function fetchAllChatMessagesForAdmin(): Promise<ChatMessage[]> {
 // -------------------------------------------------------------
 // Teacher Lesson Notes & Scheme of Work Studio Services
 // -------------------------------------------------------------
+const pickNewerLessonNote = (a: LessonNote | undefined, b: LessonNote): LessonNote => {
+  if (!a) return b;
+  const tA = new Date(a.updatedAt || a.createdAt || 0).getTime() || 0;
+  const tB = new Date(b.updatedAt || b.createdAt || 0).getTime() || 0;
+  return tB >= tA ? { ...a, ...b } : { ...b, ...a };
+};
+
 export async function fetchLessonNotes(teacherId?: string): Promise<LessonNote[]> {
-  let list: LessonNote[] = [];
+  await fetchCloudSyncState(true).catch(() => null);
+  const deleted = getTombstoneSet(DELETED_LESSON_NOTES_KEY);
+  let cachedList: LessonNote[] = [];
   try {
     const raw = localStorage.getItem('prime_cbt_saved_lesson_notes');
-    if (raw) list = JSON.parse(raw);
-  } catch (e) {
-    // ignore
-  }
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        cachedList = parsed.filter((n: LessonNote) => n && !deleted.has(n.id) && !pendingLessonNoteDeletes.has(n.id));
+      }
+    }
+  } catch {}
 
   try {
-    let q;
-    if (teacherId) {
-      q = query(collection(db, 'lesson_notes'), where('teacherId', '==', teacherId));
-    } else {
-      q = collection(db, 'lesson_notes');
-    }
-    const snapshot = await getDocs(q);
-    if (!snapshot.empty) {
-      const notes: LessonNote[] = [];
-      snapshot.forEach(docSnap => {
-        notes.push({ id: docSnap.id, ...docSnap.data() } as LessonNote);
+    const q = teacherId
+      ? query(collection(db, 'lesson_notes'), where('teacherId', '==', teacherId))
+      : collection(db, 'lesson_notes');
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const snapshot = isOnline
+      ? await getDocsFromServer(q).catch(() => getDocs(q))
+      : await getDocs(q);
+    const isAuthoritative = !snapshot.metadata.fromCache;
+
+    const mergedMap: Record<string, LessonNote> = {};
+    if (!isAuthoritative) {
+      cachedList.forEach(n => {
+        if (!teacherId || n.teacherId === teacherId) mergedMap[n.id] = n;
       });
-      const mergedMap: Record<string, LessonNote> = {};
-      list.forEach(n => { mergedMap[n.id] = n; });
-      notes.forEach(n => { mergedMap[n.id] = n; });
-      const finalNotes = Object.values(mergedMap).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      localStorage.setItem('prime_cbt_saved_lesson_notes', JSON.stringify(finalNotes));
-      return teacherId ? finalNotes.filter(n => n.teacherId === teacherId) : finalNotes;
+    } else if (teacherId) {
+      cachedList.forEach(n => {
+        if (n.teacherId !== teacherId) mergedMap[n.id] = n;
+      });
     }
+
+    snapshot.forEach(docSnap => {
+      if (deleted.has(docSnap.id) || pendingLessonNoteDeletes.has(docSnap.id)) return;
+      const note = { id: docSnap.id, ...docSnap.data() } as LessonNote;
+      mergedMap[note.id] = pickNewerLessonNote(mergedMap[note.id], note);
+    });
+
+    pendingLessonNoteSaves.forEach((pn, id) => {
+      if (!deleted.has(id) && !pendingLessonNoteDeletes.has(id)) {
+        mergedMap[id] = pickNewerLessonNote(mergedMap[id], pn);
+      }
+    });
+
+    const allNotes = Object.values(mergedMap).sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+    try {
+      localStorage.setItem('prime_cbt_saved_lesson_notes', JSON.stringify(allNotes));
+    } catch {}
+    return teacherId ? allNotes.filter(n => n.teacherId === teacherId) : allNotes;
   } catch (e) {
     console.warn('Lesson notes fetch fallback:', e);
   }
 
-  return teacherId ? list.filter(n => n.teacherId === teacherId) : list;
+  const fallback = teacherId ? cachedList.filter(n => n.teacherId === teacherId) : cachedList;
+  return fallback.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
 }
 
 export async function saveLessonNote(note: LessonNote): Promise<void> {
+  pendingLessonNoteDeletes.delete(note.id);
+  removeTombstone(DELETED_LESSON_NOTES_KEY, note.id);
+
+  const cleanNote = sanitizeFirestoreData<LessonNote>({
+    ...note,
+    updatedAt: new Date().toISOString()
+  });
+  pendingLessonNoteSaves.set(cleanNote.id, cleanNote);
+
   try {
     const raw = localStorage.getItem('prime_cbt_saved_lesson_notes');
     const list: LessonNote[] = raw ? JSON.parse(raw) : [];
-    const filtered = list.filter(n => n.id !== note.id);
-    const updated = [note, ...filtered];
-    localStorage.setItem('prime_cbt_saved_lesson_notes', JSON.stringify(updated));
-  } catch (e) {
-    // ignore
-  }
+    const filtered = list.filter(n => n.id !== cleanNote.id);
+    localStorage.setItem('prime_cbt_saved_lesson_notes', JSON.stringify([cleanNote, ...filtered]));
+  } catch {}
 
-  try {
-    await setDoc(doc(db, 'lesson_notes', note.id), note, { merge: true });
-  } catch (e) {
-    console.warn('Firestore lesson note write fallback:', e);
-  }
+  broadcastEntitySync('lessonNotesUpdated', 'LESSON_NOTES_UPDATED', { noteId: cleanNote.id });
+
+  const writePromise = Promise.all([
+    setDoc(doc(db, 'lesson_notes', cleanNote.id), cleanNote, { merge: true }),
+    clearCloudDeletion('deletedLessonNoteIds', cleanNote.id)
+  ]).then(() => {
+    const curr = pendingLessonNoteSaves.get(cleanNote.id);
+    if (curr && curr.updatedAt === cleanNote.updatedAt) {
+      pendingLessonNoteSaves.delete(cleanNote.id);
+    }
+  });
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, `lesson_notes/${cleanNote.id}`);
 }
 
 export async function deleteLessonNote(noteId: string): Promise<void> {
-  try {
-    const raw = localStorage.getItem('prime_cbt_saved_lesson_notes');
-    if (raw) {
-      const list: LessonNote[] = JSON.parse(raw);
-      localStorage.setItem('prime_cbt_saved_lesson_notes', JSON.stringify(list.filter(n => n.id !== noteId)));
-    }
-  } catch (e) {
-    // ignore
-  }
+  pendingLessonNoteSaves.delete(noteId);
+  pendingLessonNoteDeletes.add(noteId);
+  addTombstone(DELETED_LESSON_NOTES_KEY, noteId);
 
   try {
-    await deleteDoc(doc(db, 'lesson_notes', noteId));
-  } catch (e) {
-    console.warn('Firestore lesson note delete fallback:', e);
-  }
+    pruneLocalStorageListByIds('prime_cbt_saved_lesson_notes', [noteId]);
+  } catch {}
+
+  broadcastEntitySync('lessonNotesUpdated', 'LESSON_NOTES_UPDATED', { noteId, deleted: true });
+
+  const delPromise = Promise.all([
+    deleteDoc(doc(db, 'lesson_notes', noteId)),
+    recordCloudDeletion('deletedLessonNoteIds', [noteId])
+  ]).finally(() => {
+    pendingLessonNoteDeletes.delete(noteId);
+  });
+
+  await commitFirestoreFast(delPromise, OperationType.DELETE, `lesson_notes/${noteId}`);
 }
 
 // Student Management methods
-export async function fetchStudents(classGrade?: string): Promise<Student[]> {
-  const path = 'students';
-  let students: Student[] = [];
+const pickNewerStudent = (existing: Student | undefined, incoming: Student): Student => {
+  if (!existing) return incoming;
+  const tExisting = new Date(existing.updatedAt || existing.registeredAt || 0).getTime() || 0;
+  const tIncoming = new Date(incoming.updatedAt || incoming.registeredAt || 0).getTime() || 0;
+  if (tIncoming >= tExisting) {
+    return { ...existing, ...incoming };
+  }
+  return { ...incoming, ...existing };
+};
 
-  // Read local cache first
+function readLocalStudentsList(): Student[] {
+  const deleted = getTombstoneSet(DELETED_STUDENTS_KEY);
   try {
-    const local = localStorage.getItem('prime_edutech_saved_students_roster');
+    const local = localStorage.getItem(SAVED_STUDENTS_KEY);
     if (local) {
       const parsed = JSON.parse(local);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        students = [...parsed];
+      if (Array.isArray(parsed)) {
+        return parsed.filter((s: Student) => s && s.id && !deleted.has(s.id) && !pendingStudentDeletes.has(s.id));
       }
     }
   } catch {}
-
-  // Fetch from Firestore
-  try {
-    let q;
-    if (classGrade) {
-      q = query(collection(db, path), where('classGrade', '==', classGrade));
-    } else {
-      q = collection(db, path);
-    }
-    const snapshot = await getDocs(q);
-    if (!snapshot.empty) {
-      const firestoreStudents: Student[] = [];
-      snapshot.forEach(docSnap => {
-        const data = docSnap.data() as Student;
-        const accessCode = data.accessCode || `PRM-${docSnap.id.slice(-4).toUpperCase()}`;
-        firestoreStudents.push({ ...data, id: docSnap.id, accessCode });
-      });
-
-      // Merge: Firestore docs take priority, but retain local additions
-      for (const fStu of firestoreStudents) {
-        const idx = students.findIndex(s => s.id === fStu.id || s.admissionNumber.toUpperCase() === fStu.admissionNumber.toUpperCase());
-        if (idx >= 0) {
-          students[idx] = { ...students[idx], ...fStu };
-        } else {
-          students.push(fStu);
-        }
-      }
-    } else if (students.length === 0) {
-      students = [...DEFAULT_STUDENTS];
-    }
-  } catch (error) {
-    console.warn('Fallback to default students directory:', error);
-    if (students.length === 0) {
-      students = [...DEFAULT_STUDENTS];
-    }
-  }
-
-  // Update local cache
-  try {
-    localStorage.setItem('prime_edutech_saved_students_roster', JSON.stringify(students));
-  } catch {}
-
-  if (classGrade) {
-    return students.filter(s => s.classGrade === classGrade);
-  }
-  return students;
+  if (isSchoolBootstrapped()) return [];
+  return DEFAULT_STUDENTS.filter(s => !deleted.has(s.id) && !pendingStudentDeletes.has(s.id));
 }
 
-export async function saveStudent(student: Student): Promise<void> {
-  const path = `students/${student.id}`;
-  if (!student.accessCode || student.accessCode.trim() === '') {
-    student.accessCode = generateStudentAccessCode();
-  }
-  const cleanStudent = sanitizeFirestoreData(student);
-
-  // Save to local cache immediately
+function writeLocalStudentsList(list: Student[]) {
   try {
-    const local = localStorage.getItem('prime_edutech_saved_students_roster');
-    let list: Student[] = local ? JSON.parse(local) : [...DEFAULT_STUDENTS];
-    const idx = list.findIndex(s => s.id === cleanStudent.id || s.admissionNumber.toUpperCase() === cleanStudent.admissionNumber.toUpperCase());
+    localStorage.setItem(SAVED_STUDENTS_KEY, JSON.stringify(list));
+  } catch {}
+}
+
+export async function fetchStudents(classGrade?: string): Promise<Student[]> {
+  const path = 'students';
+  await fetchCloudSyncState(true).catch(() => null);
+  const deleted = getTombstoneSet(DELETED_STUDENTS_KEY);
+  const mergedMap = new Map<string, Student>();
+
+  try {
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const q = classGrade
+      ? query(collection(db, path), where('classGrade', '==', classGrade))
+      : collection(db, path);
+
+    const snapshot = isOnline
+      ? await getDocsFromServer(q).catch(() => getDocs(q))
+      : await getDocs(q);
+
+    const isAuthoritative = !snapshot.metadata.fromCache;
+
+    if (!isAuthoritative) {
+      readLocalStudentsList().forEach(s => {
+        if (!deleted.has(s.id) && !pendingStudentDeletes.has(s.id)) mergedMap.set(s.id, s);
+      });
+    } else if (classGrade) {
+      readLocalStudentsList().forEach(s => {
+        if (s.classGrade !== classGrade && !deleted.has(s.id) && !pendingStudentDeletes.has(s.id)) {
+          mergedMap.set(s.id, s);
+        }
+      });
+    }
+
+    snapshot.forEach(docSnap => {
+      if (deleted.has(docSnap.id) || pendingStudentDeletes.has(docSnap.id)) return;
+      const data = docSnap.data() as Student;
+      const accessCode = data.accessCode || `PRM-${docSnap.id.slice(-4).toUpperCase()}`;
+      const fStu: Student = { ...data, id: docSnap.id, accessCode };
+      mergedMap.set(fStu.id, pickNewerStudent(mergedMap.get(fStu.id), fStu));
+    });
+
+    pendingStudentSaves.forEach((ps, id) => {
+      if (!deleted.has(id) && !pendingStudentDeletes.has(id)) {
+        mergedMap.set(id, pickNewerStudent(mergedMap.get(id), ps));
+      }
+    });
+
+    if (mergedMap.size === 0 && !isAuthoritative && !isSchoolBootstrapped()) {
+      DEFAULT_STUDENTS.filter(s => !deleted.has(s.id)).forEach(s => mergedMap.set(s.id, s));
+    }
+  } catch (error) {
+    console.warn('Fallback to cached students directory:', error);
+    readLocalStudentsList().forEach(s => {
+      if (!deleted.has(s.id) && !pendingStudentDeletes.has(s.id)) mergedMap.set(s.id, s);
+    });
+    pendingStudentSaves.forEach((ps, id) => {
+      if (!deleted.has(id) && !pendingStudentDeletes.has(id)) {
+        mergedMap.set(id, pickNewerStudent(mergedMap.get(id), ps));
+      }
+    });
+  }
+
+  const allStudents = Array.from(mergedMap.values());
+  writeLocalStudentsList(allStudents);
+
+  if (classGrade) {
+    return allStudents.filter(s => s.classGrade === classGrade);
+  }
+  return allStudents;
+}
+
+export async function saveStudent(student: Student): Promise<Student> {
+  const path = `students/${student.id}`;
+  pendingStudentDeletes.delete(student.id);
+  removeTombstone(DELETED_STUDENTS_KEY, student.id);
+
+  const accessCode =
+    student.accessCode && student.accessCode.trim() !== ''
+      ? student.accessCode.trim().toUpperCase()
+      : generateStudentAccessCode();
+
+  const cleanStudent = sanitizeFirestoreData<Student>({
+    ...student,
+    accessCode,
+    email: student.email ?? '',
+    password: student.password ?? '',
+    passportUrl: student.passportUrl ?? '',
+    phoneNumber: student.phoneNumber ?? '',
+    withheldReason: student.withheldReason ?? '',
+    bio: student.bio ?? '',
+    department: student.department ?? '',
+    gender: student.gender ?? '',
+    dateOfBirth: student.dateOfBirth ?? '',
+    stateOfOrigin: student.stateOfOrigin ?? '',
+    withheldSubjectIds: Array.isArray(student.withheldSubjectIds) ? student.withheldSubjectIds : [],
+    updatedAt: new Date().toISOString()
+  });
+
+  pendingStudentSaves.set(cleanStudent.id, cleanStudent);
+
+  try {
+    const list = readLocalStudentsList();
+    const idx = list.findIndex(
+      s => s.id === cleanStudent.id || s.admissionNumber.toUpperCase() === cleanStudent.admissionNumber.toUpperCase()
+    );
     if (idx >= 0) {
       list[idx] = { ...list[idx], ...cleanStudent };
     } else {
       list.push(cleanStudent);
     }
-    localStorage.setItem('prime_edutech_saved_students_roster', JSON.stringify(list));
+    writeLocalStudentsList(list);
   } catch {}
 
-  broadcastEntitySync('studentsUpdated', 'STUDENTS_UPDATED', { studentId: cleanStudent.id });
+  try {
+    const activeRaw = sessionStorage.getItem('prime_edutech_active_student');
+    if (activeRaw) {
+      const parsed = JSON.parse(activeRaw) as Student;
+      if (parsed.id === cleanStudent.id) {
+        sessionStorage.setItem('prime_edutech_active_student', JSON.stringify({ ...parsed, ...cleanStudent }));
+      }
+    }
+  } catch {}
 
-  // Persist to Firestore cleanly
-  await commitFirestoreFast(
+  broadcastEntitySync('studentsUpdated', 'STUDENTS_UPDATED', { student: cleanStudent, studentId: cleanStudent.id });
+
+  const writePromise = Promise.all([
     setDoc(doc(db, 'students', cleanStudent.id), cleanStudent, { merge: true }),
-    OperationType.WRITE,
-    path
-  );
+    clearCloudDeletion('deletedStudentIds', cleanStudent.id)
+  ]).then(() => {
+    const curr = pendingStudentSaves.get(cleanStudent.id);
+    if (curr && curr.updatedAt === cleanStudent.updatedAt) {
+      pendingStudentSaves.delete(cleanStudent.id);
+    }
+  });
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, path);
+  return cleanStudent;
 }
 
 export async function deleteStudent(studentId: string): Promise<void> {
   const path = `students/${studentId}`;
-  try {
-    const local = localStorage.getItem('prime_edutech_saved_students_roster');
-    if (local) {
-      const list: Student[] = JSON.parse(local);
-      const filtered = list.filter(s => s.id !== studentId);
-      localStorage.setItem('prime_edutech_saved_students_roster', JSON.stringify(filtered));
-    }
-  } catch {}
+  pendingStudentSaves.delete(studentId);
+  pendingStudentDeletes.add(studentId);
+  addTombstone(DELETED_STUDENTS_KEY, studentId);
 
   try {
-    await deleteDoc(doc(db, 'students', studentId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    writeLocalStudentsList(readLocalStudentsList().filter(s => s.id !== studentId));
+  } catch {}
+
+  broadcastEntitySync('studentsUpdated', 'STUDENTS_UPDATED', { studentId, deleted: true });
+
+  const delPromise = Promise.all([
+    deleteDoc(doc(db, 'students', studentId)),
+    recordCloudDeletion('deletedStudentIds', [studentId])
+  ]).finally(() => {
+    pendingStudentDeletes.delete(studentId);
+  });
+
+  await commitFirestoreFast(delPromise, OperationType.DELETE, path);
+}
+
+export function subscribeStudents(callback: (students: Student[]) => void): () => void {
+  let firestoreList: Student[] = [];
+  let hasServerSnapshot = false;
+  let hasAnyRemote = false;
+
+  const emitMerged = () => {
+    const deleted = getTombstoneSet(DELETED_STUDENTS_KEY);
+    const merged = new Map<string, Student>();
+
+    if (!hasServerSnapshot) {
+      readLocalStudentsList().forEach(s => {
+        if (!deleted.has(s.id) && !pendingStudentDeletes.has(s.id)) merged.set(s.id, s);
+      });
+    }
+
+    if (hasAnyRemote) {
+      firestoreList.forEach(fs => {
+        if (!deleted.has(fs.id) && !pendingStudentDeletes.has(fs.id)) {
+          merged.set(fs.id, pickNewerStudent(merged.get(fs.id), fs));
+        }
+      });
+    }
+
+    pendingStudentSaves.forEach((ps, id) => {
+      if (!deleted.has(id) && !pendingStudentDeletes.has(id)) {
+        merged.set(id, pickNewerStudent(merged.get(id), ps));
+      }
+    });
+
+    const result = Array.from(merged.values());
+    writeLocalStudentsList(result);
+    callback(result);
+  };
+
+  emitMerged();
+  const releaseSyncState = retainSyncStateListener();
+
+  let unsubFirestore: (() => void) | null = null;
+  try {
+    unsubFirestore = onSnapshot(
+      collection(db, 'students'),
+      { includeMetadataChanges: true },
+      snapshot => {
+        hasAnyRemote = true;
+        if (!snapshot.metadata.fromCache) {
+          hasServerSnapshot = true;
+        }
+        const remote: Student[] = [];
+        snapshot.forEach(docSnap => {
+          const data = docSnap.data() as Student;
+          remote.push({
+            ...data,
+            id: docSnap.id,
+            accessCode: data.accessCode || `PRM-${docSnap.id.slice(-4).toUpperCase()}`
+          });
+        });
+        firestoreList = remote;
+        emitMerged();
+      },
+      err => {
+        console.warn('Students snapshot listener fallback:', err);
+      }
+    );
+  } catch {}
+
+  const onSync = () => emitMerged();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('studentsUpdated', onSync);
+    window.addEventListener('storage', onSync);
   }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_sync_channel');
+    bc.onmessage = (ev) => {
+      if (ev.data?.type === 'STUDENTS_UPDATED') onSync();
+    };
+  } catch {}
+
+  return () => {
+    releaseSyncState();
+    if (unsubFirestore) unsubFirestore();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('studentsUpdated', onSync);
+      window.removeEventListener('storage', onSync);
+    }
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+  };
 }
 
 // Student Authentication via Unique Passcode (e.g. PRM-4821)
@@ -2047,13 +3195,17 @@ export async function authenticateStudentByCode(rawCode: string): Promise<Studen
   const cleanCode = rawCode.trim().toUpperCase();
   if (!cleanCode) return null;
 
+  const deleted = getTombstoneSet(DELETED_STUDENTS_KEY);
   const path = 'students';
+  const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
   try {
-    // 1. Primary lookup: Match by unique accessCode
     const qCode = query(collection(db, path), where('accessCode', '==', cleanCode));
-    const snapCode = await getDocs(qCode);
+    const snapCode = isOnline
+      ? await getDocsFromServer(qCode).catch(() => getDocs(qCode))
+      : await getDocs(qCode);
     if (!snapCode.empty) {
       for (const docSnap of snapCode.docs) {
+        if (deleted.has(docSnap.id)) continue;
         const data = docSnap.data() as Student;
         if (data.status === 'active') {
           return { ...data, id: docSnap.id, accessCode: data.accessCode || cleanCode };
@@ -2061,11 +3213,13 @@ export async function authenticateStudentByCode(rawCode: string): Promise<Studen
       }
     }
 
-    // 2. Secondary lookup: Match by admissionNumber (in case student enters admission ID)
     const qAdm = query(collection(db, path), where('admissionNumber', '==', cleanCode));
-    const snapAdm = await getDocs(qAdm);
+    const snapAdm = isOnline
+      ? await getDocsFromServer(qAdm).catch(() => getDocs(qAdm))
+      : await getDocs(qAdm);
     if (!snapAdm.empty) {
       for (const docSnap of snapAdm.docs) {
+        if (deleted.has(docSnap.id)) continue;
         const data = docSnap.data() as Student;
         if (data.status === 'active') {
           return { ...data, id: docSnap.id, accessCode: data.accessCode || cleanCode };
@@ -2076,10 +3230,10 @@ export async function authenticateStudentByCode(rawCode: string): Promise<Studen
     console.warn('Student Firestore query by passcode fallback to local list:', error);
   }
 
-  // Fallback lookup against default enrolled students
-  const localMatch = DEFAULT_STUDENTS.find(
-    s => (s.accessCode && s.accessCode.toUpperCase() === cleanCode) ||
-         s.admissionNumber.toUpperCase() === cleanCode
+  const localMatch = readLocalStudentsList().find(
+    s => s.status === 'active' &&
+         ((s.accessCode && s.accessCode.toUpperCase() === cleanCode) ||
+          s.admissionNumber.toUpperCase() === cleanCode)
   );
 
   return localMatch || null;
@@ -2094,13 +3248,18 @@ export async function authenticateStudent(
   const cleanAdm = admissionNumber.trim().toUpperCase();
   const cleanFirst = firstName.trim().toLowerCase();
   const cleanSurname = surnamePassword.trim().toLowerCase();
+  const deleted = getTombstoneSet(DELETED_STUDENTS_KEY);
 
   const path = 'students';
+  const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
   try {
     const q = query(collection(db, path), where('admissionNumber', '==', cleanAdm));
-    const snapshot = await getDocs(q);
+    const snapshot = isOnline
+      ? await getDocsFromServer(q).catch(() => getDocs(q))
+      : await getDocs(q);
     if (!snapshot.empty) {
       for (const docSnap of snapshot.docs) {
+        if (deleted.has(docSnap.id)) continue;
         const data = docSnap.data() as Student;
         if (
           data.status === 'active' &&
@@ -2112,12 +3271,12 @@ export async function authenticateStudent(
       }
     }
   } catch (error) {
-    console.warn('Student Firestore query fallback to default roster:', error);
+    console.warn('Student Firestore query fallback to cached roster:', error);
   }
 
-  // Fallback check against default registered students
-  const localMatch = DEFAULT_STUDENTS.find(
-    s => s.admissionNumber.toUpperCase() === cleanAdm &&
+  const localMatch = readLocalStudentsList().find(
+    s => s.status === 'active' &&
+         s.admissionNumber.toUpperCase() === cleanAdm &&
          s.firstName.toLowerCase() === cleanFirst &&
          s.surname.toLowerCase() === cleanSurname
   );
@@ -2125,44 +3284,73 @@ export async function authenticateStudent(
   return localMatch || null;
 }
 
-// Asynchronously bootstrap school data to Firestore if not already present
+// Asynchronously bootstrap school data ONCE on fresh database; never re-seeds deleted items
 export async function ensureInitialSchoolData(): Promise<void> {
   try {
-    const examSnap = await getDocs(collection(db, 'examinations'));
-    if (examSnap.empty) {
-      // 1. Seed classes
-      for (const cls of DEFAULT_SCHOOL_CLASSES) {
-        await saveSchoolClass(cls).catch(() => {});
-      }
-      // 2. Seed subjects
-      for (const sub of DEFAULT_SUBJECTS) {
-        await saveSubject(sub).catch(() => {});
-      }
-      // 3. Seed students
-      for (const std of DEFAULT_STUDENTS) {
-        await saveStudent(std).catch(() => {});
-      }
-      // 4. Seed faculty staff
-      for (const staff of DEFAULT_STAFF) {
-        await saveStaffMember(staff).catch(() => {});
-      }
-      // 5. Seed exams & questions
-      for (const exam of DEFAULT_EXAMINATIONS) {
-        await saveExamination(exam).catch(() => {});
-        const qs = DEFAULT_QUESTIONS_MAP[exam.id] || [];
-        for (const q of qs) {
-          await saveQuestion(exam.id, q).catch(() => {});
-        }
-      }
-    } else {
-      // Check teachers collection specifically
-      const staffSnap = await getDocs(collection(db, 'teachers'));
+    const syncState = await fetchCloudSyncState(true);
+    if (syncState?.hasBootstrapped) {
+      markSchoolBootstrappedLocal();
+      return;
+    }
+
+    const [examSnap, staffSnap, classSnap, subjectSnap, studentSnap] = await Promise.all([
+      fetchCollectionAuthoritative('examinations', true),
+      fetchCollectionAuthoritative('teachers', true),
+      fetchCollectionAuthoritative('classes', true),
+      fetchCollectionAuthoritative('subjects', true),
+      fetchCollectionAuthoritative('students', true)
+    ]);
+
+    const alreadyProvisioned =
+      !examSnap.empty || !staffSnap.empty || !classSnap.empty || !studentSnap.empty;
+
+    if (alreadyProvisioned) {
+      // School already exists in Firestore — lock bootstrap so deleted defaults never resurrect
+      await setDoc(
+        doc(db, 'settings', 'syncState'),
+        { hasBootstrapped: true, updatedAt: new Date().toISOString() },
+        { merge: true }
+      ).catch(() => {});
+      markSchoolBootstrappedLocal();
+
+      // Only seed teachers if teachers collection itself was completely empty
       if (staffSnap.empty) {
         for (const staff of DEFAULT_STAFF) {
           await saveStaffMember(staff).catch(() => {});
         }
       }
+      return;
     }
+
+    // Fresh blank database: seed defaults once
+    for (const cls of DEFAULT_SCHOOL_CLASSES) {
+      await saveSchoolClass(cls).catch(() => {});
+    }
+    if (subjectSnap.empty) {
+      for (const sub of DEFAULT_SUBJECTS) {
+        await saveSubject(sub).catch(() => {});
+      }
+    }
+    for (const std of DEFAULT_STUDENTS) {
+      await saveStudent(std).catch(() => {});
+    }
+    for (const staff of DEFAULT_STAFF) {
+      await saveStaffMember(staff).catch(() => {});
+    }
+    for (const exam of DEFAULT_EXAMINATIONS) {
+      await saveExamination(exam).catch(() => {});
+      const qs = DEFAULT_QUESTIONS_MAP[exam.id] || [];
+      for (const q of qs) {
+        await saveQuestion(exam.id, q).catch(() => {});
+      }
+    }
+
+    await setDoc(
+      doc(db, 'settings', 'syncState'),
+      { hasBootstrapped: true, updatedAt: new Date().toISOString() },
+      { merge: true }
+    ).catch(() => {});
+    markSchoolBootstrappedLocal();
   } catch (err) {
     console.warn('Initial school data ensure notice:', err);
   }
@@ -2222,21 +3410,309 @@ export async function updateExamAttemptProgress(
   }
 }
 
-// Submissions & Results
+// Submissions & Results (Every sitting stored separately: 1st Exam, 2nd Exam, etc.)
 export async function saveSubmission(submission: Submission): Promise<string> {
   const path = 'submissions';
+  const subId =
+    submission.id ||
+    `sub_${submission.studentId}_${submission.examId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+  let localList: Submission[] = [];
   try {
-    const docRef = doc(collection(db, path));
-    const subWithId = { ...submission, id: docRef.id };
-    await setDoc(docRef, subWithId);
-    return docRef.id;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    const raw = localStorage.getItem('prime_cbt_submissions');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) localList = parsed;
+    }
+  } catch {}
+
+  // Compute ordinal sitting number per student + normalized subject + session + term
+  let computedAttemptNumber = submission.attemptNumber;
+  if (!computedAttemptNumber) {
+    try {
+      const normSubj = (submission.subject || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const normSess = (submission.academicSession || '').trim().toUpperCase();
+      const normTerm = (submission.term || '').trim().toUpperCase().replace(/\s+/g, '');
+
+      const existingForStudent = await fetchSubmissions(undefined, submission.studentId).catch(() =>
+        localList.filter(s => s.studentId === submission.studentId)
+      );
+      const priorSameSubject = existingForStudent.filter(s => {
+        if (s.id === subId) return false;
+        const sSubj = (s.subject || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const sSess = (s.academicSession || '').trim().toUpperCase();
+        const sTerm = (s.term || '').trim().toUpperCase().replace(/\s+/g, '');
+        return sSubj === normSubj && sSess === normSess && sTerm === normTerm;
+      });
+      computedAttemptNumber = priorSameSubject.length + 1;
+    } catch {
+      computedAttemptNumber = 1;
+    }
   }
+
+  pendingSubmissionDeletes.delete(subId);
+  removeTombstone(DELETED_SUBMISSIONS_KEY, subId);
+
+  const sittingLabel = submission.sittingLabel || formatOrdinalExamLabel(computedAttemptNumber);
+  const cleanSub = sanitizeFirestoreData({
+    ...submission,
+    id: subId,
+    attemptNumber: computedAttemptNumber,
+    sittingLabel
+  });
+  pendingSubmissionSaves.set(subId, cleanSub);
+
+  // Mutate caller object so immediate result slip displays exact sitting label & ID
+  submission.id = subId;
+  submission.attemptNumber = computedAttemptNumber;
+  submission.sittingLabel = sittingLabel;
+
+  // Mirror immediately in localStorage — NEVER erase previous sittings for same exam or subject
+  try {
+    const deleted = getTombstoneSet(DELETED_SUBMISSIONS_KEY);
+    const filtered = localList.filter(s => s.id !== subId && !deleted.has(s.id || ''));
+    filtered.unshift(cleanSub);
+    localStorage.setItem('prime_cbt_submissions', JSON.stringify(filtered));
+  } catch {}
+
+  broadcastExamSync('SUBMISSIONS_UPDATED', { examId: cleanSub.examId, studentId: cleanSub.studentId, submissionId: subId });
+
+  try {
+    await commitFirestoreFast(
+      Promise.all([
+        setDoc(doc(db, path, subId), cleanSub, { merge: true }),
+        clearCloudDeletion('deletedSubmissionIds', subId)
+      ]).then(() => {
+        pendingSubmissionSaves.delete(subId);
+      }),
+      OperationType.WRITE,
+      `${path}/${subId}`
+    );
+  } catch (error) {
+    console.warn('Submission Firestore write queued offline:', error);
+  }
+
+  return subId;
+}
+
+// Auto-fill CBT score into the student's Continuous Assessment / Terminal Report Sheet record
+// Routes into 1st CA, 2nd CA, or Term's Exam based on exam.targetCaComponent while preserving all sittings separately
+export async function syncCbtSubmissionToReportSheet(
+  submission: Submission,
+  exam?: Examination
+): Promise<{ scaledExamScore: number; examMax: number; targetCaComponent: CbtTargetComponent }> {
+  const settings = await fetchSchoolSettings().catch(() => DEFAULT_SCHOOL_SETTINGS);
+  const caWeights = resolveCaWeights(settings?.caWeights);
+
+  let resolvedExam: Partial<Examination> | undefined = exam;
+  if (!resolvedExam && !submission.targetCaComponent && submission.examId) {
+    try {
+      const examsList = await fetchExaminations(false);
+      resolvedExam = examsList.find(e => e.id === submission.examId);
+    } catch {}
+  }
+
+  const targetComponent: CbtTargetComponent = resolveExamTargetComponent(resolvedExam, submission);
+  const componentMax = getTargetComponentMax(targetComponent, caWeights);
+  const scaledScore = Math.min(
+    componentMax,
+    Math.max(0, Math.round(((submission.percentage || 0) / 100) * componentMax))
+  );
+
+  // Resolve subject ID reliably
+  let resolvedSubjectId = resolvedExam?.subjectId || '';
+  if (!resolvedSubjectId) {
+    try {
+      const subjects = await fetchSubjects();
+      const matchedSub = subjects.find(
+        s => s.name.trim().toLowerCase() === (submission.subject || '').trim().toLowerCase()
+      );
+      if (matchedSub) resolvedSubjectId = matchedSub.id;
+    } catch {}
+  }
+  if (!resolvedSubjectId) {
+    resolvedSubjectId = `sub_${(submission.subject || 'general').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')}`;
+  }
+
+  // Locate any existing CA record for this student, subject, session & term so other columns & prior sittings are preserved
+  const normSubjName = (submission.subject || '').trim().toLowerCase();
+  const normAdm = (submission.admissionNumber || '').trim().toUpperCase();
+  const existingPool = await fetchAssessmentRecords(
+    undefined,
+    submission.classGrade,
+    submission.academicSession,
+    submission.term
+  ).catch(() => []);
+
+  const existing = existingPool.find(r => {
+    const sameStudent =
+      (submission.studentId && r.studentId === submission.studentId) ||
+      (normAdm && (r.admissionNumber || '').trim().toUpperCase() === normAdm);
+    const sameSubject =
+      (resolvedSubjectId && r.subjectId === resolvedSubjectId) ||
+      (normSubjName && (r.subjectName || '').trim().toLowerCase() === normSubjName);
+    return sameStudent && sameSubject;
+  });
+
+  const cleanStudentId = (submission.studentId || submission.admissionNumber || 'stu').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanSubjId = resolvedSubjectId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanSession = (submission.academicSession || settings.academicSession || '2025-2026').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanTerm = (submission.term || settings.currentTerm || '1stTerm').replace(/[^a-zA-Z0-9_-]/g, '_');
+
+  const recordId = existing?.id || `ca_${cleanStudentId}_${cleanSubjId}_${cleanSession}_${cleanTerm}`;
+
+  // Build separate CBT sitting entries list without overwriting earlier sittings or other columns
+  const priorEntries: CbtExamEntry[] = Array.isArray(existing?.examEntries) ? [...existing.examEntries] : [];
+  if (priorEntries.length === 0 && existing?.cbtSubmissionId && existing.cbtSubmissionId !== submission.id && (existing.examScore || 0) > 0) {
+    priorEntries.push({
+      submissionId: existing.cbtSubmissionId,
+      examId: 'legacy',
+      examTitle: `${submission.subject} CBT Paper`,
+      sittingNumber: 1,
+      sittingLabel: '1st Exam',
+      targetCaComponent: 'exam',
+      rawScore: existing.examScore,
+      totalQuestions: caWeights.examMax,
+      percentage: Math.round((existing.examScore / Math.max(1, caWeights.examMax)) * 100),
+      scaledScore: existing.examScore,
+      examMax: caWeights.examMax,
+      submittedAt: existing.updatedAt || new Date().toISOString()
+    });
+  }
+
+  const subId = submission.id || `sub_${submission.studentId}_${submission.examId}_${Date.now()}`;
+  const incomingEntry: CbtExamEntry = {
+    submissionId: subId,
+    examId: submission.examId,
+    examTitle: submission.examTitle,
+    sittingNumber: submission.attemptNumber || (priorEntries.length + 1),
+    sittingLabel: submission.sittingLabel || formatOrdinalExamLabel(submission.attemptNumber || (priorEntries.length + 1)),
+    targetCaComponent: targetComponent,
+    rawScore: submission.score,
+    totalQuestions: submission.totalQuestions,
+    percentage: submission.percentage,
+    scaledScore,
+    examMax: componentMax,
+    submittedAt: submission.submittedAt
+  };
+
+  const mergedEntriesMap = new Map<string, CbtExamEntry>();
+  priorEntries.forEach(e => { if (e && e.submissionId) mergedEntriesMap.set(e.submissionId, e); });
+  mergedEntriesMap.set(subId, incomingEntry);
+
+  const nextEntries = Array.from(mergedEntriesMap.values())
+    .sort((a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime())
+    .map((entry, idx) => ({
+      ...entry,
+      sittingNumber: idx + 1,
+      sittingLabel: formatOrdinalExamLabel(idx + 1)
+    }));
+
+  const matchingComponentEntries = nextEntries.filter(
+    e => (e.targetCaComponent || 'exam') === targetComponent
+  );
+  const aggregatedComponentScore = matchingComponentEntries.length > 0
+    ? Math.min(
+        componentMax,
+        Math.round(
+          matchingComponentEntries.reduce((sum, e) => sum + (e.scaledScore || 0), 0) /
+            matchingComponentEntries.length
+        )
+      )
+    : scaledScore;
+
+  const assignmentScore = Math.min(caWeights.assignmentMax, Math.max(0, existing?.assignmentScore ?? 0));
+  let firstCaScore = Math.min(caWeights.firstCaMax, Math.max(0, existing?.firstCaScore ?? existing?.testScore ?? 0));
+  let secondCaScore = Math.min(caWeights.secondCaMax, Math.max(0, existing?.secondCaScore ?? existing?.projectScore ?? 0));
+  let examScore = Math.min(caWeights.examMax, Math.max(0, existing?.examScore ?? 0));
+
+  if (targetComponent === 'first_ca') {
+    firstCaScore = aggregatedComponentScore;
+  } else if (targetComponent === 'second_ca') {
+    secondCaScore = aggregatedComponentScore;
+  } else {
+    examScore = aggregatedComponentScore;
+  }
+
+  const maxTotal =
+    (caWeights.assignmentMax || 0) +
+    (caWeights.firstCaMax || 0) +
+    (caWeights.secondCaMax || 0) +
+    (caWeights.examMax || 0) || 100;
+  const totalScore = Math.min(maxTotal, assignmentScore + firstCaScore + secondCaScore + examScore);
+  const pct = maxTotal > 0 ? Math.round((totalScore / maxTotal) * 100) : totalScore;
+
+  let grade = 'F9';
+  let remark = 'FAIL';
+  if (pct >= 75) {
+    grade = 'A';
+    remark = 'EXCELLENT';
+  } else if (pct >= 60) {
+    grade = 'B';
+    remark = 'V.GOOD';
+  } else if (pct >= 50) {
+    grade = 'C';
+    remark = 'GOOD';
+  } else if (pct >= 40) {
+    grade = 'D';
+    remark = 'FAIR';
+  }
+
+  const record: StudentAssessmentRecord = {
+    id: recordId,
+    studentId: submission.studentId,
+    studentName: submission.studentName,
+    admissionNumber: submission.admissionNumber,
+    classGrade: submission.classGrade,
+    subjectId: existing?.subjectId || resolvedSubjectId,
+    subjectName: submission.subject || existing?.subjectName || 'Subject',
+    academicSession: submission.academicSession || settings.academicSession,
+    term: (submission.term as '1st Term' | '2nd Term' | '3rd Term') || (settings.currentTerm as any) || '1st Term',
+    assignmentScore,
+    firstCaScore,
+    secondCaScore,
+    testScore: firstCaScore,
+    projectScore: secondCaScore,
+    examScore,
+    totalScore,
+    grade,
+    remark,
+    cbtSubmissionId: subId,
+    examEntries: nextEntries,
+    isAutoSynced: true,
+    teacherComment: existing?.teacherComment || '',
+    teacherSignature: existing?.teacherSignature || 'Signed',
+    updatedAt: new Date().toISOString()
+  };
+
+  await saveAssessmentRecord(record);
+  return { scaledExamScore: scaledScore, examMax: componentMax, targetCaComponent: targetComponent };
 }
 
 export async function fetchSubmissions(examId?: string, studentId?: string): Promise<Submission[]> {
   const path = 'submissions';
+  await fetchCloudSyncState(true).catch(() => null);
+  const deleted = getTombstoneSet(DELETED_SUBMISSIONS_KEY);
+  const mergedMap = new Map<string, Submission>();
+
+  const matches = (s: Submission) => {
+    if (s.id && (deleted.has(s.id) || pendingSubmissionDeletes.has(s.id))) return false;
+    if (examId && s.examId !== examId) return false;
+    if (studentId && s.studentId !== studentId) return false;
+    return true;
+  };
+
+  let allLocal: Submission[] = [];
+  try {
+    const raw = localStorage.getItem('prime_cbt_submissions');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        allLocal = parsed.filter((s: Submission) => s && (!s.id || (!deleted.has(s.id) && !pendingSubmissionDeletes.has(s.id))));
+      }
+    }
+  } catch {}
+
   try {
     let q;
     if (examId && studentId) {
@@ -2252,15 +3728,254 @@ export async function fetchSubmissions(examId?: string, studentId?: string): Pro
     } else {
       q = collection(db, path);
     }
-    const snapshot = await getDocs(q);
-    const submissions: Submission[] = [];
+
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const snapshot = isOnline
+      ? await getDocsFromServer(q).catch(() => getDocs(q))
+      : await getDocs(q);
+
+    const isAuthoritative = !snapshot.metadata.fromCache;
+    if (!isAuthoritative) {
+      allLocal.forEach(s => {
+        if (matches(s)) mergedMap.set(s.id || `${s.studentId}_${s.examId}_${s.submittedAt}`, s);
+      });
+    }
+
+    const remoteSubs: Submission[] = [];
     snapshot.forEach(docSnap => {
-      submissions.push({ id: docSnap.id, ...docSnap.data() } as Submission);
+      if (deleted.has(docSnap.id) || pendingSubmissionDeletes.has(docSnap.id)) return;
+      const sub = { id: docSnap.id, ...docSnap.data() } as Submission;
+      remoteSubs.push(sub);
+      mergedMap.set(sub.id || `${sub.studentId}_${sub.examId}_${sub.submittedAt}`, sub);
     });
-    return submissions.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+
+    pendingSubmissionSaves.forEach((ps, id) => {
+      if (!deleted.has(id) && !pendingSubmissionDeletes.has(id) && matches(ps)) {
+        mergedMap.set(id, ps);
+      }
+    });
+
+    if (isAuthoritative) {
+      const preserved = allLocal.filter(s => !matches(s));
+      const pendingMatching = Array.from(pendingSubmissionSaves.values()).filter(
+        ps => matches(ps) && !remoteSubs.some(rs => rs.id === ps.id)
+      );
+      try {
+        localStorage.setItem('prime_cbt_submissions', JSON.stringify([...pendingMatching, ...remoteSubs, ...preserved]));
+      } catch {}
+    }
   } catch (error) {
-    handleFirestoreError(error, OperationType.GET, path);
+    console.warn('Submissions fetch fallback to local cache:', error);
+    allLocal.forEach(s => {
+      if (matches(s)) mergedMap.set(s.id || `${s.studentId}_${s.examId}_${s.submittedAt}`, s);
+    });
+    pendingSubmissionSaves.forEach((ps, id) => {
+      if (!deleted.has(id) && !pendingSubmissionDeletes.has(id) && matches(ps)) {
+        mergedMap.set(id, ps);
+      }
+    });
   }
+
+  return enrichSubmissionsWithOrdinals(Array.from(mergedMap.values()));
+}
+
+export function subscribeStudentSubmissions(
+  studentId: string,
+  callback: (subs: Submission[]) => void
+): () => void {
+  let remoteSubs: Submission[] = [];
+  let hasServer = false;
+  let hasAny = false;
+
+  const emit = () => {
+    const deleted = getTombstoneSet(DELETED_SUBMISSIONS_KEY);
+    let allLocal: Submission[] = [];
+    try {
+      const raw = localStorage.getItem('prime_cbt_submissions');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          allLocal = parsed.filter((s: Submission) => s && (!s.id || (!deleted.has(s.id) && !pendingSubmissionDeletes.has(s.id))));
+        }
+      }
+    } catch {}
+
+    const map = new Map<string, Submission>();
+    if (!hasServer) {
+      allLocal.filter(s => s.studentId === studentId).forEach(s => {
+        map.set(s.id || `${s.studentId}_${s.examId}_${s.submittedAt}`, s);
+      });
+    }
+    if (hasAny) {
+      remoteSubs.forEach(s => {
+        if (!s.id || (!deleted.has(s.id) && !pendingSubmissionDeletes.has(s.id))) {
+          map.set(s.id || `${s.studentId}_${s.examId}_${s.submittedAt}`, s);
+        }
+      });
+    }
+    pendingSubmissionSaves.forEach((ps, id) => {
+      if (ps.studentId === studentId && !deleted.has(id) && !pendingSubmissionDeletes.has(id)) {
+        map.set(id, ps);
+      }
+    });
+
+    const list = enrichSubmissionsWithOrdinals(Array.from(map.values()));
+    if (hasServer) {
+      const others = allLocal.filter(s => s.studentId !== studentId);
+      try {
+        localStorage.setItem('prime_cbt_submissions', JSON.stringify([...list, ...others]));
+      } catch {}
+    }
+    callback(list);
+  };
+
+  emit();
+  const releaseSyncState = retainSyncStateListener();
+
+  let unsub: (() => void) | null = null;
+  try {
+    const q = query(collection(db, 'submissions'), where('studentId', '==', studentId));
+    unsub = onSnapshot(
+      q,
+      { includeMetadataChanges: true },
+      snapshot => {
+        hasAny = true;
+        if (!snapshot.metadata.fromCache) hasServer = true;
+        const arr: Submission[] = [];
+        snapshot.forEach(docSnap => {
+          arr.push({ id: docSnap.id, ...docSnap.data() } as Submission);
+        });
+        remoteSubs = arr;
+        emit();
+      },
+      err => console.warn('Student submissions snapshot fallback:', err)
+    );
+  } catch {}
+
+  const onSync = () => emit();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('prime_cbt_exams_updated', onSync);
+    window.addEventListener('prime_cbt_timer_restarted', onSync);
+    window.addEventListener('storage', onSync);
+  }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_sync_channel');
+    bc.onmessage = (ev) => {
+      if (ev.data?.type === 'SUBMISSIONS_UPDATED' || ev.data?.type === 'TIMER_RESTARTED') {
+        onSync();
+      }
+    };
+  } catch {}
+
+  return () => {
+    releaseSyncState();
+    if (unsub) unsub();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('prime_cbt_exams_updated', onSync);
+      window.removeEventListener('prime_cbt_timer_restarted', onSync);
+      window.removeEventListener('storage', onSync);
+    }
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+  };
+}
+
+export function subscribeSubmissions(callback: (subs: Submission[]) => void): () => void {
+  let remoteSubs: Submission[] = [];
+  let hasServer = false;
+  let hasAny = false;
+
+  const emit = () => {
+    const deleted = getTombstoneSet(DELETED_SUBMISSIONS_KEY);
+    let allLocal: Submission[] = [];
+    try {
+      const raw = localStorage.getItem('prime_cbt_submissions');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          allLocal = parsed.filter((s: Submission) => s && (!s.id || (!deleted.has(s.id) && !pendingSubmissionDeletes.has(s.id))));
+        }
+      }
+    } catch {}
+
+    const map = new Map<string, Submission>();
+    if (!hasServer) {
+      allLocal.forEach(s => map.set(s.id || `${s.studentId}_${s.examId}_${s.submittedAt}`, s));
+    }
+    if (hasAny) {
+      remoteSubs.forEach(s => {
+        if (!s.id || (!deleted.has(s.id) && !pendingSubmissionDeletes.has(s.id))) {
+          map.set(s.id || `${s.studentId}_${s.examId}_${s.submittedAt}`, s);
+        }
+      });
+    }
+    pendingSubmissionSaves.forEach((ps, id) => {
+      if (!deleted.has(id) && !pendingSubmissionDeletes.has(id)) {
+        map.set(id, ps);
+      }
+    });
+
+    const list = enrichSubmissionsWithOrdinals(Array.from(map.values()));
+    try {
+      localStorage.setItem('prime_cbt_submissions', JSON.stringify(list));
+    } catch {}
+    callback(list);
+  };
+
+  emit();
+  const releaseSyncState = retainSyncStateListener();
+
+  let unsub: (() => void) | null = null;
+  try {
+    unsub = onSnapshot(
+      collection(db, 'submissions'),
+      { includeMetadataChanges: true },
+      snapshot => {
+        hasAny = true;
+        if (!snapshot.metadata.fromCache) hasServer = true;
+        const arr: Submission[] = [];
+        snapshot.forEach(docSnap => {
+          arr.push({ id: docSnap.id, ...docSnap.data() } as Submission);
+        });
+        remoteSubs = arr;
+        emit();
+      },
+      err => console.warn('Submissions snapshot fallback:', err)
+    );
+  } catch {}
+
+  const onSync = () => emit();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('prime_cbt_exams_updated', onSync);
+    window.addEventListener('prime_cbt_timer_restarted', onSync);
+    window.addEventListener('storage', onSync);
+  }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel('prime_cbt_sync_channel');
+    bc.onmessage = (ev) => {
+      if (ev.data?.type === 'SUBMISSIONS_UPDATED' || ev.data?.type === 'TIMER_RESTARTED') {
+        onSync();
+      }
+    };
+  } catch {}
+
+  return () => {
+    releaseSyncState();
+    if (unsub) unsub();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('prime_cbt_exams_updated', onSync);
+      window.removeEventListener('prime_cbt_timer_restarted', onSync);
+      window.removeEventListener('storage', onSync);
+    }
+    if (bc) {
+      try { bc.close(); } catch {}
+    }
+  };
 }
 
 const normalizeClassCode = (val?: string) =>
@@ -2292,6 +4007,8 @@ export async function fetchAssessmentRecords(
   term?: string
 ): Promise<StudentAssessmentRecord[]> {
   const path = 'caRecords';
+  await fetchCloudSyncState(true).catch(() => null);
+  const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
   const mergedMap: Record<string, StudentAssessmentRecord> = {};
 
   const normClass = normalizeClassCode(classGrade);
@@ -2299,6 +4016,7 @@ export async function fetchAssessmentRecords(
   const normSession = (academicSession || '').trim();
 
   const matchesFilters = (r: StudentAssessmentRecord) => {
+    if (r.id && (deleted.has(r.id) || pendingCaRecordDeletes.has(r.id))) return false;
     if (subjectId && r.subjectId !== subjectId) return false;
     if (normClass && normalizeClassCode(r.classGrade) !== normClass) return false;
     if (normSession && (r.academicSession || '').trim() !== normSession) return false;
@@ -2306,34 +4024,68 @@ export async function fetchAssessmentRecords(
     return true;
   };
 
-  // 1. Read local cache first
+  let allLocal: StudentAssessmentRecord[] = [];
   try {
     const local = localStorage.getItem('prime_edutech_ca_records');
     if (local) {
-      const parsed: StudentAssessmentRecord[] = JSON.parse(local);
-      parsed.forEach(r => {
+      const parsed = JSON.parse(local);
+      if (Array.isArray(parsed)) {
+        allLocal = parsed.filter((r: StudentAssessmentRecord) => r && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id));
+      }
+    }
+  } catch {}
+
+  try {
+    const q = subjectId
+      ? query(collection(db, path), where('subjectId', '==', subjectId))
+      : collection(db, path);
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const snapshot = isOnline
+      ? await getDocsFromServer(q).catch(() => getDocs(q))
+      : await getDocs(q);
+    const isAuthoritative = !snapshot.metadata.fromCache;
+
+    if (!isAuthoritative) {
+      allLocal.forEach(r => {
         if (matchesFilters(r)) {
           mergedMap[r.id] = pickNewerRecord(mergedMap[r.id], r);
         }
       });
     }
-  } catch {}
 
-  // 2. Fetch from Firestore using single-field index query and filter remaining fields in memory
-  try {
-    const q = subjectId
-      ? query(collection(db, path), where('subjectId', '==', subjectId))
-      : collection(db, path);
-
-    const snapshot = await getDocs(q);
     snapshot.forEach(docSnap => {
+      if (deleted.has(docSnap.id) || pendingCaRecordDeletes.has(docSnap.id)) return;
       const rec = { id: docSnap.id, ...docSnap.data() } as StudentAssessmentRecord;
       if (matchesFilters(rec)) {
         mergedMap[rec.id] = pickNewerRecord(mergedMap[rec.id], rec);
       }
     });
+
+    pendingCaRecordSaves.forEach((pRec, id) => {
+      if (!deleted.has(id) && !pendingCaRecordDeletes.has(id) && matchesFilters(pRec)) {
+        mergedMap[id] = pickNewerRecord(mergedMap[id], pRec);
+      }
+    });
+
+    if (isAuthoritative) {
+      const preserved = allLocal.filter(r => !matchesFilters(r));
+      const updatedLocal = [...preserved, ...Object.values(mergedMap)];
+      try {
+        localStorage.setItem('prime_edutech_ca_records', JSON.stringify(updatedLocal));
+      } catch {}
+    }
   } catch (error) {
     console.warn('Fallback fetching CA records from local cache:', error);
+    allLocal.forEach(r => {
+      if (matchesFilters(r)) {
+        mergedMap[r.id] = pickNewerRecord(mergedMap[r.id], r);
+      }
+    });
+    pendingCaRecordSaves.forEach((pRec, id) => {
+      if (!deleted.has(id) && !pendingCaRecordDeletes.has(id) && matchesFilters(pRec)) {
+        mergedMap[id] = pickNewerRecord(mergedMap[id], pRec);
+      }
+    });
   }
 
   return Object.values(mergedMap);
@@ -2342,40 +4094,43 @@ export async function fetchAssessmentRecords(
 export async function saveAssessmentRecord(record: StudentAssessmentRecord): Promise<void> {
   const sanitizedId = (record.id || `ca_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`)
     .replace(/[^a-zA-Z0-9_-]/g, '_');
-  const cleanRecord = sanitizeFirestoreData({
+
+  pendingCaRecordDeletes.delete(sanitizedId);
+  removeTombstone(DELETED_CA_RECORDS_KEY, sanitizedId);
+
+  const cleanRecord = sanitizeFirestoreData<StudentAssessmentRecord>({
     ...record,
     id: sanitizedId,
-    updatedAt: record.updatedAt || new Date().toISOString()
+    teacherComment: record.teacherComment ?? '',
+    teacherSignature: record.teacherSignature ?? 'Signed',
+    updatedAt: new Date().toISOString()
   });
+
+  pendingCaRecordSaves.set(sanitizedId, cleanRecord);
 
   // Always mirror in localStorage immediately for instant offline access
   try {
+    const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
     const local = localStorage.getItem('prime_edutech_ca_records');
     const records: StudentAssessmentRecord[] = local ? JSON.parse(local) : [];
-    const filtered = records.filter(r => r.id !== sanitizedId);
+    const filtered = records.filter(r => r.id !== sanitizedId && !deleted.has(r.id));
     filtered.push(cleanRecord);
     localStorage.setItem('prime_edutech_ca_records', JSON.stringify(filtered));
   } catch {}
 
-  // Broadcast real-time score update event across components & tabs immediately
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('caRecordsUpdated', { detail: cleanRecord }));
-    try {
-      const channel = new BroadcastChannel('prime_cbt_sync_channel');
-      channel.postMessage({ type: 'CA_RECORDS_UPDATED', recordId: sanitizedId });
-      channel.close();
-    } catch {}
-  }
+  broadcastEntitySync('caRecordsUpdated', 'CA_RECORDS_UPDATED', { recordId: sanitizedId, ...cleanRecord });
 
-  try {
-    await commitFirestoreFast(
-      setDoc(doc(db, 'caRecords', sanitizedId), cleanRecord, { merge: true }),
-      OperationType.WRITE,
-      `caRecords/${sanitizedId}`
-    );
-  } catch (error) {
-    console.warn('Firestore write warning for caRecord, falling back to local cache:', error);
-  }
+  const writePromise = Promise.all([
+    setDoc(doc(db, 'caRecords', sanitizedId), cleanRecord, { merge: true }),
+    clearCloudDeletion('deletedCaRecordIds', sanitizedId)
+  ]).then(() => {
+    const curr = pendingCaRecordSaves.get(sanitizedId);
+    if (curr && curr.updatedAt === cleanRecord.updatedAt) {
+      pendingCaRecordSaves.delete(sanitizedId);
+    }
+  });
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, `caRecords/${sanitizedId}`);
 }
 
 export async function saveAssessmentBatch(records: StudentAssessmentRecord[]): Promise<void> {
@@ -2386,38 +4141,46 @@ export async function saveAssessmentBatch(records: StudentAssessmentRecord[]): P
 
 export async function deleteAssessmentRecord(recordId: string): Promise<void> {
   const cleanId = recordId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  try {
-    await deleteDoc(doc(db, 'caRecords', cleanId));
-  } catch (error) {
-    console.warn('Firestore CA delete warning:', error);
-  }
+  pendingCaRecordSaves.delete(cleanId);
+  pendingCaRecordDeletes.add(cleanId);
+  addTombstone(DELETED_CA_RECORDS_KEY, cleanId);
 
   try {
-    const local = localStorage.getItem('prime_edutech_ca_records');
-    if (local) {
-      const records: StudentAssessmentRecord[] = JSON.parse(local);
-      const filtered = records.filter(r => r.id !== cleanId);
-      localStorage.setItem('prime_edutech_ca_records', JSON.stringify(filtered));
-    }
+    pruneLocalStorageListByIds('prime_edutech_ca_records', [cleanId]);
   } catch {}
 
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('caRecordsUpdated', { detail: { id: cleanId, deleted: true } }));
-    try {
-      const channel = new BroadcastChannel('prime_cbt_sync_channel');
-      channel.postMessage({ type: 'CA_RECORDS_UPDATED', recordId: cleanId, deleted: true });
-      channel.close();
-    } catch {}
-  }
+  broadcastEntitySync('caRecordsUpdated', 'CA_RECORDS_UPDATED', { id: cleanId, recordId: cleanId, deleted: true });
+
+  const delPromise = Promise.all([
+    deleteDoc(doc(db, 'caRecords', cleanId)),
+    recordCloudDeletion('deletedCaRecordIds', [cleanId])
+  ]).finally(() => {
+    pendingCaRecordDeletes.delete(cleanId);
+  });
+
+  await commitFirestoreFast(delPromise, OperationType.DELETE, `caRecords/${cleanId}`);
 }
 
 export async function deleteSubmission(submissionId: string): Promise<void> {
   const path = `submissions/${submissionId}`;
+  pendingSubmissionSaves.delete(submissionId);
+  pendingSubmissionDeletes.add(submissionId);
+  addTombstone(DELETED_SUBMISSIONS_KEY, submissionId);
+
   try {
-    await deleteDoc(doc(db, 'submissions', submissionId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
-  }
+    pruneLocalStorageListByIds('prime_cbt_submissions', [submissionId]);
+  } catch {}
+
+  broadcastExamSync('SUBMISSIONS_UPDATED', { submissionId, deleted: true });
+
+  const delPromise = Promise.all([
+    deleteDoc(doc(db, 'submissions', submissionId)),
+    recordCloudDeletion('deletedSubmissionIds', [submissionId])
+  ]).finally(() => {
+    pendingSubmissionDeletes.delete(submissionId);
+  });
+
+  await commitFirestoreFast(delPromise, OperationType.DELETE, path);
 }
 
 // Real-time listener for a student's continuous assessment records across all subjects
@@ -2429,6 +4192,8 @@ export function subscribeStudentAssessmentRecords(
   const path = 'caRecords';
   let unsubFirestore: (() => void) | null = null;
   let firestoreRecords: StudentAssessmentRecord[] = [];
+  let hasServerSnapshot = false;
+  let hasAnyRemote = false;
 
   const normAdm = (admissionNumber || '').trim().toUpperCase();
   const isStudentMatch = (r: Partial<StudentAssessmentRecord>) => {
@@ -2438,34 +4203,65 @@ export function subscribeStudentAssessmentRecords(
   };
 
   const mergeAndEmit = () => {
+    const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
     const mergedMap: Record<string, StudentAssessmentRecord> = {};
-    firestoreRecords.forEach(r => {
-      if (isStudentMatch(r)) {
-        mergedMap[r.id] = pickNewerRecord(mergedMap[r.id], r);
-      }
-    });
+
+    let allLocal: StudentAssessmentRecord[] = [];
     try {
       const local = localStorage.getItem('prime_edutech_ca_records');
       if (local) {
-        const parsed: StudentAssessmentRecord[] = JSON.parse(local);
-        parsed.forEach(lr => {
-          if (isStudentMatch(lr)) {
-            mergedMap[lr.id] = pickNewerRecord(mergedMap[lr.id], lr);
-          }
-        });
+        const parsed = JSON.parse(local);
+        if (Array.isArray(parsed)) {
+          allLocal = parsed.filter((r: StudentAssessmentRecord) => r && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id));
+        }
       }
     } catch {}
-    callback(Object.values(mergedMap));
+
+    if (!hasServerSnapshot) {
+      allLocal.forEach(lr => {
+        if (isStudentMatch(lr)) {
+          mergedMap[lr.id] = pickNewerRecord(mergedMap[lr.id], lr);
+        }
+      });
+    }
+
+    if (hasAnyRemote) {
+      firestoreRecords.forEach(r => {
+        if (!deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id) && isStudentMatch(r)) {
+          mergedMap[r.id] = pickNewerRecord(mergedMap[r.id], r);
+        }
+      });
+    }
+
+    pendingCaRecordSaves.forEach((pr, id) => {
+      if (!deleted.has(id) && !pendingCaRecordDeletes.has(id) && isStudentMatch(pr)) {
+        mergedMap[id] = pickNewerRecord(mergedMap[id], pr);
+      }
+    });
+
+    const result = Object.values(mergedMap);
+    if (hasServerSnapshot) {
+      const others = allLocal.filter(r => !isStudentMatch(r));
+      try {
+        localStorage.setItem('prime_edutech_ca_records', JSON.stringify([...others, ...result]));
+      } catch {}
+    }
+    callback(result);
   };
 
-  // Immediate local cache dispatch
   mergeAndEmit();
+  const releaseSyncState = retainSyncStateListener();
 
   try {
     const q = collection(db, path);
     unsubFirestore = onSnapshot(
       q,
+      { includeMetadataChanges: true },
       snapshot => {
+        hasAnyRemote = true;
+        if (!snapshot.metadata.fromCache) {
+          hasServerSnapshot = true;
+        }
         const list: StudentAssessmentRecord[] = [];
         snapshot.forEach(docSnap => {
           const data = docSnap.data() as StudentAssessmentRecord;
@@ -2485,7 +4281,6 @@ export function subscribeStudentAssessmentRecords(
     console.warn('Firestore onSnapshot error, falling back to local events:', error);
   }
 
-  // Cross-tab and local broadcast listener
   const handleLocalUpdate = () => mergeAndEmit();
   if (typeof window !== 'undefined') {
     window.addEventListener('caRecordsUpdated', handleLocalUpdate);
@@ -2503,6 +4298,7 @@ export function subscribeStudentAssessmentRecords(
   } catch {}
 
   return () => {
+    releaseSyncState();
     if (unsubFirestore) unsubFirestore();
     if (typeof window !== 'undefined') {
       window.removeEventListener('caRecordsUpdated', handleLocalUpdate);
@@ -2520,49 +4316,74 @@ export async function fetchStudentAllAssessmentRecords(
   admissionNumber: string
 ): Promise<StudentAssessmentRecord[]> {
   const path = 'caRecords';
+  await fetchCloudSyncState(true).catch(() => null);
+  const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
+  const normAdm = (admissionNumber || '').trim().toUpperCase();
+
+  const isStudentMatch = (r: Partial<StudentAssessmentRecord>) =>
+    (studentId && r.studentId === studentId) ||
+    Boolean(normAdm && r.admissionNumber && r.admissionNumber.toUpperCase() === normAdm);
+
+  let allLocal: StudentAssessmentRecord[] = [];
+  try {
+    const local = localStorage.getItem('prime_edutech_ca_records');
+    if (local) {
+      const parsed = JSON.parse(local);
+      if (Array.isArray(parsed)) {
+        allLocal = parsed.filter((r: StudentAssessmentRecord) => r && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id));
+      }
+    }
+  } catch {}
+
+  const mergedMap: Record<string, StudentAssessmentRecord> = {};
   try {
     const q = collection(db, path);
-    const snapshot = await getDocs(q);
-    const records: StudentAssessmentRecord[] = [];
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const snapshot = isOnline
+      ? await getDocsFromServer(q).catch(() => getDocs(q))
+      : await getDocs(q);
+    const isAuthoritative = !snapshot.metadata.fromCache;
+
+    if (!isAuthoritative) {
+      allLocal.forEach(lr => {
+        if (isStudentMatch(lr)) mergedMap[lr.id] = pickNewerRecord(mergedMap[lr.id], lr);
+      });
+    }
+
     snapshot.forEach(docSnap => {
+      if (deleted.has(docSnap.id) || pendingCaRecordDeletes.has(docSnap.id)) return;
       const data = docSnap.data() as StudentAssessmentRecord;
-      if (
-        data.studentId === studentId ||
-        (data.admissionNumber && data.admissionNumber.toUpperCase() === admissionNumber.toUpperCase())
-      ) {
-        records.push({ ...data, id: docSnap.id });
+      if (isStudentMatch(data)) {
+        const rec = { ...data, id: docSnap.id };
+        mergedMap[rec.id] = pickNewerRecord(mergedMap[rec.id], rec);
       }
     });
 
-    // Check local cache
-    try {
-      const local = localStorage.getItem('prime_edutech_ca_records');
-      if (local) {
-        const parsed: StudentAssessmentRecord[] = JSON.parse(local);
-        parsed.forEach(lr => {
-          if (
-            (lr.studentId === studentId || lr.admissionNumber.toUpperCase() === admissionNumber.toUpperCase()) &&
-            !records.some(r => r.id === lr.id)
-          ) {
-            records.push(lr);
-          }
-        });
+    pendingCaRecordSaves.forEach((pr, id) => {
+      if (!deleted.has(id) && !pendingCaRecordDeletes.has(id) && isStudentMatch(pr)) {
+        mergedMap[id] = pickNewerRecord(mergedMap[id], pr);
       }
-    } catch {}
+    });
 
-    return records;
+    const result = Object.values(mergedMap);
+    if (isAuthoritative) {
+      const others = allLocal.filter(r => !isStudentMatch(r));
+      try {
+        localStorage.setItem('prime_edutech_ca_records', JSON.stringify([...others, ...result]));
+      } catch {}
+    }
+    return result;
   } catch (err) {
     console.warn('Fallback fetching cumulative student records:', err);
-    try {
-      const local = localStorage.getItem('prime_edutech_ca_records');
-      if (local) {
-        const parsed: StudentAssessmentRecord[] = JSON.parse(local);
-        return parsed.filter(
-          r => r.studentId === studentId || r.admissionNumber.toUpperCase() === admissionNumber.toUpperCase()
-        );
+    allLocal.forEach(lr => {
+      if (isStudentMatch(lr)) mergedMap[lr.id] = pickNewerRecord(mergedMap[lr.id], lr);
+    });
+    pendingCaRecordSaves.forEach((pr, id) => {
+      if (!deleted.has(id) && !pendingCaRecordDeletes.has(id) && isStudentMatch(pr)) {
+        mergedMap[id] = pickNewerRecord(mergedMap[id], pr);
       }
-    } catch {}
-    return [];
+    });
+    return Object.values(mergedMap);
   }
 }
 
@@ -2571,26 +4392,53 @@ export async function updateStudentProfile(
   studentId: string,
   updates: Partial<Student>
 ): Promise<Student> {
-  const cleanUpdates = sanitizeFirestoreData(updates);
-  try {
-    await setDoc(doc(db, 'students', studentId), cleanUpdates, { merge: true });
-  } catch (err) {
-    console.warn('Firestore write warning for student profile:', err);
-  }
+  const path = `students/${studentId}`;
+  pendingStudentDeletes.delete(studentId);
+  removeTombstone(DELETED_STUDENTS_KEY, studentId);
 
-  // Update in localStorage
+  const cleanUpdates = sanitizeFirestoreData<Partial<Student>>({
+    ...updates,
+    updatedAt: new Date().toISOString()
+  });
+
+  let mergedStudent: Student = { id: studentId, ...cleanUpdates } as Student;
   try {
-    const stored = localStorage.getItem('prime_edutech_saved_students');
-    if (stored) {
-      const list = JSON.parse(stored);
-      const updatedList = list.map((s: any) =>
-        s.id === studentId || s.admissionNumber === cleanUpdates.admissionNumber ? { ...s, ...cleanUpdates } : s
-      );
-      localStorage.setItem('prime_edutech_saved_students', JSON.stringify(updatedList));
+    const list = readLocalStudentsList();
+    const idx = list.findIndex(
+      s => s.id === studentId || (cleanUpdates.admissionNumber && s.admissionNumber === cleanUpdates.admissionNumber)
+    );
+    if (idx >= 0) {
+      mergedStudent = { ...list[idx], ...cleanUpdates, id: studentId };
+      list[idx] = mergedStudent;
+    } else {
+      list.push(mergedStudent);
+    }
+    writeLocalStudentsList(list);
+  } catch {}
+
+  try {
+    const activeRaw = sessionStorage.getItem('prime_edutech_active_student');
+    if (activeRaw) {
+      const parsed = JSON.parse(activeRaw) as Student;
+      if (parsed.id === studentId) {
+        mergedStudent = { ...parsed, ...mergedStudent };
+        sessionStorage.setItem('prime_edutech_active_student', JSON.stringify(mergedStudent));
+      }
     }
   } catch {}
 
-  return cleanUpdates as Student;
+  pendingStudentSaves.set(studentId, mergedStudent);
+  broadcastEntitySync('studentsUpdated', 'STUDENTS_UPDATED', { student: mergedStudent, studentId });
+
+  const writePromise = setDoc(doc(db, 'students', studentId), cleanUpdates, { merge: true }).then(() => {
+    const curr = pendingStudentSaves.get(studentId);
+    if (curr && curr.updatedAt === mergedStudent.updatedAt) {
+      pendingStudentSaves.delete(studentId);
+    }
+  });
+
+  await commitFirestoreFast(writePromise, OperationType.WRITE, path);
+  return mergedStudent;
 }
 
 // Comprehensive Student Authentication (Passcode, Admission No, or Connected Email + Password)
@@ -2603,7 +4451,6 @@ export async function authenticateStudentWithCredentials(
     return { success: false, error: 'Please enter your unique Passcode, Admission Number, or Connected Email.' };
   }
 
-  const path = 'students';
   try {
     const allStudents = await fetchStudents();
     const cleanUpper = cleanId.toUpperCase();
@@ -2634,10 +4481,11 @@ export async function authenticateStudentWithCredentials(
     console.warn('Student authentication check fallback:', err);
   }
 
-  // Local fallback
-  const fallback = DEFAULT_STUDENTS.find(
-    s => (s.accessCode && s.accessCode.toUpperCase() === cleanId.toUpperCase()) ||
-         s.admissionNumber.toUpperCase() === cleanId.toUpperCase()
+  const deleted = getTombstoneSet(DELETED_STUDENTS_KEY);
+  const fallback = readLocalStudentsList().find(
+    s => !deleted.has(s.id) &&
+         ((s.accessCode && s.accessCode.toUpperCase() === cleanId.toUpperCase()) ||
+          s.admissionNumber.toUpperCase() === cleanId.toUpperCase())
   );
   if (fallback) {
     return { success: true, student: fallback };
@@ -2665,15 +4513,21 @@ export async function fetchStudentTermReport(
 
   try {
     const docRef = doc(db, 'termReports', reportDocId);
-    const snap = await getDoc(docRef);
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const snap = isOnline
+      ? await getDocFromServer(docRef).catch(() => getDoc(docRef))
+      : await getDoc(docRef);
     if (snap.exists()) {
-      return snap.data() as StudentTermReportData;
+      const serverData = { id: snap.id, ...snap.data() } as StudentTermReportData;
+      try {
+        localStorage.setItem(`prime_term_report_${reportDocId}`, JSON.stringify(serverData));
+      } catch {}
+      return serverData;
     }
   } catch (err) {
     console.warn('Firestore fetch warning for termReport, checking local cache:', err);
   }
 
-  // Check localStorage
   try {
     const local = localStorage.getItem(`prime_term_report_${reportDocId}`);
     if (local) {
@@ -2681,7 +4535,6 @@ export async function fetchStudentTermReport(
     }
   } catch {}
 
-  // Dynamic defaults using actual student data (no stale sample overrides)
   const clsUpper = (fallbackStudent?.classGrade || '').toUpperCase();
   return {
     id: reportDocId,
@@ -2714,38 +4567,29 @@ export async function fetchStudentTermReport(
 export async function saveStudentTermReport(report: StudentTermReportData): Promise<void> {
   const cleanId = (report.id || `report_${report.studentId}_${report.academicSession}_${report.term}`)
     .replace(/[^a-zA-Z0-9_-]/g, '_');
-  const cleanReport = sanitizeFirestoreData({
+  const cleanReport = sanitizeFirestoreData<StudentTermReportData>({
     ...report,
     id: cleanId,
     updatedAt: new Date().toISOString()
   });
 
   try {
-    await setDoc(doc(db, 'termReports', cleanId), cleanReport, { merge: true });
-  } catch (err) {
-    console.warn('Firestore write warning for termReport:', err);
-  }
-
-  // Always mirror in localStorage
-  try {
-    localStorage.setItem(`prime_term_report_${cleanId}`, JSON.stringify(report));
+    localStorage.setItem(`prime_term_report_${cleanId}`, JSON.stringify(cleanReport));
     const allKey = 'prime_term_reports_all';
     const existing = localStorage.getItem(allKey);
     const list: StudentTermReportData[] = existing ? JSON.parse(existing) : [];
     const filtered = list.filter(r => r.id !== cleanId);
-    filtered.push(report);
+    filtered.push(cleanReport);
     localStorage.setItem(allKey, JSON.stringify(filtered));
   } catch {}
 
-  // Broadcast real-time update event
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('termReportsUpdated', { detail: report }));
-    try {
-      const channel = new BroadcastChannel('prime_cbt_sync_channel');
-      channel.postMessage({ type: 'TERM_REPORT_UPDATED', reportId: cleanId });
-      channel.close();
-    } catch {}
-  }
+  broadcastEntitySync('termReportsUpdated', 'TERM_REPORT_UPDATED', { reportId: cleanId, ...cleanReport });
+
+  await commitFirestoreFast(
+    setDoc(doc(db, 'termReports', cleanId), cleanReport, { merge: true }),
+    OperationType.WRITE,
+    `termReports/${cleanId}`
+  );
 }
 
 export async function fetchClassTermReports(
@@ -2754,31 +4598,55 @@ export async function fetchClassTermReports(
   term: string
 ): Promise<StudentTermReportData[]> {
   const mergedMap: Record<string, StudentTermReportData> = {};
+  const allKey = 'prime_term_reports_all';
 
+  let allLocal: StudentTermReportData[] = [];
   try {
-    const allKey = 'prime_term_reports_all';
     const existing = localStorage.getItem(allKey);
     if (existing) {
-      const list: StudentTermReportData[] = JSON.parse(existing);
-      list.forEach(r => {
-        if (r.classGrade === classGrade && r.academicSession === academicSession && r.term === term) {
-          mergedMap[r.id] = r;
-        }
-      });
+      const parsed = JSON.parse(existing);
+      if (Array.isArray(parsed)) allLocal = parsed;
     }
   } catch {}
 
   try {
     const q = query(collection(db, 'termReports'), where('classGrade', '==', classGrade));
-    const snap = await getDocs(q);
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const snap = isOnline
+      ? await getDocsFromServer(q).catch(() => getDocs(q))
+      : await getDocs(q);
+    const isAuthoritative = !snap.metadata.fromCache;
+
+    if (!isAuthoritative) {
+      allLocal.forEach(r => {
+        if (r.classGrade === classGrade && r.academicSession === academicSession && r.term === term) {
+          mergedMap[r.id] = r;
+        }
+      });
+    }
+
     snap.forEach(d => {
-      const r = d.data() as StudentTermReportData;
+      const r = { id: d.id, ...d.data() } as StudentTermReportData;
       if (r.academicSession === academicSession && r.term === term) {
         mergedMap[r.id] = r;
       }
     });
+
+    if (isAuthoritative) {
+      const others = allLocal.filter(
+        r => !(r.classGrade === classGrade && r.academicSession === academicSession && r.term === term)
+      );
+      try {
+        localStorage.setItem(allKey, JSON.stringify([...others, ...Object.values(mergedMap)]));
+      } catch {}
+    }
   } catch (err) {
     console.warn('Firestore fetchClassTermReports fallback to local:', err);
+    allLocal.forEach(r => {
+      if (r.classGrade === classGrade && r.academicSession === academicSession && r.term === term) {
+        mergedMap[r.id] = r;
+      }
+    });
   }
 
   return Object.values(mergedMap);

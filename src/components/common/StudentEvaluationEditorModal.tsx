@@ -9,7 +9,8 @@ import {
   DollarSign,
   User,
   Sparkles,
-  FileText
+  FileText,
+  AlertCircle
 } from 'lucide-react';
 import {
   Student,
@@ -42,6 +43,7 @@ export const StudentEvaluationEditorModal: React.FC<StudentEvaluationEditorModal
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const [formData, setFormData] = useState<StudentTermReportData>({
     id: `report_${student.id}_${academicSession.replace('/', '-')}_${term.replace(/\s+/g, '')}`,
@@ -85,17 +87,23 @@ export const StudentEvaluationEditorModal: React.FC<StudentEvaluationEditorModal
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
+    setSaveError(null);
+    const payload: StudentTermReportData = {
+      ...formData,
+      updatedAt: new Date().toISOString()
+    };
     try {
-      await saveStudentTermReport(formData);
+      await saveStudentTermReport(payload);
+      setFormData(payload);
       setSaveSuccess(true);
-      if (onSaved) onSaved(formData);
+      if (onSaved) onSaved(payload);
       setTimeout(() => {
         setSaveSuccess(false);
         onClose();
       }, 1000);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error saving student term evaluation:', err);
-      alert('Failed to save student evaluation.');
+      setSaveError(err?.message || 'Failed to save student evaluation to database. Please try again.');
     } finally {
       setIsSaving(false);
     }
@@ -150,6 +158,12 @@ export const StudentEvaluationEditorModal: React.FC<StudentEvaluationEditorModal
 
         {/* Modal Form Body */}
         <form onSubmit={handleSave} className="p-4 sm:p-6 overflow-y-auto space-y-6 text-xs flex-1">
+          {saveError && (
+            <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{saveError}</span>
+            </div>
+          )}
           {/* Section 1: Candidate Bio Data on Report Slip */}
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
             <h4 className="font-bold text-slate-900 text-xs uppercase tracking-wider flex items-center gap-1.5">

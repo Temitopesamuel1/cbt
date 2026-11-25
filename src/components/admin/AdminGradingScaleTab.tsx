@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   FileSpreadsheet,
   Award,
@@ -45,16 +45,43 @@ export const AdminGradingScaleTab: React.FC<AdminGradingScaleTabProps> = ({
   );
 
   const [saving, setSaving] = useState(false);
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    tone: 'amber' | 'rose';
+    onConfirm: () => Promise<void>;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+
+  useEffect(() => {
+    setSession(settings.academicSession || '2025/2026');
+    setTerm(settings.currentTerm || '1st Term');
+    setPassMark(settings.passMarkPercentage ?? 50);
+    setImmediateResult(settings.allowImmediateResultViewing ?? true);
+    setCaWeights(resolveCaWeights(settings.caWeights));
+    setGradingScale(
+      settings.gradingScale && settings.gradingScale.length > 0
+        ? settings.gradingScale
+        : DEFAULT_GRADE_SCALE
+    );
+  }, [settings]);
 
   const totalCaMax = (caWeights.assignmentMax ?? 10) + (caWeights.firstCaMax ?? 20) + (caWeights.secondCaMax ?? 20);
   const grandTotal = totalCaMax + (caWeights.examMax ?? 50);
 
   const handleResetDefaults = () => {
-    if (confirm('Reset Continuous Assessment weights (10/20/20/50), headings, and Grading Scale to standard defaults?')) {
-      setCaWeights(resolveCaWeights(DEFAULT_CA_WEIGHTS));
-      setGradingScale(DEFAULT_GRADE_SCALE);
-      showNotification('Grading system reset to standard 10/20/20/50 defaults.');
-    }
+    setPendingConfirm({
+      title: 'Reset Assessment & Grading Defaults',
+      message: 'Reset Continuous Assessment weights (10/20/20/50), headings, and Grading Scale to standard defaults?',
+      confirmLabel: 'Reset Defaults',
+      tone: 'amber',
+      onConfirm: async () => {
+        setCaWeights(resolveCaWeights(DEFAULT_CA_WEIGHTS));
+        setGradingScale(DEFAULT_GRADE_SCALE);
+        showNotification('Grading system reset to standard 10/20/20/50 defaults. Click "Save Policies & Scale" to publish.');
+      }
+    });
   };
 
   const handleGradeScaleChange = (index: number, field: keyof GradeScaleItem, value: any) => {
@@ -68,15 +95,7 @@ export const AdminGradingScaleTab: React.FC<AdminGradingScaleTabProps> = ({
     });
   };
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (grandTotal !== 100) {
-      if (!confirm(`Warning: The sum of CA weights and Examination (${grandTotal}) is not 100. Do you still wish to proceed?`)) {
-        return;
-      }
-    }
-
+  const performSave = async () => {
     setSaving(true);
     const updatedSettings: SchoolSettings = {
       ...settings,
@@ -97,6 +116,23 @@ export const AdminGradingScaleTab: React.FC<AdminGradingScaleTabProps> = ({
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (grandTotal !== 100) {
+      setPendingConfirm({
+        title: 'Confirm Non-Standard Total Weight',
+        message: `Warning: The sum of CA weights and Examination (${grandTotal}) is not 100. Do you still wish to proceed and save?`,
+        confirmLabel: 'Save Anyway',
+        tone: 'amber',
+        onConfirm: performSave
+      });
+      return;
+    }
+
+    await performSave();
   };
 
   return (
@@ -417,6 +453,47 @@ export const AdminGradingScaleTab: React.FC<AdminGradingScaleTabProps> = ({
           </button>
         </div>
       </form>
+
+      {/* In-app Confirmation Modal */}
+      {pendingConfirm && (
+        <div className="fixed inset-0 z-70 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-slate-900 text-white px-5 py-4 flex items-center gap-2.5 border-b border-amber-500">
+              <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
+              <h3 className="font-bold text-sm">{pendingConfirm.title}</h3>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-700 leading-relaxed">{pendingConfirm.message}</p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={confirmBusy}
+                  onClick={() => setPendingConfirm(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={confirmBusy}
+                  onClick={async () => {
+                    setConfirmBusy(true);
+                    try {
+                      await pendingConfirm.onConfirm();
+                    } finally {
+                      setConfirmBusy(false);
+                      setPendingConfirm(null);
+                    }
+                  }}
+                  className="px-4 py-2 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  {confirmBusy ? 'Applying...' : pendingConfirm.confirmLabel}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

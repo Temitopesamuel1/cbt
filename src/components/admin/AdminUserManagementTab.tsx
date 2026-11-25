@@ -46,6 +46,8 @@ export const AdminUserManagementTab: React.FC<AdminUserManagementTabProps> = ({
   const [editingAdmin, setEditingAdmin] = useState<AdminUser | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({});
+  const [pendingDeleteAdmin, setPendingDeleteAdmin] = useState<AdminUser | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   const [form, setForm] = useState<{
     fullName: string;
@@ -147,20 +149,26 @@ export const AdminUserManagementTab: React.FC<AdminUserManagementTabProps> = ({
     }
   };
 
-  const handleDelete = async (admin: AdminUser) => {
+  const handleDelete = (admin: AdminUser) => {
     if (admin.isMainSuperAdmin || admin.email.toLowerCase() === 'fathertemitope@gmail.com') {
       showNotification('The Chief Super Administrator (fathertemitope@gmail.com) is permanently protected and cannot be deleted.', 'error');
       return;
     }
+    setPendingDeleteAdmin(admin);
+  };
 
-    if (confirm(`Are you sure you want to delete administrator "${admin.fullName}" (${admin.email})? They will immediately lose access to the administrative console.`)) {
-      try {
-        await deleteAdmin(admin.id);
-        onAdminsUpdated();
-        showNotification(`Administrator "${admin.fullName}" has been removed.`);
-      } catch (err: any) {
-        showNotification(err.message || 'Failed to delete administrator.', 'error');
-      }
+  const confirmDeleteAdmin = async () => {
+    if (!pendingDeleteAdmin) return;
+    setDeleteBusy(true);
+    try {
+      await deleteAdmin(pendingDeleteAdmin.id);
+      onAdminsUpdated();
+      showNotification(`Administrator "${pendingDeleteAdmin.fullName}" has been removed.`);
+      setPendingDeleteAdmin(null);
+    } catch (err: any) {
+      showNotification(err.message || 'Failed to delete administrator.', 'error');
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -477,6 +485,41 @@ export const AdminUserManagementTab: React.FC<AdminUserManagementTabProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* In-app Delete Confirmation Modal */}
+      {pendingDeleteAdmin && (
+        <div className="fixed inset-0 z-70 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-rose-950 text-white px-5 py-4 flex items-center gap-2.5">
+              <AlertCircle className="w-5 h-5 text-rose-300 shrink-0" />
+              <h3 className="font-bold text-sm">Delete Administrator</h3>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-700 leading-relaxed">
+                Are you sure you want to delete administrator <strong>"{pendingDeleteAdmin.fullName}"</strong> ({pendingDeleteAdmin.email})? They will immediately lose access to the administrative console.
+              </p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => setPendingDeleteAdmin(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={confirmDeleteAdmin}
+                  className="px-4 py-2 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  {deleteBusy ? 'Deleting...' : 'Delete Administrator'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FileSpreadsheet,
   Save,
@@ -25,14 +25,22 @@ import {
   Student,
   Subject,
   SchoolClass,
+  Examination,
   StudentAssessmentRecord,
   SchoolSettings,
   calculateGrade,
   calculateGradePoint,
   DEFAULT_CA_WEIGHTS,
   CaWeightsConfig,
+  CbtExamEntry,
+  CbtTargetComponent,
   resolveCaWeights,
-  generateStudentAccessCode
+  resolveExamTargetComponent,
+  getTargetComponentMax,
+  formatTargetComponentLabel,
+  generateStudentAccessCode,
+  enrichSubmissionsWithOrdinals,
+  formatOrdinalExamLabel
 } from '../../types/cbt';
 import {
   fetchAssessmentRecords,
@@ -40,6 +48,7 @@ import {
   saveAssessmentBatch,
   deleteAssessmentRecord,
   fetchSubmissions,
+  fetchExaminations,
   saveStudent,
   saveSchoolSettings
 } from '../../services/firebase';
@@ -51,6 +60,7 @@ interface AdminBroadsheetTabProps {
   students: Student[];
   subjects: Subject[];
   classes: SchoolClass[];
+  exams?: Examination[];
   settings: SchoolSettings;
   showNotification: (text: string, type?: 'success' | 'error') => void;
   onRefreshData?: () => void;
@@ -61,6 +71,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
   students,
   subjects,
   classes,
+  exams = [],
   settings,
   showNotification,
   onRefreshData,
@@ -79,11 +90,18 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
   const [savedSuccessId, setSavedSuccessId] = useState<string | null>(null);
   const [savingAll, setSavingAll] = useState(false);
   const [searchFilter, setSearchFilter] = useState('');
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const hasUnsavedChangesRef = useRef(false);
+  useEffect(() => {
+    hasUnsavedChangesRef.current = hasUnsavedChanges;
+  }, [hasUnsavedChanges]);
 
   // Official Slip Preview & Batch Printing Modals
   const [viewingOfficialSlipStudent, setViewingOfficialSlipStudent] = useState<Student | null>(null);
   const [editingEvaluationStudent, setEditingEvaluationStudent] = useState<Student | null>(null);
   const [showBatchModal, setShowBatchModal] = useState(false);
+  const [pendingDeleteTarget, setPendingDeleteTarget] = useState<{ studentId: string; studentName: string } | null>(null);
+  const [deletingRowBusy, setDeletingRowBusy] = useState(false);
 
   // Add New Student Entry Modal
   const [showAddEntryModal, setShowAddEntryModal] = useState(false);
@@ -138,7 +156,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
   const currentSubjectName = currentSubject ? currentSubject.name : 'Subject';
 
   // Load CA Records for this combination
-  const loadRecords = async () => {
+  const loadRecords = useCallback(async () => {
     if (!selectedSubjectId || !selectedClass) return;
     setLoading(true);
     try {
@@ -148,16 +166,43 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
         map[r.studentId] = r;
       });
       setRecords(map);
+      setHasUnsavedChanges(false);
     } catch (err) {
       console.warn('Broadsheet load error:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedSubjectId, selectedClass, academicSession, term]);
 
   useEffect(() => {
     loadRecords();
-  }, [selectedSubjectId, selectedClass, academicSession, term]);
+  }, [loadRecords]);
+
+  useEffect(() => {
+    const handleExternalCaSync = () => {
+      if (!hasUnsavedChangesRef.current) {
+        loadRecords();
+      }
+    };
+    window.addEventListener('caRecordsUpdated', handleExternalCaSync);
+    let bc: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        bc = new BroadcastChannel('prime_cbt_sync_channel');
+        bc.onmessage = (event) => {
+          if (event.data?.type === 'CA_RECORDS_UPDATED' && !hasUnsavedChangesRef.current) {
+            loadRecords();
+          }
+        };
+      } catch {
+        // Ignore BroadcastChannel errors
+      }
+    }
+    return () => {
+      window.removeEventListener('caRecordsUpdated', handleExternalCaSync);
+      if (bc) bc.close();
+    };
+  }, [loadRecords]);
 
   // Merge enrolled class students with any custom added broadsheet entries
   const classStudents = students.filter(s => s.classGrade === selectedClass);
@@ -220,6 +265,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     field: 'assignmentScore' | 'projectScore' | 'testScore' | 'examScore' | 'teacherComment' | 'studentName' | 'admissionNumber',
     value: string
   ) => {
+    setHasUnsavedChanges(true);
     const entry = combinedEntries.find(e => e.studentId === studentId);
     const existingName = entry ? entry.fullName : 'Student';
     const existingAdm = entry ? entry.admissionNumber : '';
@@ -331,6 +377,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
       }
 
       setSavedSuccessId(entry.studentId);
+      setHasUnsavedChanges(false);
       setTimeout(() => setSavedSuccessId(null), 2500);
       showNotification(`Saved marks for ${toSave.studentName} (${toSave.totalScore}/100 - ${toSave.grade})!`);
     } catch (err: any) {
@@ -340,25 +387,31 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     }
   };
 
-  // Delete broadsheet record entry
-  const handleDeleteRow = async (studentId: string, studentName: string) => {
-    if (!confirm(`Delete broadsheet assessment marks for "${studentName}" in ${currentSubjectName}?`)) {
-      return;
-    }
+  // Delete broadsheet record entry via in-app modal
+  const handleDeleteRow = (studentId: string, studentName: string) => {
+    setPendingDeleteTarget({ studentId, studentName });
+  };
 
+  const confirmDeleteRow = async () => {
+    if (!pendingDeleteTarget) return;
+    const { studentId, studentName } = pendingDeleteTarget;
     const rec = records[studentId];
-    if (rec && rec.id) {
-      try {
+    setDeletingRowBusy(true);
+    try {
+      if (rec && rec.id) {
         await deleteAssessmentRecord(rec.id);
-        setRecords(prev => {
-          const copy = { ...prev };
-          delete copy[studentId];
-          return copy;
-        });
-        showNotification(`Assessment marks for ${studentName} removed.`);
-      } catch (err) {
-        showNotification('Failed to remove record.', 'error');
       }
+      setRecords(prev => {
+        const copy = { ...prev };
+        delete copy[studentId];
+        return copy;
+      });
+      showNotification(`Assessment marks for ${studentName} removed.`);
+      setPendingDeleteTarget(null);
+    } catch {
+      showNotification('Failed to remove record.', 'error');
+    } finally {
+      setDeletingRowBusy(false);
     }
   };
 
@@ -390,6 +443,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
 
     try {
       await saveAssessmentBatch(toSaveList);
+      setHasUnsavedChanges(false);
       showNotification(`Entire broadsheet (${toSaveList.length} student records) committed to database!`);
     } catch (err: any) {
       showNotification('Could not save all records to database.', 'error');
@@ -503,24 +557,34 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     }
   };
 
-  // Auto-fill exam column from candidate CBT submissions
+  // Auto-fill 1st CA, 2nd CA, or Term's Exam column from verified CBT submissions for each student+subject
   const handleAutoFillFromCbt = async () => {
     setLoading(true);
     try {
-      const submissions = await fetchSubmissions();
+      const [rawSubmissions, fetchedExams] = await Promise.all([
+        fetchSubmissions(),
+        exams.length > 0 ? Promise.resolve(exams) : fetchExaminations(false).catch(() => [])
+      ]);
+      const submissions = enrichSubmissionsWithOrdinals(rawSubmissions || []);
+      const examById = new Map<string, Examination>();
+      fetchedExams.forEach(ex => { if (ex?.id) examById.set(ex.id, ex); });
+
       let filledCount = 0;
+      const syncedColumns = new Set<string>();
 
       setRecords(prev => {
         const copy = { ...prev };
 
         for (const entry of combinedEntries) {
-          const subMatch = submissions.find(s => {
-            const matchStudent = s.studentId === entry.studentId || s.admissionNumber.toUpperCase() === entry.admissionNumber.toUpperCase();
-            const matchSubj = s.subject.trim().toLowerCase() === currentSubjectName.trim().toLowerCase();
-            return matchStudent && matchSubj;
-          });
+          const studentMatches = submissions
+            .filter(s => {
+              const matchStudent = s.studentId === entry.studentId || s.admissionNumber.toUpperCase() === entry.admissionNumber.toUpperCase();
+              const matchSubj = s.subject.trim().toLowerCase() === currentSubjectName.trim().toLowerCase();
+              return matchStudent && matchSubj;
+            })
+            .sort((a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime());
 
-          if (subMatch) {
+          if (studentMatches.length > 0) {
             filledCount++;
             const existing = copy[entry.studentId] || {
               id: `ca_${entry.studentId}_${selectedSubjectId}_${academicSession}_${term}`.replace(/[^a-zA-Z0-9_-]/g, '_'),
@@ -533,6 +597,8 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
               academicSession,
               term,
               assignmentScore: 0,
+              firstCaScore: 0,
+              secondCaScore: 0,
               projectScore: 0,
               testScore: 0,
               examScore: 0,
@@ -542,17 +608,71 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
               updatedAt: new Date().toISOString()
             };
 
-            const scaledExam = Math.round((subMatch.percentage / 100) * caWeights.examMax);
-            const total = existing.assignmentScore + existing.projectScore + existing.testScore + scaledExam;
-            const gradeInfo = calculateGrade(total);
+            const examEntries: CbtExamEntry[] = studentMatches.map((sub, i) => {
+              const targetComp: CbtTargetComponent = resolveExamTargetComponent(examById.get(sub.examId), sub);
+              const compMax = getTargetComponentMax(targetComp, caWeights);
+              const scaled = Math.min(compMax, Math.max(0, Math.round(((sub.percentage || 0) / 100) * compMax)));
+              syncedColumns.add(formatTargetComponentLabel(targetComp, caWeights));
+              return {
+                submissionId: sub.id || `sub_${sub.examId}_${i}`,
+                examId: sub.examId,
+                examTitle: sub.examTitle,
+                sittingNumber: i + 1,
+                sittingLabel: formatOrdinalExamLabel(i + 1),
+                targetCaComponent: targetComp,
+                rawScore: sub.score,
+                totalQuestions: sub.totalQuestions,
+                percentage: sub.percentage,
+                scaledScore: scaled,
+                examMax: compMax,
+                submittedAt: sub.submittedAt
+              };
+            });
+
+            let firstCa = existing.firstCaScore ?? existing.testScore ?? 0;
+            let secondCa = existing.secondCaScore ?? existing.projectScore ?? 0;
+            let examVal = existing.examScore ?? 0;
+
+            const firstCaEntries = examEntries.filter(e => e.targetCaComponent === 'first_ca');
+            if (firstCaEntries.length > 0) {
+              firstCa = Math.min(
+                caWeights.firstCaMax,
+                Math.round(firstCaEntries.reduce((sum, item) => sum + item.scaledScore, 0) / firstCaEntries.length)
+              );
+            }
+
+            const secondCaEntries = examEntries.filter(e => e.targetCaComponent === 'second_ca');
+            if (secondCaEntries.length > 0) {
+              secondCa = Math.min(
+                caWeights.secondCaMax,
+                Math.round(secondCaEntries.reduce((sum, item) => sum + item.scaledScore, 0) / secondCaEntries.length)
+              );
+            }
+
+            const termExamEntries = examEntries.filter(e => (e.targetCaComponent || 'exam') === 'exam');
+            if (termExamEntries.length > 0) {
+              examVal = Math.min(
+                caWeights.examMax,
+                Math.round(termExamEntries.reduce((sum, item) => sum + item.scaledScore, 0) / termExamEntries.length)
+              );
+            }
+
+            const total = Math.min(totalOverallMax, (existing.assignmentScore || 0) + firstCa + secondCa + examVal);
+            const pct = totalOverallMax > 0 ? Math.round((total / totalOverallMax) * 100) : total;
+            const gradeInfo = calculateGrade(pct);
 
             copy[entry.studentId] = {
               ...existing,
-              examScore: scaledExam,
-              totalScore: Math.min(100, total),
+              firstCaScore: firstCa,
+              secondCaScore: secondCa,
+              testScore: firstCa,
+              projectScore: secondCa,
+              examScore: examVal,
+              totalScore: total,
               grade: gradeInfo.grade,
               remark: gradeInfo.remark,
-              cbtSubmissionId: subMatch.id,
+              cbtSubmissionId: studentMatches[studentMatches.length - 1].id,
+              examEntries,
               isAutoSynced: true,
               updatedAt: new Date().toISOString()
             };
@@ -561,8 +681,10 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
         return copy;
       });
 
-      showNotification(`Auto-filled ${filledCount} exam scores directly from verified CBT submissions!`);
-    } catch (err) {
+      setHasUnsavedChanges(true);
+      const colSummary = Array.from(syncedColumns).join(', ') || caWeights.examLabel;
+      showNotification(`Auto-filled ${filledCount} student record(s) into ${colSummary} from CBT sittings! All fields remain editable.`);
+    } catch {
       showNotification('Failed to auto-fill CBT scores.', 'error');
     } finally {
       setLoading(false);
@@ -1002,6 +1124,21 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                         onChange={(e) => handleScoreChange(entry.studentId, 'testScore', e.target.value)}
                         className="w-12 text-center py-1 bg-white border border-slate-300 rounded-lg font-bold text-slate-900 text-xs"
                       />
+                      {rec?.examEntries && rec.examEntries.some(e => e.targetCaComponent === 'first_ca') && (
+                        <div className="mt-1 flex flex-wrap justify-center gap-0.5 max-w-[90px] mx-auto">
+                          {rec.examEntries
+                            .filter(e => e.targetCaComponent === 'first_ca')
+                            .map((ent, eIdx) => (
+                              <span
+                                key={ent.submissionId || eIdx}
+                                className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-blue-100 text-blue-950 border border-blue-300"
+                                title={`${ent.sittingLabel} (${ent.examTitle}): ${ent.rawScore}/${ent.totalQuestions} (${ent.percentage}%)`}
+                              >
+                                CBT: {ent.scaledScore}
+                              </span>
+                            ))}
+                        </div>
+                      )}
                     </td>
 
                     {/* 2nd CA (projectScore) */}
@@ -1014,6 +1151,21 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                         onChange={(e) => handleScoreChange(entry.studentId, 'projectScore', e.target.value)}
                         className="w-12 text-center py-1 bg-white border border-slate-300 rounded-lg font-bold text-slate-900 text-xs"
                       />
+                      {rec?.examEntries && rec.examEntries.some(e => e.targetCaComponent === 'second_ca') && (
+                        <div className="mt-1 flex flex-wrap justify-center gap-0.5 max-w-[90px] mx-auto">
+                          {rec.examEntries
+                            .filter(e => e.targetCaComponent === 'second_ca')
+                            .map((ent, eIdx) => (
+                              <span
+                                key={ent.submissionId || eIdx}
+                                className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-indigo-100 text-indigo-950 border border-indigo-300"
+                                title={`${ent.sittingLabel} (${ent.examTitle}): ${ent.rawScore}/${ent.totalQuestions} (${ent.percentage}%)`}
+                              >
+                                CBT: {ent.scaledScore}
+                              </span>
+                            ))}
+                        </div>
+                      )}
                     </td>
 
                     {/* CA Total (40) */}
@@ -1021,7 +1173,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                       {caTotal}
                     </td>
 
-                    {/* Exam (60) */}
+                    {/* Exam */}
                     <td className="py-2 px-1 text-center">
                       <input
                         type="number"
@@ -1031,6 +1183,21 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                         onChange={(e) => handleScoreChange(entry.studentId, 'examScore', e.target.value)}
                         className="w-12 text-center py-1 bg-blue-50/60 border border-blue-300 rounded-lg font-bold text-blue-950 text-xs"
                       />
+                      {rec?.examEntries && rec.examEntries.some(e => (e.targetCaComponent || 'exam') === 'exam') && (
+                        <div className="mt-1 flex flex-wrap justify-center gap-0.5 max-w-[110px] mx-auto">
+                          {rec.examEntries
+                            .filter(e => (e.targetCaComponent || 'exam') === 'exam')
+                            .map((ent, eIdx) => (
+                              <span
+                                key={ent.submissionId || eIdx}
+                                className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-amber-100 text-amber-950 border border-amber-300"
+                                title={`${ent.sittingLabel} (${ent.examTitle}): ${ent.rawScore}/${ent.totalQuestions} (${ent.percentage}%)`}
+                              >
+                                {ent.sittingLabel.replace(' Exam', '')}: {ent.scaledScore}
+                              </span>
+                            ))}
+                        </div>
+                      )}
                     </td>
 
                     {/* Total (100) */}
@@ -1459,6 +1626,41 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
           academicSession={academicSession}
           term={term}
         />
+      )}
+
+      {/* In-app Delete Row Confirmation Modal */}
+      {pendingDeleteTarget && (
+        <div className="fixed inset-0 z-70 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-rose-950 text-white px-5 py-4 flex items-center gap-2.5">
+              <AlertCircle className="w-5 h-5 text-rose-300 shrink-0" />
+              <h3 className="font-bold text-sm">Delete Broadsheet Assessment Entry</h3>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-700 leading-relaxed">
+                Delete broadsheet assessment marks for <strong>"{pendingDeleteTarget.studentName}"</strong> in {currentSubjectName}?
+              </p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={deletingRowBusy}
+                  onClick={() => setPendingDeleteTarget(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingRowBusy}
+                  onClick={confirmDeleteRow}
+                  className="px-4 py-2 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  {deletingRowBusy ? 'Deleting...' : 'Delete Entry'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -56,10 +56,16 @@ import {
   calculateGrade,
   generateStudentAccessCode,
   StaffMember,
-  checkExamTimeWindow
+  checkExamTimeWindow,
+  enrichSubmissionsWithOrdinals,
+  CbtTargetComponent,
+  resolveCaWeights,
+  resolveExamTargetComponent,
+  formatTargetComponentLabel
 } from '../../types/cbt';
 import {
   fetchExaminations,
+  subscribeExaminations,
   saveExamination,
   deleteExamination,
   deleteExaminationsBatch,
@@ -70,6 +76,7 @@ import {
   fetchStudents,
   saveStudent,
   deleteStudent,
+  subscribeStudents,
   fetchSchoolClasses,
   saveSchoolClass,
   deleteSchoolClass,
@@ -82,7 +89,9 @@ import {
   updateTeacherProfile,
   fetchSchoolSettings,
   saveSchoolSettings,
+  subscribeSchoolSettings,
   fetchSubmissions,
+  subscribeSubmissions,
   logoutTeacher
 } from '../../services/firebase';
 
@@ -175,6 +184,21 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   const [loading, setLoading] = useState(false);
   const [showBatchResultSlipsModal, setShowBatchResultSlipsModal] = useState(false);
   const [showCampusChat, setShowCampusChat] = useState(false);
+  const [toastNotice, setToastNotice] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => Promise<void>;
+  } | null>(null);
+  const [isConfirmBusy, setIsConfirmBusy] = useState(false);
+
+  const showToast = (text: string, type: 'success' | 'error' = 'success') => {
+    setToastNotice({ text, type });
+    setTimeout(() => {
+      setToastNotice(prev => (prev?.text === text ? null : prev));
+    }, 4500);
+  };
 
   // Filter and Inspection States
   const [resultClassFilter, setResultClassFilter] = useState<string>('all');
@@ -245,28 +269,33 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     return students.filter(s => clsSet.has((s.classGrade || '').trim().toUpperCase()));
   }, [students, activeStaff]);
 
-  // Teacher's authorized results/submissions
+  // Teacher's authorized results/submissions (enriched with chronological 1st Exam, 2nd Exam, ... labels)
   const authorizedSubmissions = useMemo(() => {
-    if (!activeStaff) return submissions;
-    const assignedIds = new Set(activeStaff.assignedSubjectIds || []);
-    const lowerSubjs = new Set(
-      (activeStaff.assignedSubjectNames || [])
-        .map(s => s.trim().toLowerCase())
-        .filter(n => n && n !== 'general subject')
-    );
-    if (assignedIds.size === 0 && lowerSubjs.size === 0) {
-      return submissions;
-    }
-    const authorizedExamIds = new Set(authorizedExams.map(e => e.id));
-    return submissions.filter(sub => {
-      if (authorizedExamIds.has(sub.examId)) return true;
-      if (sub.subject && lowerSubjs.has(sub.subject.trim().toLowerCase())) return true;
-      return false;
-    });
+    const filtered = !activeStaff
+      ? submissions
+      : (() => {
+          const assignedIds = new Set(activeStaff.assignedSubjectIds || []);
+          const lowerSubjs = new Set(
+            (activeStaff.assignedSubjectNames || [])
+              .map(s => s.trim().toLowerCase())
+              .filter(n => n && n !== 'general subject')
+          );
+          if (assignedIds.size === 0 && lowerSubjs.size === 0) {
+            return submissions;
+          }
+          const authorizedExamIds = new Set(authorizedExams.map(e => e.id));
+          return submissions.filter(sub => {
+            if (authorizedExamIds.has(sub.examId)) return true;
+            if (sub.subject && lowerSubjs.has(sub.subject.trim().toLowerCase())) return true;
+            return false;
+          });
+        })();
+    return enrichSubmissionsWithOrdinals(filtered);
   }, [submissions, activeStaff, authorizedExams]);
 
   // Modals
   const [showCreateExamModal, setShowCreateExamModal] = useState(false);
+  const [editingExamId, setEditingExamId] = useState<string | null>(null);
   const [timerResetModalExam, setTimerResetModalExam] = useState<Examination | null>(null);
   const [showAddQuestionModal, setShowAddQuestionModal] = useState(false);
   const [showCsvImportModal, setShowCsvImportModal] = useState(false);
@@ -286,7 +315,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     classGrade: 'SS 2',
     academicSession: '2025/2026',
     term: '1st Term',
-    examType: 'Mid-Term Test',
+    examType: 'Final Examination',
+    targetCaComponent: 'exam',
     durationMinutes: 15,
     totalQuestions: 10,
     instructions: 'Select the most accurate option from A to D. Ensure you conclude your paper before the countdown timer reaches zero.',
@@ -403,10 +433,55 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       setClasses(liveClasses);
     });
 
+    const unsubExams = subscribeExaminations(false, (liveExams) => {
+      setExams(liveExams);
+      setSelectedExamId(prev => prev || liveExams[0]?.id || '');
+    });
+
+    const unsubStudents = subscribeStudents((liveStudents) => {
+      setStudents(liveStudents);
+    });
+
+    const unsubSettings = subscribeSchoolSettings((liveSettings) => {
+      setSettings(liveSettings);
+    });
+
+    const unsubSubmissions = subscribeSubmissions((liveSubmissions) => {
+      setSubmissions(liveSubmissions);
+    });
+
+    const refreshSubmissionsLive = () => {
+      fetchSubmissions().then(subs => {
+        if (subs) setSubmissions(subs);
+      }).catch(() => {});
+    };
+
+    const handleLocalSync = () => refreshSubmissionsLive();
+    window.addEventListener('prime_cbt_exams_updated', handleLocalSync);
+
+    let syncChannel: BroadcastChannel | null = null;
+    try {
+      syncChannel = new BroadcastChannel('prime_cbt_sync_channel');
+      syncChannel.onmessage = (ev) => {
+        const type = ev.data?.type;
+        if (type === 'SUBMISSIONS_UPDATED' || type === 'TIMER_RESTARTED') {
+          refreshSubmissionsLive();
+        }
+      };
+    } catch {}
+
     return () => {
       unsubStaff();
       unsubSubjects();
       unsubClasses();
+      unsubExams();
+      unsubStudents();
+      unsubSettings();
+      unsubSubmissions();
+      window.removeEventListener('prime_cbt_exams_updated', handleLocalSync);
+      if (syncChannel) {
+        try { syncChannel.close(); } catch {}
+      }
     };
   }, []);
 
@@ -421,6 +496,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
   // Exam actions
   const handleOpenCreateExamModal = () => {
+    setEditingExamId(null);
     const defaultSubject = authorizedSubjects[0] || subjects[0];
     const defaultClass = authorizedClasses[0]?.code || 'SS 2';
     setExamForm({
@@ -430,7 +506,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       classGrade: defaultClass,
       academicSession: settings.academicSession || '2024/2025',
       term: (settings.currentTerm as '1st Term' | '2nd Term' | '3rd Term') || '1st Term',
-      examType: 'Mid-Term Test',
+      examType: 'Final Examination',
+      targetCaComponent: 'exam',
       durationMinutes: 15,
       totalQuestions: 10,
       instructions: 'Select the most accurate option from A to D. Ensure you conclude your paper before the countdown timer reaches zero.',
@@ -444,44 +521,93 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     setShowCreateExamModal(true);
   };
 
+  const handleOpenEditExamModal = (exam: Examination) => {
+    setEditingExamId(exam.id);
+    const resolvedTarget = resolveExamTargetComponent(exam);
+    setExamForm({
+      title: exam.title,
+      subjectId: exam.subjectId,
+      subjectName: exam.subjectName,
+      classGrade: exam.classGrade,
+      academicSession: exam.academicSession || settings.academicSession,
+      term: exam.term,
+      examType: exam.examType || (resolvedTarget === 'exam' ? 'Final Examination' : 'Continuous Assessment'),
+      targetCaComponent: resolvedTarget,
+      durationMinutes: exam.durationMinutes,
+      totalQuestions: exam.totalQuestions,
+      instructions: exam.instructions,
+      status: exam.status,
+      startDate: exam.startDate || '',
+      endDate: exam.endDate || '',
+      shuffleQuestions: exam.shuffleQuestions ?? true,
+      shuffleOptions: exam.shuffleOptions ?? false,
+      resultVisibility: exam.resultVisibility || 'immediate'
+    });
+    setShowCreateExamModal(true);
+  };
+
   const handleSaveExam = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSavingExam) return;
     setIsSavingExam(true);
 
     try {
-      const newExamId = `exam-${Date.now()}`;
-      const subjectObj = authorizedSubjects.find(s => s.id === examForm.subjectId) || authorizedSubjects[0] || subjects[0];
+      const existingExam = editingExamId ? exams.find(ex => ex.id === editingExamId) : null;
+      const targetExamId = existingExam ? existingExam.id : `exam-${Date.now()}`;
+      const subjectObj =
+        authorizedSubjects.find(s => s.id === examForm.subjectId) ||
+        subjects.find(s => s.id === examForm.subjectId) ||
+        authorizedSubjects[0] ||
+        subjects[0];
       const targetClass = examForm.classGrade || authorizedClasses[0]?.code || 'SS 2';
+      const targetCaComponent: CbtTargetComponent =
+        (examForm.targetCaComponent as CbtTargetComponent) || 'exam';
+      const derivedExamType =
+        targetCaComponent === 'exam' ? 'Final Examination' : 'Continuous Assessment';
 
       const examData: Examination = {
-        id: newExamId,
+        id: targetExamId,
         title: examForm.title?.trim() || `${targetClass} ${subjectObj?.name || 'Examination'}`,
-        subjectId: subjectObj?.id || 'sub-gen',
-        subjectName: subjectObj?.name || 'General Subject',
+        subjectId: subjectObj?.id || existingExam?.subjectId || 'sub-gen',
+        subjectName: subjectObj?.name || existingExam?.subjectName || 'General Subject',
         classGrade: targetClass,
         academicSession: examForm.academicSession || settings.academicSession,
         term: ((examForm.term || settings.currentTerm) as '1st Term' | '2nd Term' | '3rd Term') || '1st Term',
-        examType: examForm.examType || 'Mid-Term Test',
+        examType: examForm.examType || derivedExamType,
+        targetCaComponent,
         durationMinutes: Number(examForm.durationMinutes) || 15,
         totalQuestions: Number(examForm.totalQuestions) || 10,
         instructions: examForm.instructions || 'Answer all objective questions.',
-        teacherId: activeStaff?.uniqueId || teacherEmail,
-        teacherName: activeStaff?.fullName || teacherEmail.split('@')[0],
+        teacherId: existingExam?.teacherId || activeStaff?.uniqueId || teacherEmail,
+        teacherName: existingExam?.teacherName || activeStaff?.fullName || teacherEmail.split('@')[0],
         status: (examForm.status as 'draft' | 'published' | 'archived') || 'published',
-        startDate: examForm.startDate ? examForm.startDate : undefined,
-        endDate: examForm.endDate ? examForm.endDate : undefined,
+        startDate: (examForm.startDate || '').trim(),
+        endDate: (() => {
+          const cleanEnd = (examForm.endDate || '').trim();
+          if (((examForm.status as string) || 'published') === 'published' && cleanEnd) {
+            const endMs = new Date(cleanEnd).getTime();
+            if (!isNaN(endMs) && endMs <= Date.now()) return '';
+          }
+          return cleanEnd;
+        })(),
         shuffleQuestions: Boolean(examForm.shuffleQuestions),
         shuffleOptions: Boolean(examForm.shuffleOptions),
         resultVisibility: (examForm.resultVisibility as 'immediate' | 'teacher_publish') || 'immediate',
-        createdAt: new Date().toISOString(),
+        createdAt: existingExam?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
 
       await saveExamination(examData);
-      setExams(prev => [examData, ...prev]);
+      if (existingExam) {
+        setExams(prev => prev.map(ex => ex.id === examData.id ? examData : ex));
+        showToast(`Examination "${examData.title}" updated (${formatTargetComponentLabel(targetCaComponent, settings.caWeights)}).`);
+      } else {
+        setExams(prev => [examData, ...prev]);
+        showToast(`Examination "${examData.title}" created & mapped to ${formatTargetComponentLabel(targetCaComponent, settings.caWeights)}.`);
+      }
       setSelectedExamId(examData.id);
       setShowCreateExamModal(false);
+      setEditingExamId(null);
       // Reset form
       setExamForm({
         title: '',
@@ -490,7 +616,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         classGrade: authorizedClasses[0]?.code || 'SS 2',
         academicSession: settings.academicSession,
         term: settings.currentTerm as '1st Term' | '2nd Term' | '3rd Term',
-        examType: 'Mid-Term Test',
+        examType: 'Final Examination',
+        targetCaComponent: 'exam',
         durationMinutes: 15,
         totalQuestions: 10,
         instructions: 'Select the most accurate option from A to D. Ensure you conclude your paper before the countdown timer reaches zero.',
@@ -502,8 +629,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         resultVisibility: 'immediate'
       });
     } catch (err) {
-      console.error('Failed to create examination:', err);
-      alert('Unable to save examination. Please try again.');
+      console.error('Failed to save examination:', err);
+      showToast('Unable to save examination. Please try again.', 'error');
     } finally {
       setIsSavingExam(false);
     }
@@ -527,31 +654,55 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     }
   };
 
-  const handleMassDeleteExams = async () => {
+  const handleMassDeleteExams = () => {
     if (selectedExamIds.size === 0) return;
-    if (confirm(`Permanently delete ${selectedExamIds.size} selected examination(s) and all their questions?`)) {
-      const ids = Array.from(selectedExamIds);
-      await deleteExaminationsBatch(ids);
-      setExams(prev => prev.filter(e => !selectedExamIds.has(e.id)));
-      if (selectedExamIds.has(selectedExamId)) {
-        const remaining = exams.filter(e => !selectedExamIds.has(e.id));
-        setSelectedExamId(remaining[0]?.id || '');
+    const ids = Array.from(selectedExamIds);
+    setPendingConfirm({
+      title: `Delete ${ids.length} Examination(s)`,
+      message: `Permanently delete ${ids.length} selected examination(s) and all their questions? Deleted exams will be removed from both Teacher and Student portals immediately.`,
+      confirmLabel: `Delete ${ids.length} Exam(s)`,
+      onConfirm: async () => {
+        try {
+          await deleteExaminationsBatch(ids);
+          const idSet = new Set(ids);
+          setExams(prev => prev.filter(e => !idSet.has(e.id)));
+          if (idSet.has(selectedExamId)) {
+            const remaining = exams.filter(e => !idSet.has(e.id));
+            setSelectedExamId(remaining[0]?.id || '');
+          }
+          setSelectedExamIds(new Set());
+          showToast(`${ids.length} examination(s) permanently deleted and synced.`);
+        } catch (err: any) {
+          showToast(err?.message || 'Failed to delete selected examinations.', 'error');
+        }
       }
-      setSelectedExamIds(new Set());
-    }
+    });
   };
 
   const handleMassPublishExams = async (publish: boolean) => {
     if (selectedExamIds.size === 0) return;
     const targetStatus = publish ? 'published' : 'draft';
+    const updatedMap = new Map<string, Examination>();
     for (const id of Array.from(selectedExamIds)) {
       const exam = exams.find(e => e.id === id);
       if (exam) {
-        const updated: Examination = { ...exam, status: targetStatus, updatedAt: new Date().toISOString() };
+        let nextEnd = (exam.endDate || '').trim();
+        if (publish && nextEnd) {
+          const endMs = new Date(nextEnd).getTime();
+          if (!isNaN(endMs) && endMs <= Date.now()) nextEnd = '';
+        }
+        const updated: Examination = {
+          ...exam,
+          status: targetStatus,
+          startDate: (exam.startDate || '').trim(),
+          endDate: nextEnd,
+          updatedAt: new Date().toISOString()
+        };
+        updatedMap.set(id, updated);
         await saveExamination(updated);
       }
     }
-    setExams(prev => prev.map(e => selectedExamIds.has(e.id) ? { ...e, status: targetStatus } : e));
+    setExams(prev => prev.map(e => updatedMap.get(e.id) || e));
     setSelectedExamIds(new Set());
   };
 
@@ -568,8 +719,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     if (!editingTimeframeExam) return;
     const updated: Examination = {
       ...editingTimeframeExam,
-      startDate: timeframeForm.startDate ? timeframeForm.startDate : undefined,
-      endDate: timeframeForm.endDate ? timeframeForm.endDate : undefined,
+      startDate: (timeframeForm.startDate || '').trim(),
+      endDate: (timeframeForm.endDate || '').trim(),
       updatedAt: new Date().toISOString()
     };
     await saveExamination(updated);
@@ -579,19 +730,55 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
   const handleTogglePublish = async (exam: Examination) => {
     const nextStatus: 'draft' | 'published' = exam.status === 'published' ? 'draft' : 'published';
-    const updated: Examination = { ...exam, status: nextStatus, updatedAt: new Date().toISOString() };
+    let nextEnd = (exam.endDate || '').trim();
+    if (nextStatus === 'published' && nextEnd) {
+      const endMs = new Date(nextEnd).getTime();
+      if (!isNaN(endMs) && endMs <= Date.now()) {
+        nextEnd = '';
+      }
+    }
+    const updated: Examination = {
+      ...exam,
+      status: nextStatus,
+      startDate: (exam.startDate || '').trim(),
+      endDate: nextEnd,
+      updatedAt: new Date().toISOString()
+    };
     await saveExamination(updated);
     setExams(prev => prev.map(e => e.id === exam.id ? updated : e));
   };
 
-  const handleDeleteExam = async (examId: string) => {
-    if (confirm('Delete this examination and all its associated questions?')) {
-      await deleteExamination(examId);
-      setExams(prev => prev.filter(e => e.id !== examId));
-      if (selectedExamId === examId) {
-        setSelectedExamId(exams.find(e => e.id !== examId)?.id || '');
+  const handleOpenExamWindowNow = async (exam: Examination) => {
+    const updated: Examination = {
+      ...exam,
+      status: 'published',
+      startDate: '',
+      endDate: '',
+      updatedAt: new Date().toISOString()
+    };
+    await saveExamination(updated);
+    setExams(prev => prev.map(e => e.id === exam.id ? updated : e));
+  };
+
+  const handleDeleteExam = (examId: string) => {
+    const target = exams.find(e => e.id === examId);
+    setPendingConfirm({
+      title: 'Delete Examination',
+      message: `Permanently delete "${target?.title || 'this examination'}" and all its questions? It will immediately disappear from the Student Portal.`,
+      confirmLabel: 'Delete Examination',
+      onConfirm: async () => {
+        try {
+          await deleteExamination(examId);
+          setExams(prev => prev.filter(e => e.id !== examId));
+          if (selectedExamId === examId) {
+            setSelectedExamId(exams.find(e => e.id !== examId)?.id || '');
+          }
+          showToast(`Examination "${target?.title || 'paper'}" deleted and synced.`);
+        } catch (err: any) {
+          showToast(err?.message || 'Failed to delete examination.', 'error');
+        }
       }
-    }
+    });
   };
 
   // Question actions
@@ -620,15 +807,14 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
     await saveQuestion(selectedExamId, newQ);
 
-    setQuestions(prev => {
-      const filtered = prev.filter(q => q.id !== qId);
-      return [...filtered, newQ].sort((a, b) => a.questionNumber - b.questionNumber);
-    });
+    const updatedQs = [...questions.filter(q => q.id !== qId), newQ].sort((a, b) => a.questionNumber - b.questionNumber);
+    setQuestions(updatedQs);
+    setExams(prev => prev.map(ex => ex.id === selectedExamId ? { ...ex, totalQuestions: updatedQs.length } : ex));
 
     setShowAddQuestionModal(false);
     setEditingQuestionId(null);
     setQuestionForm({
-      questionNumber: questions.length + 2,
+      questionNumber: updatedQs.length + 1,
       text: '',
       optionA: '',
       optionB: '',
@@ -641,11 +827,26 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     });
   };
 
-  const handleDeleteQuestion = async (qId: string) => {
-    if (confirm('Are you sure you want to delete this question?')) {
-      await deleteQuestion(selectedExamId, qId);
-      setQuestions(prev => prev.filter(q => q.id !== qId));
-    }
+  const handleDeleteQuestion = (qId: string) => {
+    const examIdSnapshot = selectedExamId;
+    setPendingConfirm({
+      title: 'Delete Question',
+      message: 'Are you sure you want to delete this question from the examination bank?',
+      confirmLabel: 'Delete Question',
+      onConfirm: async () => {
+        try {
+          await deleteQuestion(examIdSnapshot, qId);
+          setQuestions(prev => {
+            const next = prev.filter(q => q.id !== qId);
+            setExams(exList => exList.map(ex => ex.id === examIdSnapshot ? { ...ex, totalQuestions: next.length } : ex));
+            return next;
+          });
+          showToast('Question deleted.');
+        } catch {
+          showToast('Failed to delete question.', 'error');
+        }
+      }
+    });
   };
 
   // CSV Import
@@ -735,7 +936,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   // CSV Export for Questions (Allows Excel Editing and Re-upload)
   const handleExportQuestionsCsv = () => {
     if (questions.length === 0) {
-      alert('No questions in this examination to export.');
+      showToast('No questions in this examination to export.', 'error');
       return;
     }
 
@@ -802,11 +1003,22 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     setStudentForm({ firstName: '', surname: '', admissionNumber: '', classGrade: 'SS 2' });
   };
 
-  const handleDeleteStudent = async (stdId: string) => {
-    if (confirm('Delete student record from directory?')) {
-      await deleteStudent(stdId);
-      setStudents(prev => prev.filter(s => s.id !== stdId));
-    }
+  const handleDeleteStudent = (stdId: string) => {
+    const target = students.find(s => s.id === stdId);
+    setPendingConfirm({
+      title: 'Delete Student Record',
+      message: `Remove ${target?.fullName || 'this student'} from the directory?`,
+      confirmLabel: 'Delete Student',
+      onConfirm: async () => {
+        try {
+          await deleteStudent(stdId);
+          setStudents(prev => prev.filter(s => s.id !== stdId));
+          showToast('Student record removed.');
+        } catch {
+          showToast('Failed to delete student record.', 'error');
+        }
+      }
+    });
   };
 
   // Academic Session & Term Handlers (decide or select term/session)
@@ -839,7 +1051,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   // Export Student Credentials CSV
   const handleExportStudentCodesCsv = () => {
     if (authorizedStudents.length === 0) {
-      alert('No students found for your assigned classes to export.');
+      showToast('No students found for your assigned classes to export.', 'error');
       return;
     }
     const headers = ['Full Name', 'Class Form', 'Admission Number', 'Unique Login ID / Code', 'Session'];
@@ -926,7 +1138,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   // Results Export for Excel
   const handleExportResultsCsv = () => {
     if (authorizedSubmissions.length === 0) {
-      alert('No student submissions to export.');
+      showToast('No student submissions to export.', 'error');
       return;
     }
 
@@ -935,6 +1147,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       'Admission Number',
       'Class Form',
       'Subject',
+      'Sitting',
       'Examination Title',
       'Score',
       'Total Questions',
@@ -952,6 +1165,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         `"${sub.admissionNumber}"`,
         `"${sub.classGrade}"`,
         `"${sub.subject}"`,
+        `"${sub.sittingLabel || '1st Exam'}"`,
         `"${sub.examTitle}"`,
         sub.score,
         sub.totalQuestions,
@@ -1613,8 +1827,26 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                           </button>
                         </div>
 
-                        {/* Exam Live Schedule Window Badge */}
-                        <div className="mb-3">
+                        {/* Exam Live Schedule Window & Broadsheet Target Badge */}
+                        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+                          {(() => {
+                            const targetComp = resolveExamTargetComponent(exam);
+                            const targetLabel = formatTargetComponentLabel(targetComp, settings.caWeights);
+                            const badgeStyle =
+                              targetComp === 'first_ca'
+                                ? 'bg-blue-50 text-blue-900 border-blue-200'
+                                : targetComp === 'second_ca'
+                                ? 'bg-indigo-50 text-indigo-900 border-indigo-200'
+                                : 'bg-amber-50 text-amber-900 border-amber-300';
+                            return (
+                              <span
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${badgeStyle}`}
+                                title={`Completed student CBT scores sync into ${targetLabel} on the result broadsheet`}
+                              >
+                                Target: {targetLabel}
+                              </span>
+                            );
+                          })()}
                           {windowStatus.code === 'published_open' && (
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
                               <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
@@ -1708,9 +1940,30 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                           >
                             {exam.status === 'published' ? 'Pause Exam' : 'Publish Exam'}
                           </button>
+
+                          {exam.status === 'published' && !windowStatus.isOpen && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenExamWindowNow(exam)}
+                              className="min-h-[38px] px-3 py-1.5 text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+                              title="Clear schedule dates and open immediately for students"
+                            >
+                              Open Now
+                            </button>
+                          )}
                         </div>
 
                         <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditExamModal(exam)}
+                            className="min-h-[38px] px-3 py-1.5 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                            title="Edit examination title, CA/Exam broadsheet target, duration, or status"
+                          >
+                            <Edit3 className="w-3.5 h-3.5 text-slate-600" />
+                            <span>Edit</span>
+                          </button>
+
                           <button
                             type="button"
                             onClick={() => setTimerResetModalExam(exam)}
@@ -1718,7 +1971,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                             title="Restart exam countdown timer for student(s)"
                           >
                             <Clock className="w-3.5 h-3.5 text-amber-700" />
-                            <span>Restart Student Timer</span>
+                            <span>Restart Timer</span>
                           </button>
 
                           <button
@@ -2308,7 +2561,15 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                               {sub.classGrade}
                             </span>
                           </td>
-                          <td className="py-3 px-4 font-medium text-blue-900">{sub.subject}</td>
+                          <td className="py-3 px-4">
+                            <div className="font-medium text-blue-900">{sub.subject}</div>
+                            <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                              <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-black text-[10px]">
+                                {sub.sittingLabel || '1st Exam'}
+                              </span>
+                              <span className="text-[10px] text-slate-500 truncate max-w-[160px]">{sub.examTitle}</span>
+                            </div>
+                          </td>
                           <td className="py-3 px-4 font-mono font-bold text-right text-slate-900">
                             {sub.score} / {sub.totalQuestions}
                           </td>
@@ -2461,8 +2722,12 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                await saveSchoolSettings(settings);
-                alert('School settings saved successfully.');
+                try {
+                  await saveSchoolSettings(settings);
+                  showToast('School settings saved and synchronized.');
+                } catch (err: any) {
+                  showToast(err?.message || 'Unable to save school settings.', 'error');
+                }
               }}
               className="space-y-4 text-xs"
             >
@@ -2532,6 +2797,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             subjects={authorizedSubjects.length > 0 ? authorizedSubjects : subjects}
             students={authorizedStudents.length > 0 ? authorizedStudents : students}
             submissions={submissions}
+            exams={exams}
             teacherStaff={activeStaff}
             academicSession={settings.academicSession}
             currentTerm={settings.currentTerm as '1st Term' | '2nd Term' | '3rd Term'}
@@ -2558,26 +2824,100 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         )}
       </main>
 
-      {/* CREATE EXAM MODAL */}
+      {/* CREATE / EDIT EXAM MODAL */}
       {showCreateExamModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden my-8">
             <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
-              <h3 className="font-bold text-sm">Create New Examination</h3>
-              <button onClick={() => setShowCreateExamModal(false)} className="text-slate-400 hover:text-white">✕</button>
+              <h3 className="font-bold text-sm">
+                {editingExamId ? 'Edit Examination Settings' : 'Create New Examination'}
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateExamModal(false);
+                  setEditingExamId(null);
+                }}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                ✕
+              </button>
             </div>
-            <form onSubmit={handleSaveExam} className="p-6 space-y-4 text-xs">
+            <form onSubmit={handleSaveExam} className="p-6 space-y-4 text-xs max-h-[82vh] overflow-y-auto">
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Examination Title</label>
                 <input
                   type="text"
                   required
-                  placeholder="e.g. SS 2 First Term Examination: Computer Studies"
+                  placeholder="e.g. SS 2 1st CA Test or First Term Examination: Computer Studies"
                   value={examForm.title}
                   onChange={(e) => setExamForm({ ...examForm, title: e.target.value })}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
                 />
               </div>
+
+              {/* Result Broadsheet Target Selector (1st CA / 2nd CA / Exam) */}
+              {(() => {
+                const weights = resolveCaWeights(settings.caWeights);
+                const selectedTarget = (examForm.targetCaComponent as CbtTargetComponent) || 'exam';
+                return (
+                  <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="font-bold text-blue-950 text-xs">
+                        Record Score Into Broadsheet Column
+                      </label>
+                      <span className="text-[10px] font-bold text-blue-700">Auto-scales on submission</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        {
+                          value: 'first_ca' as CbtTargetComponent,
+                          label: weights.firstCaLabel,
+                          max: weights.firstCaMax,
+                          examType: 'Continuous Assessment' as const
+                        },
+                        {
+                          value: 'second_ca' as CbtTargetComponent,
+                          label: weights.secondCaLabel,
+                          max: weights.secondCaMax,
+                          examType: 'Continuous Assessment' as const
+                        },
+                        {
+                          value: 'exam' as CbtTargetComponent,
+                          label: weights.examLabel,
+                          max: weights.examMax,
+                          examType: 'Final Examination' as const
+                        }
+                      ].map(opt => {
+                        const active = selectedTarget === opt.value;
+                        return (
+                          <button
+                            key={opt.value}
+                            type="button"
+                            onClick={() =>
+                              setExamForm({
+                                ...examForm,
+                                targetCaComponent: opt.value,
+                                examType: opt.examType
+                              })
+                            }
+                            className={`px-2.5 py-2 rounded-lg border text-left transition-all cursor-pointer ${
+                              active
+                                ? 'bg-blue-900 text-white border-blue-900 shadow-xs'
+                                : 'bg-white text-slate-700 border-slate-300 hover:border-blue-400'
+                            }`}
+                          >
+                            <div className="font-bold text-[11px] truncate">{opt.label}</div>
+                            <div className={`text-[10px] font-mono ${active ? 'text-blue-200' : 'text-slate-500'}`}>
+                              Max: {opt.max} marks
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -2745,7 +3085,10 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setShowCreateExamModal(false)}
+                  onClick={() => {
+                    setShowCreateExamModal(false);
+                    setEditingExamId(null);
+                  }}
                   className="px-4 py-2 min-h-[44px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-semibold transition-colors cursor-pointer"
                 >
                   Cancel
@@ -2758,10 +3101,10 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   {isSavingExam ? (
                     <>
                       <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      <span>Creating Exam...</span>
+                      <span>{editingExamId ? 'Saving Changes...' : 'Creating Exam...'}</span>
                     </>
                   ) : (
-                    <span>Create Examination</span>
+                    <span>{editingExamId ? 'Save Changes' : 'Create Examination'}</span>
                   )}
                 </button>
               </div>
@@ -3495,29 +3838,34 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   </div>
                 ) : (
                   <div className="max-h-48 overflow-y-auto space-y-2">
-                    {submissions
-                      .filter(sub => sub.studentId === inspectingStudent.id || sub.admissionNumber === inspectingStudent.admissionNumber)
-                      .map((sub, idx) => {
-                        const g = calculateGrade(sub.percentage);
-                        return (
-                          <div key={idx} className="p-3 bg-white rounded-xl border border-slate-200 flex items-center justify-between gap-3 shadow-2xs">
-                            <div>
-                              <div className="font-bold text-slate-900 text-xs">{sub.subject}</div>
-                              <div className="text-[10px] text-slate-500 font-mono">{sub.examTitle} · {new Date(sub.submittedAt).toLocaleDateString()}</div>
-                            </div>
-
-                            <div className="flex items-center gap-3">
-                              <div className="text-right font-mono">
-                                <span className="font-black text-slate-900 text-xs">{sub.score}/{sub.totalQuestions}</span>
-                                <span className="text-[10px] text-slate-500 ml-1">({sub.percentage}%)</span>
-                              </div>
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${g.color}`}>
-                                {g.grade}
+                    {enrichSubmissionsWithOrdinals(
+                      submissions.filter(sub => sub.studentId === inspectingStudent.id || sub.admissionNumber === inspectingStudent.admissionNumber)
+                    ).map((sub, idx) => {
+                      const g = calculateGrade(sub.percentage);
+                      return (
+                        <div key={sub.id || idx} className="p-3 bg-white rounded-xl border border-slate-200 flex items-center justify-between gap-3 shadow-2xs">
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-black text-[10px]">
+                                {sub.sittingLabel || '1st Exam'}
                               </span>
+                              <span className="font-bold text-slate-900 text-xs">{sub.subject}</span>
                             </div>
+                            <div className="text-[10px] text-slate-500 font-mono mt-0.5">{sub.examTitle} · {new Date(sub.submittedAt).toLocaleDateString()}</div>
                           </div>
-                        );
-                      })}
+
+                          <div className="flex items-center gap-3">
+                            <div className="text-right font-mono">
+                              <span className="font-black text-slate-900 text-xs">{sub.score}/{sub.totalQuestions}</span>
+                              <span className="text-[10px] text-slate-500 ml-1">({sub.percentage}%)</span>
+                            </div>
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${g.color}`}>
+                              {g.grade}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -3572,6 +3920,72 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           students={students}
           onTimerRestarted={loadAllData}
         />
+      )}
+
+      {/* IN-APP TOAST BANNER (replaces native window.alert) */}
+      {toastNotice && (
+        <div
+          className={`fixed bottom-5 right-5 z-70 px-4 py-3 rounded-xl shadow-xl border text-xs font-bold flex items-center gap-2.5 max-w-md ${
+            toastNotice.type === 'success'
+              ? 'bg-emerald-900 text-white border-emerald-700'
+              : 'bg-rose-900 text-white border-rose-700'
+          }`}
+        >
+          {toastNotice.type === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-300 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-rose-300 shrink-0" />
+          )}
+          <span className="flex-1">{toastNotice.text}</span>
+          <button
+            type="button"
+            onClick={() => setToastNotice(null)}
+            className="text-white/70 hover:text-white cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* IN-APP CONFIRMATION MODAL (replaces native window.confirm inside iframe) */}
+      {pendingConfirm && (
+        <div className="fixed inset-0 z-70 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-rose-950 text-white px-5 py-4 flex items-center gap-2.5">
+              <AlertCircle className="w-5 h-5 text-rose-300 shrink-0" />
+              <h3 className="font-bold text-sm">{pendingConfirm.title}</h3>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-700 leading-relaxed">{pendingConfirm.message}</p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={isConfirmBusy}
+                  onClick={() => setPendingConfirm(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isConfirmBusy}
+                  onClick={async () => {
+                    setIsConfirmBusy(true);
+                    try {
+                      await pendingConfirm.onConfirm();
+                    } finally {
+                      setIsConfirmBusy(false);
+                      setPendingConfirm(null);
+                    }
+                  }}
+                  className="px-4 py-2 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  {isConfirmBusy ? 'Processing...' : pendingConfirm.confirmLabel}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -19,13 +19,16 @@ import {
   Submission,
   QuestionResultDetail,
   ExamAttempt,
-  generateTopicRevisionInsights
+  generateTopicRevisionInsights,
+  resolveExamTargetComponent
 } from '../../types/cbt';
 import {
   createExamAttempt,
   getExamAttempt,
   updateExamAttemptProgress,
-  saveSubmission
+  markExamAttemptSubmitted,
+  saveSubmission,
+  syncCbtSubmissionToReportSheet
 } from '../../services/firebase';
 
 interface StudentExamScreenProps {
@@ -98,6 +101,8 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
           };
 
           await createExamAttempt(newAttempt);
+          setAnswers({});
+          setFlagged({});
           setSecondsRemaining((exam.durationMinutes || 15) * 60);
           startTimeRef.current = now;
         }
@@ -116,6 +121,8 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
       const detail = e?.detail;
       if (!detail || (detail.studentId === student.id && detail.examId === exam.id)) {
         startTimeRef.current = Date.now();
+        setAnswers({});
+        setFlagged({});
         setSecondsRemaining((exam.durationMinutes || 15) * 60);
         hasSubmittedRef.current = false;
         setIsSubmitting(false);
@@ -193,6 +200,7 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
       classGrade: exam.classGrade,
       academicSession: exam.academicSession,
       term: exam.term,
+      targetCaComponent: resolveExamTargetComponent(exam),
       studentId: student.id,
       studentName: student.fullName,
       admissionNumber: student.admissionNumber,
@@ -210,6 +218,10 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
     try {
       const docId = await saveSubmission(submissionData);
       submissionData.id = docId;
+      await markExamAttemptSubmitted(attemptId).catch(() => {});
+      await syncCbtSubmissionToReportSheet(submissionData, exam).catch(err => {
+        console.warn('Report sheet auto-fill notice:', err);
+      });
       localStorage.removeItem(`prime_cbt_attempt_${attemptId}`);
     } catch (err) {
       console.warn('Submission persistence notice:', err);

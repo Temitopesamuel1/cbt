@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   FileSpreadsheet,
   Download,
@@ -29,11 +29,19 @@ import {
   SchoolClass,
   StaffMember,
   Submission,
+  Examination,
   StudentAssessmentRecord,
   SchoolSettings,
   CaWeightsConfig,
+  CbtExamEntry,
+  CbtTargetComponent,
   resolveCaWeights,
-  calculateGrade
+  resolveExamTargetComponent,
+  getTargetComponentMax,
+  formatTargetComponentLabel,
+  calculateGrade,
+  enrichSubmissionsWithOrdinals,
+  formatOrdinalExamLabel
 } from '../../types/cbt';
 import {
   fetchAssessmentRecords,
@@ -53,6 +61,7 @@ interface ContinuousAssessmentSheetProps {
   classes: SchoolClass[];
   students: Student[];
   submissions: Submission[];
+  exams?: Examination[];
   academicSession: string;
   currentTerm: '1st Term' | '2nd Term' | '3rd Term';
   schoolName: string;
@@ -65,6 +74,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   classes,
   students,
   submissions,
+  exams = [],
   academicSession,
   currentTerm,
   schoolName,
@@ -84,6 +94,10 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   const [isSaving, setIsSaving] = useState(false);
   const [savingStudentId, setSavingStudentId] = useState<string | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const hasUnsavedChangesRef = useRef(false);
+  useEffect(() => {
+    hasUnsavedChangesRef.current = hasUnsavedChanges;
+  }, [hasUnsavedChanges]);
   const [saveStatus, setSaveStatus] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [showBatchSlipsModal, setShowBatchSlipsModal] = useState(false);
   const [viewingOfficialSlipStudent, setViewingOfficialSlipStudent] = useState<Student | null>(null);
@@ -99,6 +113,14 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     });
     return map;
   });
+
+  useEffect(() => {
+    const map: Record<string, boolean> = {};
+    students.forEach(s => {
+      if (s.resultWithheld) map[s.id] = true;
+    });
+    setWithheldStudentsMap(map);
+  }, [students]);
 
   useEffect(() => {
     const apply = (st: SchoolSettings) => {
@@ -184,7 +206,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   }, [classStudents, searchQuery]);
 
   // Load existing records from Firestore / LocalStorage
-  useEffect(() => {
+  const loadAssessmentRecords = useCallback(() => {
     if (!selectedSubjectId || !selectedClassCode) return;
 
     fetchAssessmentRecords(selectedSubjectId, selectedClassCode, academicSession, currentTerm)
@@ -199,6 +221,36 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       .catch(err => console.warn('Error loading assessment records:', err));
   }, [selectedSubjectId, selectedClassCode, academicSession, currentTerm]);
 
+  useEffect(() => {
+    loadAssessmentRecords();
+  }, [loadAssessmentRecords]);
+
+  useEffect(() => {
+    const handleExternalCaSync = () => {
+      if (!hasUnsavedChangesRef.current) {
+        loadAssessmentRecords();
+      }
+    };
+    window.addEventListener('caRecordsUpdated', handleExternalCaSync);
+    let bc: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        bc = new BroadcastChannel('prime_cbt_sync_channel');
+        bc.onmessage = (event) => {
+          if (event.data?.type === 'CA_RECORDS_UPDATED' && !hasUnsavedChangesRef.current) {
+            loadAssessmentRecords();
+          }
+        };
+      } catch {
+        // Ignore BroadcastChannel errors
+      }
+    }
+    return () => {
+      window.removeEventListener('caRecordsUpdated', handleExternalCaSync);
+      if (bc) bc.close();
+    };
+  }, [loadAssessmentRecords]);
+
   // Toggle result withholding for a candidate
   const handleToggleWithholdResult = async (student: Student) => {
     const current = Boolean(withheldStudentsMap[student.id]);
@@ -209,7 +261,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     const updatedStudent: Student = {
       ...student,
       resultWithheld: nextWithheld,
-      withheldReason: nextWithheld ? 'Administrative Review / Outstanding Institutional Clearance' : undefined
+      withheldReason: nextWithheld ? 'Administrative Review / Outstanding Institutional Clearance' : '',
+      updatedAt: new Date().toISOString()
     };
 
     try {
@@ -222,6 +275,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       });
       setTimeout(() => setSaveStatus(null), 4000);
     } catch (err) {
+      setWithheldStudentsMap(prev => ({ ...prev, [student.id]: current }));
       setSaveStatus({ text: 'Failed to update result withholding.', type: 'error' });
       setTimeout(() => setSaveStatus(null), 4000);
     }
@@ -340,40 +394,91 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     }));
   };
 
-  // Automatically scan and sync CBT examination scores into Exam column (out of 60)
+  // Automatically scan and sync CBT scores into 1st CA, 2nd CA, or Term's Exam & preserve all sittings separately
   const handleAutoFillCbtScores = () => {
     if (!activeSubject) return;
 
     let matchCount = 0;
+    const syncedComponents = new Set<string>();
     const updatedMap = { ...assessmentRecords };
     const cleanSubj = activeSubject.name.trim().toLowerCase();
+    const enrichedSubs = enrichSubmissionsWithOrdinals(submissions);
+    const examById = new Map<string, Examination>();
+    exams.forEach(ex => { if (ex?.id) examById.set(ex.id, ex); });
 
     classStudents.forEach(student => {
-      // Find latest submission for this student and subject
-      const studentSubs = submissions.filter(s => {
-        const matchesStudent = s.studentId === student.id || s.admissionNumber === student.admissionNumber;
-        const matchesSubj = s.subject && s.subject.trim().toLowerCase() === cleanSubj;
-        return matchesStudent && matchesSubj;
-      });
+      const studentSubs = enrichedSubs
+        .filter(s => {
+          const matchesStudent = s.studentId === student.id || s.admissionNumber === student.admissionNumber;
+          const matchesSubj = s.subject && s.subject.trim().toLowerCase() === cleanSubj;
+          return matchesStudent && matchesSubj;
+        })
+        .sort((a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime());
 
       if (studentSubs.length > 0) {
-        // Take best or latest submission
-        const latest = studentSubs[0];
-        // Scale to configured Exam Max (default 50 marks)
-        const scaledExamScore = Math.round((latest.percentage / 100) * caWeights.examMax);
+        const examEntries: CbtExamEntry[] = studentSubs.map((sub, i) => {
+          const targetComp: CbtTargetComponent = resolveExamTargetComponent(examById.get(sub.examId), sub);
+          const compMax = getTargetComponentMax(targetComp, caWeights);
+          const scaled = Math.min(compMax, Math.max(0, Math.round(((sub.percentage || 0) / 100) * compMax)));
+          syncedComponents.add(formatTargetComponentLabel(targetComp, caWeights));
+          return {
+            submissionId: sub.id || `sub_${sub.examId}_${i}`,
+            examId: sub.examId,
+            examTitle: sub.examTitle,
+            sittingNumber: i + 1,
+            sittingLabel: formatOrdinalExamLabel(i + 1),
+            targetCaComponent: targetComp,
+            rawScore: sub.score,
+            totalQuestions: sub.totalQuestions,
+            percentage: sub.percentage,
+            scaledScore: scaled,
+            examMax: compMax,
+            submittedAt: sub.submittedAt
+          };
+        });
 
         const current = updatedMap[student.id] || getRecord(student);
+        let nextFirstCa = current.firstCaScore ?? current.testScore ?? 0;
+        let nextSecondCa = current.secondCaScore ?? current.projectScore ?? 0;
+        let nextExam = current.examScore ?? 0;
+
+        const firstCaEntries = examEntries.filter(e => e.targetCaComponent === 'first_ca');
+        if (firstCaEntries.length > 0) {
+          nextFirstCa = Math.min(
+            caWeights.firstCaMax,
+            Math.round(firstCaEntries.reduce((sum, item) => sum + item.scaledScore, 0) / firstCaEntries.length)
+          );
+        }
+
+        const secondCaEntries = examEntries.filter(e => e.targetCaComponent === 'second_ca');
+        if (secondCaEntries.length > 0) {
+          nextSecondCa = Math.min(
+            caWeights.secondCaMax,
+            Math.round(secondCaEntries.reduce((sum, item) => sum + item.scaledScore, 0) / secondCaEntries.length)
+          );
+        }
+
+        const termExamEntries = examEntries.filter(e => (e.targetCaComponent || 'exam') === 'exam');
+        if (termExamEntries.length > 0) {
+          nextExam = Math.min(
+            caWeights.examMax,
+            Math.round(termExamEntries.reduce((sum, item) => sum + item.scaledScore, 0) / termExamEntries.length)
+          );
+        }
+
+        const latest = studentSubs[studentSubs.length - 1];
         const computed = computeScoreDetails(
           current.assignmentScore,
-          current.secondCaScore ?? current.projectScore ?? 0,
-          current.firstCaScore ?? current.testScore ?? 0,
-          scaledExamScore
+          nextSecondCa,
+          nextFirstCa,
+          nextExam
         );
 
         updatedMap[student.id] = {
           ...current,
           ...computed,
           cbtSubmissionId: latest.id,
+          examEntries,
           isAutoSynced: true,
           updatedAt: new Date().toISOString()
         };
@@ -385,8 +490,9 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     setHasUnsavedChanges(true);
 
     if (matchCount > 0) {
+      const colSummary = Array.from(syncedComponents).join(', ') || caWeights.examLabel;
       setSaveStatus({
-        text: `Successfully synced CBT scores for ${matchCount} student(s) into the ${caWeights.examMax} marks terminal exam column! Click 'Save All Scores' to commit.`,
+        text: `Synced CBT sittings for ${matchCount} student(s) into ${colSummary}! You can still edit any cell and click 'Save All Scores'.`,
         type: 'success'
       });
     } else {
@@ -436,19 +542,10 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
       const recordsToSave: StudentAssessmentRecord[] = classStudents
         .filter(s => Boolean(assessmentRecords[s.id]))
-        .map(s => getRecord(s))
-        .filter(
-          r =>
-            r.assignmentScore > 0 ||
-            (r.firstCaScore || 0) > 0 ||
-            (r.secondCaScore || 0) > 0 ||
-            r.examScore > 0 ||
-            r.totalScore > 0 ||
-            Boolean(r.teacherComment?.trim())
-        );
+        .map(s => getRecord(s));
       if (recordsToSave.length === 0) {
         setSaveStatus({
-          text: `Enter at least one student score before saving ${activeSubject?.name || 'sheet'}.`,
+          text: `Enter or modify at least one student score before saving ${activeSubject?.name || 'sheet'}.`,
           type: 'error'
         });
         setIsSaving(false);
@@ -475,7 +572,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   // Export to CSV for Excel
   const handleExportCsv = () => {
     if (classStudents.length === 0) {
-      alert('No students to export.');
+      setSaveStatus({ text: 'No students in this class cohort to export.', type: 'error' });
+      setTimeout(() => setSaveStatus(null), 4000);
       return;
     }
 
@@ -977,6 +1075,21 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                           onChange={(e) => handleScoreChange(student, 'firstCaScore', e.target.value)}
                           className="w-14 px-1.5 py-1 text-center font-mono font-bold text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
                         />
+                        {rec.examEntries && rec.examEntries.some(e => e.targetCaComponent === 'first_ca') && (
+                          <div className="mt-1 flex flex-wrap justify-center gap-1">
+                            {rec.examEntries
+                              .filter(e => e.targetCaComponent === 'first_ca')
+                              .map((ent, eIdx) => (
+                                <span
+                                  key={ent.submissionId || eIdx}
+                                  className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-blue-100 text-blue-950 border border-blue-300"
+                                  title={`${ent.sittingLabel} (${ent.examTitle}): ${ent.rawScore}/${ent.totalQuestions} (${ent.percentage}%)`}
+                                >
+                                  CBT: {ent.scaledScore}
+                                </span>
+                              ))}
+                          </div>
+                        )}
                       </td>
 
                       {/* 2nd CA Input */}
@@ -990,6 +1103,21 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                           onChange={(e) => handleScoreChange(student, 'secondCaScore', e.target.value)}
                           className="w-14 px-1.5 py-1 text-center font-mono font-bold text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
                         />
+                        {rec.examEntries && rec.examEntries.some(e => e.targetCaComponent === 'second_ca') && (
+                          <div className="mt-1 flex flex-wrap justify-center gap-1">
+                            {rec.examEntries
+                              .filter(e => e.targetCaComponent === 'second_ca')
+                              .map((ent, eIdx) => (
+                                <span
+                                  key={ent.submissionId || eIdx}
+                                  className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-indigo-100 text-indigo-950 border border-indigo-300"
+                                  title={`${ent.sittingLabel} (${ent.examTitle}): ${ent.rawScore}/${ent.totalQuestions} (${ent.percentage}%)`}
+                                >
+                                  CBT: {ent.scaledScore}
+                                </span>
+                              ))}
+                          </div>
+                        )}
                       </td>
 
                       {/* Auto-computed Total CA */}
@@ -1012,12 +1140,27 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                           {rec.isAutoSynced && (
                             <span
                               className="absolute -top-2 -right-2 text-[9px] font-bold bg-blue-700 text-white px-1 rounded shadow-xs"
-                              title="Score was auto-synced from student's CBT examination attempt"
+                              title="Score was auto-synced from student's CBT attempt"
                             >
                               CBT
                             </span>
                           )}
                         </div>
+                        {rec.examEntries && rec.examEntries.some(e => (e.targetCaComponent || 'exam') === 'exam') && (
+                          <div className="mt-1 flex flex-wrap justify-center gap-1">
+                            {rec.examEntries
+                              .filter(e => (e.targetCaComponent || 'exam') === 'exam')
+                              .map((ent, eIdx) => (
+                                <span
+                                  key={ent.submissionId || eIdx}
+                                  className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-amber-100/90 text-amber-950 border border-amber-300"
+                                  title={`${ent.sittingLabel} (${ent.examTitle}): ${ent.rawScore}/${ent.totalQuestions} (${ent.percentage}%)`}
+                                >
+                                  {ent.sittingLabel.replace(' Exam', '')}: {ent.scaledScore}
+                                </span>
+                              ))}
+                          </div>
+                        )}
                       </td>
 
                       {/* Total Score (100) */}

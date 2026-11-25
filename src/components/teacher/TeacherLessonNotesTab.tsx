@@ -13,7 +13,8 @@ import {
   Layers,
   ChevronRight,
   Eye,
-  FileCheck
+  FileCheck,
+  AlertCircle
 } from 'lucide-react';
 import { LessonNote, Subject, SchoolClass, StaffMember } from '../../types/cbt';
 import { fetchLessonNotes, saveLessonNote, deleteLessonNote } from '../../services/firebase';
@@ -33,6 +34,9 @@ export const TeacherLessonNotesTab: React.FC<TeacherLessonNotesTabProps> = ({
   const [loading, setLoading] = useState(false);
   const [activeNote, setActiveNote] = useState<LessonNote | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [pendingDeleteNote, setPendingDeleteNote] = useState<LessonNote | null>(null);
+  const [deletingNoteBusy, setDeletingNoteBusy] = useState(false);
 
   // Form State
   const [subjectName, setSubjectName] = useState(subjects[0]?.name || 'Computer Studies');
@@ -63,8 +67,9 @@ export const TeacherLessonNotesTab: React.FC<TeacherLessonNotesTabProps> = ({
 
   // Generate Lesson Note with Nigerian Secondary School Curriculum Architecture
   const handleGenerateLessonNote = async () => {
+    setFormError(null);
     if (!topic.trim()) {
-      alert('Please enter a lesson topic.');
+      setFormError('Please enter a lesson topic before generating.');
       return;
     }
 
@@ -206,13 +211,25 @@ III. MEMORY CAPACITY & UNITS:
     setIsGenerating(false);
   };
 
-  const handleDelete = async (noteId: string) => {
-    if (confirm('Delete this saved lesson note from your vault?')) {
-      await deleteLessonNote(noteId);
-      setSavedNotes(prev => prev.filter(n => n.id !== noteId));
-      if (activeNote?.id === noteId) {
-        setActiveNote(savedNotes.find(n => n.id !== noteId) || null);
+  const handleDelete = (note: LessonNote) => {
+    setPendingDeleteNote(note);
+  };
+
+  const confirmDeleteNote = async () => {
+    if (!pendingDeleteNote) return;
+    setDeletingNoteBusy(true);
+    try {
+      await deleteLessonNote(pendingDeleteNote.id);
+      const remaining = savedNotes.filter(n => n.id !== pendingDeleteNote.id);
+      setSavedNotes(remaining);
+      if (activeNote?.id === pendingDeleteNote.id) {
+        setActiveNote(remaining[0] || null);
       }
+      setPendingDeleteNote(null);
+    } catch (err: any) {
+      setFormError(err?.message || 'Failed to delete lesson note.');
+    } finally {
+      setDeletingNoteBusy(false);
     }
   };
 
@@ -431,6 +448,13 @@ ${activeNote.assignment}
             />
           </div>
 
+          {formError && (
+            <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-[11px] font-bold flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{formError}</span>
+            </div>
+          )}
+
           <button
             onClick={handleGenerateLessonNote}
             disabled={isGenerating}
@@ -466,7 +490,7 @@ ${activeNote.assignment}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleDelete(n.id);
+                        handleDelete(n);
                       }}
                       className="text-slate-400 hover:text-rose-600 p-1"
                       title="Delete note"
@@ -671,6 +695,40 @@ ${activeNote.assignment}
           )}
         </div>
       </div>
+      {/* In-app Delete Confirmation Modal */}
+      {pendingDeleteNote && (
+        <div className="fixed inset-0 z-70 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-rose-950 text-white px-5 py-4 flex items-center gap-2.5">
+              <AlertCircle className="w-5 h-5 text-rose-300 shrink-0" />
+              <h3 className="font-bold text-sm">Delete Saved Lesson Note</h3>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-700 leading-relaxed">
+                Delete lesson note <strong>"{pendingDeleteNote.topic}"</strong> ({pendingDeleteNote.classGrade} · {pendingDeleteNote.subjectName}) from your vault?
+              </p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={deletingNoteBusy}
+                  onClick={() => setPendingDeleteNote(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingNoteBusy}
+                  onClick={confirmDeleteNote}
+                  className="px-4 py-2 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  {deletingNoteBusy ? 'Deleting...' : 'Delete Note'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

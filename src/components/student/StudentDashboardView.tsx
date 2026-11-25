@@ -20,23 +20,34 @@ import {
   HelpCircle,
   ExternalLink,
   Printer,
-  Lock
+  Lock,
+  RefreshCw
 } from 'lucide-react';
 import {
   Student,
   Examination,
   Submission,
+  ExamAttempt,
   StudentAssessmentRecord,
   SchoolSettings,
   CaWeightsConfig,
   resolveCaWeights,
+  resolveExamTargetComponent,
+  formatTargetComponentLabel,
+  getTargetComponentMax,
   checkExamTimeWindow,
+  calculateGrade,
   calculateGradePoint,
-  getAcademicStanding
+  getAcademicStanding,
+  formatOrdinalExamLabel,
+  enrichSubmissionsWithOrdinals
 } from '../../types/cbt';
 import {
   fetchExaminations,
+  subscribeExaminations,
   fetchSubmissions,
+  subscribeStudentSubmissions,
+  fetchStudentAttempts,
   subscribeStudentAssessmentRecords,
   fetchSchoolSettings
 } from '../../services/firebase';
@@ -48,6 +59,7 @@ import { HwsOfficialResultSlip } from '../common/HwsOfficialResultSlip';
 
 interface StudentDashboardViewProps {
   student: Student;
+  initialTab?: 'examinations' | 'broadsheet' | 'transcript' | 'practice' | 'ai-advisor' | 'profile';
   onStartExam: (exam: Examination) => void;
   onViewResult: (submission: Submission) => void;
   onNavigateToHistory: () => void;
@@ -63,23 +75,34 @@ export function isClassMatch(studentClass: string, examClass: string): boolean {
       .replace(/junior\s*secondary/g, 'jss')
       .replace(/[\s\-_]/g, '');
 
-  return normalize(studentClass) === normalize(examClass);
+  const normExam = normalize(examClass);
+  if (normExam === 'all' || normExam === 'allclasses') return true;
+  return normalize(studentClass) === normExam;
 }
 
 export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
   student: initialStudent,
+  initialTab,
   onStartExam,
   onViewResult,
   onNavigateToHistory,
   onUpdateStudent
 }) => {
-  const [activeTab, setActiveTab] = useState<'examinations' | 'broadsheet' | 'transcript' | 'practice' | 'ai-advisor' | 'profile'>('examinations');
+  const [activeTab, setActiveTab] = useState<'examinations' | 'broadsheet' | 'transcript' | 'practice' | 'ai-advisor' | 'profile'>(initialTab || 'examinations');
   const [currentStudent, setCurrentStudent] = useState<Student>(initialStudent);
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
 
   const [availableExams, setAvailableExams] = useState<Examination[]>([]);
   const [studentSubmissions, setStudentSubmissions] = useState<Submission[]>([]);
+  const [studentAttempts, setStudentAttempts] = useState<ExamAttempt[]>([]);
   const [caRecords, setCaRecords] = useState<StudentAssessmentRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [syncingExams, setSyncingExams] = useState(false);
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>('All');
   const [recentSyncNotice, setRecentSyncNotice] = useState<string | null>(null);
   const [showOfficialReportSheet, setShowOfficialReportSheet] = useState<boolean>(false);
@@ -109,65 +132,91 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
     setCurrentStudent(initialStudent);
   }, [initialStudent]);
 
-  // Load Examinations and Submissions with instant real-time sync
+  const refreshFromServer = async (showSpinner = false) => {
+    if (showSpinner) setSyncingExams(true);
+    try {
+      const [publishedExams, allSubs, allAttempts] = await Promise.all([
+        fetchExaminations(true, true),
+        fetchSubmissions(undefined, currentStudent.id),
+        fetchStudentAttempts(currentStudent.id)
+      ]);
+      const classPeculiar = (publishedExams || []).filter(e =>
+        isClassMatch(currentStudent.classGrade, e.classGrade)
+      );
+      setAvailableExams(classPeculiar);
+      if (allSubs) setStudentSubmissions(allSubs);
+      if (allAttempts) setStudentAttempts(allAttempts);
+    } catch (err) {
+      console.warn('Error refreshing student dashboard from server:', err);
+    } finally {
+      setLoading(false);
+      if (showSpinner) setSyncingExams(false);
+    }
+  };
+
+  // Load Examinations, Attempts, and Submissions with instant real-time cross-system sync
   useEffect(() => {
     let isMounted = true;
 
-    const loadStudentData = async (silent = false) => {
-      if (!silent) setLoading(true);
-      try {
-        const [allExams, allSubs] = await Promise.all([
-          fetchExaminations(true), // published only
-          fetchSubmissions(undefined, currentStudent.id)
-        ]);
+    const unsubExams = subscribeExaminations(true, (publishedExams) => {
+      if (!isMounted) return;
+      const classPeculiar = (publishedExams || []).filter(e =>
+        isClassMatch(currentStudent.classGrade, e.classGrade)
+      );
+      setAvailableExams(classPeculiar);
+      setLoading(false);
+    });
 
-        if (isMounted && allExams) {
-          const classPeculiar = allExams.filter(e => isClassMatch(currentStudent.classGrade, e.classGrade));
-          setAvailableExams(classPeculiar);
-        }
+    const unsubSubs = subscribeStudentSubmissions(currentStudent.id, (allSubs) => {
+      if (!isMounted) return;
+      setStudentSubmissions(allSubs || []);
+    });
 
-        if (isMounted && allSubs) {
-          setStudentSubmissions(allSubs);
-        }
-      } catch (err) {
-        console.warn('Error loading student dashboard papers:', err);
-      } finally {
-        if (isMounted && !silent) {
-          setLoading(false);
-        }
+    // Force an authoritative server pull on mount and when tab regains focus or goes online
+    refreshFromServer(false);
+
+    const onVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        refreshFromServer(false);
       }
     };
-
-    loadStudentData();
-
-    // 1. Cross-tab & local custom event listener
-    const handleSync = () => {
-      loadStudentData(true);
+    const onTimerOrExamEvent = () => {
+      refreshFromServer(false);
     };
-    window.addEventListener('prime_cbt_exams_updated', handleSync);
-    window.addEventListener('storage', handleSync);
 
-    // 2. BroadcastChannel for cross-window instantaneous sync
+    window.addEventListener('focus', onVisibilityOrFocus);
+    window.addEventListener('online', onTimerOrExamEvent);
+    window.addEventListener('prime_cbt_timer_restarted', onTimerOrExamEvent);
+    window.addEventListener('prime_cbt_exams_updated', onTimerOrExamEvent);
+    document.addEventListener('visibilitychange', onVisibilityOrFocus);
+
     let bc: BroadcastChannel | null = null;
     try {
       bc = new BroadcastChannel('prime_cbt_sync_channel');
-      bc.onmessage = () => {
-        loadStudentData(true);
+      bc.onmessage = (ev) => {
+        if (
+          ev.data?.type === 'TIMER_RESTARTED' ||
+          ev.data?.type === 'EXAM_DELETED' ||
+          ev.data?.type === 'EXAMS_BATCH_DELETED' ||
+          ev.data?.type === 'EXAM_SAVED' ||
+          ev.data?.type === 'SUBMISSIONS_UPDATED'
+        ) {
+          refreshFromServer(false);
+        }
       };
-    } catch (e) {}
-
-    // 3. Fast 4-second polling interval so changes from teacher devices reflect immediately
-    const pollInterval = window.setInterval(() => {
-      loadStudentData(true);
-    }, 4000);
+    } catch {}
 
     return () => {
       isMounted = false;
-      window.removeEventListener('prime_cbt_exams_updated', handleSync);
-      window.removeEventListener('storage', handleSync);
-      window.clearInterval(pollInterval);
+      unsubExams();
+      unsubSubs();
+      window.removeEventListener('focus', onVisibilityOrFocus);
+      window.removeEventListener('online', onTimerOrExamEvent);
+      window.removeEventListener('prime_cbt_timer_restarted', onTimerOrExamEvent);
+      window.removeEventListener('prime_cbt_exams_updated', onTimerOrExamEvent);
+      document.removeEventListener('visibilitychange', onVisibilityOrFocus);
       if (bc) {
-        try { bc.close(); } catch (e) {}
+        try { bc.close(); } catch {}
       }
     };
   }, [currentStudent]);
@@ -204,9 +253,48 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
     );
   }, [availableExams, selectedSubjectFilter]);
 
-  // Check if student has already submitted an exam
-  const getSubmissionForExam = (examId: string): Submission | undefined => {
-    return studentSubmissions.find(s => s.examId === examId);
+  // Enrich submissions with deterministic chronological ordinal labels (1st Exam, 2nd Exam, ...)
+  const enrichedSubmissions = useMemo(
+    () => enrichSubmissionsWithOrdinals(studentSubmissions),
+    [studentSubmissions]
+  );
+
+  // Group all CBT submissions by subject chronologically (1st Exam, 2nd Exam, ...)
+  const submissionsBySubject = useMemo(() => {
+    const map = new Map<string, Submission[]>();
+    const asc = [...enrichedSubmissions].sort(
+      (a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime()
+    );
+    asc.forEach(sub => {
+      const subj = sub.subject || 'General';
+      if (!map.has(subj)) map.set(subj, []);
+      map.get(subj)!.push(sub);
+    });
+    return Array.from(map.entries());
+  }, [enrichedSubmissions]);
+
+  // All completed sittings for a given exam, ordered 1st Exam -> 2nd Exam -> ...
+  const getSubmissionsForExam = (examId: string): Submission[] => {
+    return enrichedSubmissions
+      .filter(s => s.examId === examId)
+      .sort((a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime());
+  };
+
+  // True when teacher/admin has unlocked a fresh retake sitting for this exam
+  const hasActiveRetake = (examId: string): boolean => {
+    const attempt = studentAttempts.find(
+      a => a.examId === examId || a.id === `attempt_${currentStudent.id}_${examId}`
+    );
+    if (!attempt) return false;
+    if (attempt.status === 'retake_granted' || attempt.status === 'in_progress') {
+      if (attempt.status === 'retake_granted') return true;
+      const subs = getSubmissionsForExam(examId);
+      if (subs.length === 0) return true;
+      const latestSubMs = Math.max(...subs.map(s => new Date(s.submittedAt || 0).getTime() || 0));
+      const attemptStartMs = new Date(attempt.startTime || 0).getTime() || 0;
+      return attemptStartMs > latestSubMs;
+    }
+    return false;
   };
 
   // Compute live CGPA and Weighted Average
@@ -443,21 +531,34 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                 </p>
               </div>
 
-              {availableSubjects.length > 0 && (
-                <div className="flex items-center gap-2">
-                  <Filter className="w-3.5 h-3.5 text-slate-400" />
-                  <select
-                    value={selectedSubjectFilter}
-                    onChange={e => setSelectedSubjectFilter(e.target.value)}
-                    className="text-xs font-semibold bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-900 shadow-xs"
-                  >
-                    <option value="All">All Subjects ({availableExams.length})</option>
-                    {availableSubjects.map(sub => (
-                      <option key={sub} value={sub}>{sub}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => refreshFromServer(true)}
+                  disabled={syncingExams}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg px-3 py-1.5 shadow-xs transition-colors cursor-pointer disabled:opacity-60"
+                  title="Check server for newly published or updated exams"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 text-blue-700 ${syncingExams ? 'animate-spin' : ''}`} />
+                  <span>{syncingExams ? 'Syncing...' : 'Sync Exams'}</span>
+                </button>
+
+                {availableSubjects.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <Filter className="w-3.5 h-3.5 text-slate-400" />
+                    <select
+                      value={selectedSubjectFilter}
+                      onChange={e => setSelectedSubjectFilter(e.target.value)}
+                      className="text-xs font-semibold bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-900 shadow-xs"
+                    >
+                      <option value="All">All Subjects ({availableExams.length})</option>
+                      {availableSubjects.map(sub => (
+                        <option key={sub} value={sub}>{sub}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
             </div>
 
             {loading ? (
@@ -482,8 +583,15 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                 {displayedExams.map(exam => {
-                  const submission = getSubmissionForExam(exam.id);
-                  const isSubmitted = !!submission;
+                  const examSubs = getSubmissionsForExam(exam.id);
+                  const latestSubmission = examSubs[examSubs.length - 1];
+                  const isSubmitted = examSubs.length > 0;
+                  const retakeActive = hasActiveRetake(exam.id);
+                  const nextSubjectSittingCount =
+                    enrichedSubmissions.filter(
+                      s => (s.subject || '').trim().toLowerCase() === (exam.subjectName || '').trim().toLowerCase()
+                    ).length + 1;
+                  const nextSittingLabel = formatOrdinalExamLabel(nextSubjectSittingCount);
                   const timeCheck = checkExamTimeWindow(exam);
 
                   return (
@@ -493,13 +601,25 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                     >
                       <div className="space-y-3">
                         <div className="flex items-start justify-between gap-2">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                            {exam.subjectName}
-                          </span>
-                          {isSubmitted ? (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                              {exam.subjectName}
+                            </span>
+                            <span className="text-[10px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                              {formatTargetComponentLabel(resolveExamTargetComponent(exam), caMeta)}
+                            </span>
+                          </div>
+                          {retakeActive ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-900 bg-amber-50 px-2 py-0.5 rounded border border-amber-300">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                              Retake Unlocked ({nextSittingLabel})
+                            </span>
+                          ) : isSubmitted ? (
                             <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                               <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                              Sat ({submission.percentage}%)
+                              {examSubs.length === 1
+                                ? `Sat (${latestSubmission.percentage}%)`
+                                : `${examSubs.length} Sittings · Latest ${latestSubmission.percentage}%`}
                             </span>
                           ) : timeCheck.isOpen ? (
                             <span className="inline-flex items-center gap-1 text-[10px] font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
@@ -528,6 +648,26 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                           </div>
                         </div>
 
+                        {/* Prior Sitting Score Chips (when completed 1+ times) */}
+                        {examSubs.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {examSubs.map((sub, idx) => (
+                              <button
+                                key={sub.id || idx}
+                                type="button"
+                                onClick={() => onViewResult(sub)}
+                                className="px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                                title={`View ${sub.sittingLabel || formatOrdinalExamLabel(idx + 1)} Result Slip`}
+                              >
+                                <FileText className="w-3 h-3 text-emerald-700" />
+                                <span>
+                                  {sub.sittingLabel || formatOrdinalExamLabel(idx + 1)}: {sub.score}/{sub.totalQuestions} ({sub.percentage}%)
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
                         {/* Scheduled time info */}
                         {(exam.startDate || exam.endDate) && (
                           <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-100 text-[10px] text-slate-600 space-y-0.5 font-mono">
@@ -541,31 +681,41 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                         )}
                       </div>
 
-                      {/* Action Button */}
-                      <div className="pt-3 border-t border-slate-100">
-                        {isSubmitted ? (
+                      {/* Action Buttons */}
+                      <div className="pt-3 border-t border-slate-100 space-y-2">
+                        {(!isSubmitted || retakeActive) && (
+                          timeCheck.isOpen ? (
+                            <button
+                              onClick={() => onStartExam(exam)}
+                              className="w-full py-2.5 bg-blue-900 hover:bg-blue-950 text-white font-bold text-xs rounded-xl transition-colors shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
+                            >
+                              <Play className="w-3.5 h-3.5" />
+                              <span>
+                                {retakeActive ? `Start Retake (${nextSittingLabel})` : 'Start Examination'}
+                              </span>
+                            </button>
+                          ) : (
+                            <button
+                              disabled
+                              className="w-full py-2.5 bg-slate-100 text-slate-400 font-bold text-xs rounded-xl cursor-not-allowed text-center"
+                              title={timeCheck.message}
+                            >
+                              {timeCheck.code === 'not_yet_started' ? 'Exam Not Yet Open' : 'Exam Window Closed'}
+                            </button>
+                          )
+                        )}
+
+                        {isSubmitted && (
                           <button
-                            onClick={() => onViewResult(submission)}
+                            onClick={() => onViewResult(latestSubmission)}
                             className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                           >
                             <FileText className="w-3.5 h-3.5" />
-                            <span>View Examination Result Slip</span>
-                          </button>
-                        ) : timeCheck.isOpen ? (
-                          <button
-                            onClick={() => onStartExam(exam)}
-                            className="w-full py-2.5 bg-blue-900 hover:bg-blue-950 text-white font-bold text-xs rounded-xl transition-colors shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <Play className="w-3.5 h-3.5" />
-                            <span>Start Examination</span>
-                          </button>
-                        ) : (
-                          <button
-                            disabled
-                            className="w-full py-2.5 bg-slate-100 text-slate-400 font-bold text-xs rounded-xl cursor-not-allowed text-center"
-                            title={timeCheck.message}
-                          >
-                            {timeCheck.code === 'not_yet_started' ? 'Exam Not Yet Open' : 'Exam Window Closed'}
+                            <span>
+                              {examSubs.length > 1
+                                ? `View Latest Slip (${latestSubmission.sittingLabel || formatOrdinalExamLabel(examSubs.length)})`
+                                : 'View Examination Result Slip'}
+                            </span>
                           </button>
                         )}
                       </div>
@@ -632,78 +782,257 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                   onClose={() => setShowOfficialReportSheet(false)}
                 />
               </div>
-            ) : caRecords.length === 0 ? (
-              <div className="text-center py-12 border border-dashed border-slate-200 rounded-xl space-y-3">
-                <FileText className="w-10 h-10 mx-auto text-slate-300" />
-                <h3 className="text-sm font-bold text-slate-800">No Assessment Records Recorded Yet</h3>
-                <p className="text-xs text-slate-400 max-w-md mx-auto">
-                  Subject teachers are currently setting up Continuous Assessment records for your class cohort. Any recorded score will appear here live.
-                </p>
-              </div>
             ) : (
-              <div className="overflow-x-auto border border-slate-200 rounded-xl shadow-xs">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-100 text-slate-700 font-bold uppercase tracking-wider text-[10px]">
-                    <tr>
-                      <th className="py-3 px-4">Subject</th>
-                      <th className="py-3 px-3 text-center">{caMeta.assignmentLabel} ({caMeta.assignmentMax})</th>
-                      <th className="py-3 px-3 text-center">{caMeta.firstCaLabel} ({caMeta.firstCaMax})</th>
-                      <th className="py-3 px-3 text-center">{caMeta.secondCaLabel} ({caMeta.secondCaMax})</th>
-                      <th className="py-3 px-3 text-center">{caMeta.examLabel} ({caMeta.examMax})</th>
-                      <th className="py-3 px-3 text-center">Total ({caMeta.assignmentMax + caMeta.firstCaMax + caMeta.secondCaMax + caMeta.examMax})</th>
-                      <th className="py-3 px-3 text-center">Grade</th>
-                      <th className="py-3 px-3 text-center">Point</th>
-                      <th className="py-3 px-4">Teacher Remark</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {caRecords.map(r => {
-                      const isWithheld = currentStudent.withheldSubjectIds?.some(
-                        w => w.trim().toLowerCase() === r.subjectName.trim().toLowerCase()
-                      );
-                      const gp = calculateGradePoint(r.totalScore);
-                      const firstSummary = (typeof r.firstCaScore === 'number' && r.firstCaScore > 0) ? r.firstCaScore : (r.testScore ?? r.firstCaScore ?? 0);
-                      const secondSummary = (typeof r.secondCaScore === 'number' && r.secondCaScore > 0) ? r.secondCaScore : (r.projectScore ?? r.secondCaScore ?? 0);
-                      return (
-                        <tr key={r.id} className="hover:bg-slate-50 transition-colors">
-                          <td className="py-3 px-4 font-bold text-slate-900">
-                            {r.subjectName}
-                            <span className="block text-[10px] text-slate-400 font-normal">{r.term}</span>
-                          </td>
-                          {isWithheld ? (
-                            <td colSpan={8} className="py-3 px-4 text-center text-rose-700 font-bold text-[11px] bg-rose-50/50">
-                              Subject Result Temporarily Withheld by Administration
-                            </td>
-                          ) : (
-                            <>
-                              <td className="py-3 px-3 text-center font-mono text-slate-600">{r.assignmentScore ?? '-'}</td>
-                              <td className="py-3 px-3 text-center font-mono text-slate-600">{firstSummary ?? '-'}</td>
-                              <td className="py-3 px-3 text-center font-mono text-slate-600">{secondSummary ?? '-'}</td>
-                              <td className="py-3 px-3 text-center font-mono text-slate-600">{r.examScore ?? '-'}</td>
-                              <td className="py-3 px-3 text-center font-mono font-black text-slate-900 text-sm">
-                                {r.totalScore}
-                              </td>
-                              <td className="py-3 px-3 text-center">
-                                <span className="font-mono font-bold text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-900 border border-slate-200">
-                                  {r.grade}
-                                </span>
-                              </td>
-                              <td className="py-3 px-3 text-center font-mono font-bold text-blue-900">
-                                {gp.toFixed(1)}
-                              </td>
-                              <td className="py-3 px-4 text-slate-600">
-                                <span className="font-medium">{r.remark}</span>
-                                {r.teacherComment && (
-                                  <span className="text-[10px] text-slate-400 italic block">"{r.teacherComment}"</span>
-                                )}
-                              </td>
-                            </>
-                          )}
+              <div className="space-y-6">
+                {/* Continuous Assessment Table */}
+                {caRecords.length === 0 ? (
+                  <div className="text-center py-8 border border-dashed border-slate-200 rounded-xl space-y-2">
+                    <FileText className="w-8 h-8 mx-auto text-slate-300" />
+                    <h3 className="text-sm font-bold text-slate-800">No Continuous Assessment Ledger Records Yet</h3>
+                    <p className="text-xs text-slate-400 max-w-md mx-auto">
+                      Subject teachers are currently entering term continuous assessment marks. Individual CBT sittings are shown separately below.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl shadow-xs">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-100 text-slate-700 font-bold uppercase tracking-wider text-[10px]">
+                        <tr>
+                          <th className="py-3 px-4">Subject</th>
+                          <th className="py-3 px-3 text-center">{caMeta.assignmentLabel} ({caMeta.assignmentMax})</th>
+                          <th className="py-3 px-3 text-center">{caMeta.firstCaLabel} ({caMeta.firstCaMax})</th>
+                          <th className="py-3 px-3 text-center">{caMeta.secondCaLabel} ({caMeta.secondCaMax})</th>
+                          <th className="py-3 px-3 text-center">{caMeta.examLabel} ({caMeta.examMax})</th>
+                          <th className="py-3 px-3 text-center">Total ({caMeta.assignmentMax + caMeta.firstCaMax + caMeta.secondCaMax + caMeta.examMax})</th>
+                          <th className="py-3 px-3 text-center">Grade</th>
+                          <th className="py-3 px-3 text-center">Point</th>
+                          <th className="py-3 px-4">Teacher Remark</th>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {caRecords.map(r => {
+                          const isWithheld = currentStudent.withheldSubjectIds?.some(
+                            w => w.trim().toLowerCase() === r.subjectName.trim().toLowerCase()
+                          );
+                          const gp = calculateGradePoint(r.totalScore);
+                          const firstSummary = (typeof r.firstCaScore === 'number' && r.firstCaScore > 0) ? r.firstCaScore : (r.testScore ?? r.firstCaScore ?? 0);
+                          const secondSummary = (typeof r.secondCaScore === 'number' && r.secondCaScore > 0) ? r.secondCaScore : (r.projectScore ?? r.secondCaScore ?? 0);
+                          return (
+                            <tr key={r.id} className="hover:bg-slate-50 transition-colors">
+                              <td className="py-3 px-4 font-bold text-slate-900">
+                                {r.subjectName}
+                                <span className="block text-[10px] text-slate-400 font-normal">{r.term}</span>
+                              </td>
+                              {isWithheld ? (
+                                <td colSpan={8} className="py-3 px-4 text-center text-rose-700 font-bold text-[11px] bg-rose-50/50">
+                                  Subject Result Temporarily Withheld by Administration
+                                </td>
+                              ) : (
+                                <>
+                                  <td className="py-3 px-3 text-center font-mono text-slate-600">{r.assignmentScore ?? '-'}</td>
+                                  <td className="py-3 px-3 text-center font-mono text-slate-600">
+                                    <div>{firstSummary ?? '-'}</div>
+                                    {Array.isArray(r.examEntries) && r.examEntries.some(e => e.targetCaComponent === 'first_ca') && (
+                                      <div className="flex flex-wrap justify-center gap-1 mt-1">
+                                        {r.examEntries
+                                          .filter(e => e.targetCaComponent === 'first_ca')
+                                          .map((entry, idx) => (
+                                            <span
+                                              key={entry.submissionId || idx}
+                                              className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-50 text-blue-900 border border-blue-200 whitespace-nowrap"
+                                              title={`${entry.sittingLabel}: ${entry.rawScore}/${entry.totalQuestions} (${entry.percentage}%)`}
+                                            >
+                                              CBT: {entry.scaledScore}
+                                            </span>
+                                          ))}
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-3 px-3 text-center font-mono text-slate-600">
+                                    <div>{secondSummary ?? '-'}</div>
+                                    {Array.isArray(r.examEntries) && r.examEntries.some(e => e.targetCaComponent === 'second_ca') && (
+                                      <div className="flex flex-wrap justify-center gap-1 mt-1">
+                                        {r.examEntries
+                                          .filter(e => e.targetCaComponent === 'second_ca')
+                                          .map((entry, idx) => (
+                                            <span
+                                              key={entry.submissionId || idx}
+                                              className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-900 border border-indigo-200 whitespace-nowrap"
+                                              title={`${entry.sittingLabel}: ${entry.rawScore}/${entry.totalQuestions} (${entry.percentage}%)`}
+                                            >
+                                              CBT: {entry.scaledScore}
+                                            </span>
+                                          ))}
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-3 px-3 text-center font-mono text-slate-600">
+                                    <div>{r.examScore ?? '-'}</div>
+                                    {Array.isArray(r.examEntries) && r.examEntries.some(e => (e.targetCaComponent || 'exam') === 'exam') && (
+                                      <div className="flex flex-wrap justify-center gap-1 mt-1">
+                                        {r.examEntries
+                                          .filter(e => (e.targetCaComponent || 'exam') === 'exam')
+                                          .map((entry, idx) => (
+                                            <span
+                                              key={entry.submissionId || idx}
+                                              className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-50 text-amber-900 border border-amber-200 whitespace-nowrap"
+                                              title={`${entry.sittingLabel}: ${entry.rawScore}/${entry.totalQuestions} (${entry.percentage}%)`}
+                                            >
+                                              {entry.sittingLabel}: {entry.scaledScore}
+                                            </span>
+                                          ))}
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-3 px-3 text-center font-mono font-black text-slate-900 text-sm">
+                                    {r.totalScore}
+                                  </td>
+                                  <td className="py-3 px-3 text-center">
+                                    <span className="font-mono font-bold text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-900 border border-slate-200">
+                                      {r.grade}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-3 text-center font-mono font-bold text-blue-900">
+                                    {gp.toFixed(1)}
+                                  </td>
+                                  <td className="py-3 px-4 text-slate-600">
+                                    <span className="font-medium">{r.remark}</span>
+                                    {r.teacherComment && (
+                                      <span className="text-[10px] text-slate-400 italic block">"{r.teacherComment}"</span>
+                                    )}
+                                  </td>
+                                </>
+                              )}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Separate CBT Exam Sittings Ledger by Subject (1st Exam, 2nd Exam, ...) */}
+                {submissionsBySubject.length > 0 && (
+                  <div className="border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    <div className="bg-slate-900 text-white px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h3 className="text-xs font-black uppercase tracking-wider text-amber-300">
+                          CBT Examination Sittings Record by Subject (1st Exam, 2nd Exam, ...)
+                        </h3>
+                        <p className="text-[11px] text-slate-300">
+                          Every completed CBT sitting for a subject is stored and displayed individually with its score and result slip.
+                        </p>
+                      </div>
+                      <span className="text-[11px] font-mono bg-white/10 px-2.5 py-1 rounded text-white font-bold">
+                        {enrichedSubmissions.length} Total Sitting{enrichedSubmissions.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
+
+                    <div className="divide-y divide-slate-200 bg-white">
+                      {submissionsBySubject.map(([subjectName, sittings]) => {
+                        const isSubjectWithheld = currentStudent.withheldSubjectIds?.some(
+                          w => w.trim().toLowerCase() === subjectName.trim().toLowerCase()
+                        );
+                        return (
+                          <div key={subjectName} className="p-4 space-y-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <span className="font-black text-slate-900 text-sm">{subjectName}</span>
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-50 text-blue-900 border border-blue-200">
+                                  {sittings.length} {sittings.length === 1 ? 'Exam Sitting' : 'Exam Sittings'}
+                                </span>
+                              </div>
+                            </div>
+
+                            {isSubjectWithheld ? (
+                              <div className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
+                                Subject CBT Results Withheld by Administration
+                              </div>
+                            ) : (
+                              <div className="overflow-x-auto border border-slate-200 rounded-lg">
+                                <table className="w-full text-left text-xs">
+                                  <thead className="bg-slate-50 text-slate-600 text-[10px] uppercase font-bold">
+                                    <tr>
+                                      <th className="py-2 px-3">Sitting</th>
+                                      <th className="py-2 px-3">Examination Paper</th>
+                                      <th className="py-2 px-3 text-center">Target Column</th>
+                                      <th className="py-2 px-3 text-center">Raw Score</th>
+                                      <th className="py-2 px-3 text-center">Percentage</th>
+                                      <th className="py-2 px-3 text-center">Scaled Score</th>
+                                      <th className="py-2 px-3 text-center">Grade</th>
+                                      <th className="py-2 px-3">Date Sat</th>
+                                      <th className="py-2 px-3 text-right">Slip</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100">
+                                    {sittings.map((sub, idx) => {
+                                      const g = calculateGrade(sub.percentage);
+                                      const matchedExam = availableExams.find(ex => ex.id === sub.examId);
+                                      const targetComp = resolveExamTargetComponent(matchedExam, sub);
+                                      const targetLabel = formatTargetComponentLabel(targetComp, caMeta);
+                                      const compMax = getTargetComponentMax(targetComp, caMeta);
+                                      const scaledMark = Math.min(
+                                        compMax,
+                                        Math.max(0, Math.round((sub.percentage / 100) * compMax))
+                                      );
+                                      const sittingLabel = sub.sittingLabel || formatOrdinalExamLabel(idx + 1);
+                                      return (
+                                        <tr key={sub.id || idx} className="hover:bg-slate-50">
+                                          <td className="py-2.5 px-3">
+                                            <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-900 border border-amber-200 font-black text-[11px] whitespace-nowrap">
+                                              {sittingLabel}
+                                            </span>
+                                          </td>
+                                          <td className="py-2.5 px-3 font-semibold text-slate-800">{sub.examTitle}</td>
+                                          <td className="py-2.5 px-3 text-center">
+                                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-900 border border-blue-200 whitespace-nowrap">
+                                              {targetLabel}
+                                            </span>
+                                          </td>
+                                          <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-900">
+                                            {sub.score} / {sub.totalQuestions}
+                                          </td>
+                                          <td className="py-2.5 px-3 text-center font-mono font-bold text-blue-900">
+                                            {sub.percentage}%
+                                          </td>
+                                          <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-700">
+                                            {scaledMark} / {compMax}
+                                          </td>
+                                          <td className="py-2.5 px-3 text-center">
+                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${g.color}`}>
+                                              {g.grade}
+                                            </span>
+                                          </td>
+                                          <td className="py-2.5 px-3 text-slate-500 font-mono text-[11px]">
+                                            {new Date(sub.submittedAt).toLocaleDateString('en-GB', {
+                                              day: '2-digit',
+                                              month: 'short',
+                                              year: 'numeric'
+                                            })}
+                                          </td>
+                                          <td className="py-2.5 px-3 text-right">
+                                            <button
+                                              type="button"
+                                              onClick={() => onViewResult(sub)}
+                                              className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 rounded-lg font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                                            >
+                                              <ExternalLink className="w-3 h-3" />
+                                              <span>View Slip</span>
+                                            </button>
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

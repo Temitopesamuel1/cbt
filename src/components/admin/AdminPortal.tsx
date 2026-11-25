@@ -51,6 +51,7 @@ import {
   fetchStudents,
   saveStudent,
   deleteStudent,
+  subscribeStudents,
   fetchSchoolClasses,
   subscribeSchoolClasses,
   fetchSubjects,
@@ -58,9 +59,13 @@ import {
   subscribeSubjects,
   fetchSchoolSettings,
   saveSchoolSettings,
+  subscribeSchoolSettings,
   fetchExaminations,
+  subscribeExaminations,
   fetchSubmissions,
-  fetchAdmins
+  subscribeSubmissions,
+  fetchAdmins,
+  subscribeAdmins
 } from '../../services/firebase';
 import { compressImageFile } from '../../services/imageUtils';
 import { StaffSlipsModal } from './StaffSlipsModal';
@@ -128,6 +133,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
 
   // Staff and Student Modals
   const [showAddStaffModal, setShowAddStaffModal] = useState(false);
@@ -175,9 +186,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     classGrade: 'SS 1',
     accessCode: '',
     academicSession: '2025/2026',
+    status: 'active' as 'active' | 'suspended' | 'graduated',
+    gender: '' as '' | 'Male' | 'Female',
+    phoneNumber: '',
+    department: '',
     email: '',
     password: '',
-    passportUrl: ''
+    passportUrl: '',
+    resultWithheld: false,
+    withheldReason: ''
   });
 
   // Load all institutional data
@@ -224,8 +241,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   useEffect(() => {
     loadData();
+    const unsubAdmins = subscribeAdmins((liveAdmins) => {
+      setAdmins(liveAdmins);
+    });
     const unsubStaff = subscribeStaffMembers((liveStaff) => {
       setStaffList(liveStaff);
+    });
+    const unsubStudents = subscribeStudents((liveStudents) => {
+      setStudents(liveStudents);
     });
     const unsubSubjects = subscribeSubjects((liveSubjects) => {
       setSubjects(liveSubjects);
@@ -233,10 +256,24 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     const unsubClasses = subscribeSchoolClasses((liveClasses) => {
       setClasses(liveClasses);
     });
+    const unsubExams = subscribeExaminations(false, (liveExams) => {
+      setExams(liveExams);
+    });
+    const unsubSettings = subscribeSchoolSettings((liveSettings) => {
+      setSettings(liveSettings);
+    });
+    const unsubSubmissions = subscribeSubmissions((liveSubmissions) => {
+      setSubmissions(liveSubmissions);
+    });
     return () => {
+      unsubAdmins();
       unsubStaff();
+      unsubStudents();
       unsubSubjects();
       unsubClasses();
+      unsubExams();
+      unsubSettings();
+      unsubSubmissions();
     };
   }, []);
 
@@ -418,16 +455,21 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     }
   };
 
-  const handleDeleteStaff = async (staff: StaffMember) => {
-    if (confirm(`Are you sure you want to delete staff member "${staff.fullName}" (${staff.uniqueId})?`)) {
-      try {
-        await deleteStaffMember(staff.id);
-        setStaffList(prev => prev.filter(s => s.id !== staff.id));
-        showNotification(`Staff member "${staff.fullName}" was removed from database.`);
-      } catch (err) {
-        showNotification('Failed to delete staff member', 'error');
+  const handleDeleteStaff = (staff: StaffMember) => {
+    setPendingConfirm({
+      title: 'Delete Faculty Member',
+      message: `Are you sure you want to permanently remove "${staff.fullName}" (${staff.uniqueId}) from the faculty database?`,
+      confirmLabel: 'Delete Staff Member',
+      onConfirm: async () => {
+        try {
+          await deleteStaffMember(staff.id);
+          setStaffList(prev => prev.filter(s => s.id !== staff.id));
+          showNotification(`Staff member "${staff.fullName}" was removed from database.`);
+        } catch (err) {
+          showNotification('Failed to delete staff member', 'error');
+        }
       }
-    }
+    });
   };
 
   // Student Actions
@@ -444,9 +486,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       classGrade: classes[0]?.code || 'SS 1',
       accessCode: generateStudentAccessCode(existing),
       academicSession: settings.academicSession,
+      status: 'active',
+      gender: '',
+      phoneNumber: '',
+      department: '',
       email: '',
       password: '',
-      passportUrl: ''
+      passportUrl: '',
+      resultWithheld: false,
+      withheldReason: ''
     });
     setEditingStudent(null);
     setShowAddStudentModal(true);
@@ -461,9 +509,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       classGrade: student.classGrade,
       accessCode: student.accessCode || '',
       academicSession: student.academicSession || settings.academicSession,
+      status: student.status || 'active',
+      gender: student.gender?.toLowerCase() === 'female' ? 'Female' : student.gender?.toLowerCase() === 'male' ? 'Male' : '',
+      phoneNumber: student.phoneNumber || '',
+      department: student.department || '',
       email: student.email || '',
       password: student.password || '',
-      passportUrl: student.passportUrl || ''
+      passportUrl: student.passportUrl || '',
+      resultWithheld: Boolean(student.resultWithheld),
+      withheldReason: student.withheldReason || ''
     });
     setShowAddStudentModal(true);
   };
@@ -479,45 +533,57 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     const code = studentForm.accessCode.trim().toUpperCase() || generateStudentAccessCode();
 
     const newStudent: Student = {
+      ...(editingStudent || {}),
       id: studentId,
       admissionNumber: studentForm.admissionNumber.trim().toUpperCase(),
       firstName: studentForm.firstName.trim(),
       surname: studentForm.surname.trim(),
       fullName: `${studentForm.firstName.trim()} ${studentForm.surname.trim()}`,
       classGrade: studentForm.classGrade.trim(),
-      academicSession: studentForm.academicSession,
-      status: 'active',
+      academicSession: studentForm.academicSession.trim() || settings.academicSession,
+      status: studentForm.status || 'active',
+      gender: studentForm.gender || '',
+      phoneNumber: studentForm.phoneNumber.trim(),
+      department: studentForm.department.trim(),
       email: studentForm.email.trim().toLowerCase(),
       password: studentForm.password.trim(),
       passportUrl: studentForm.passportUrl.trim(),
+      resultWithheld: Boolean(studentForm.resultWithheld),
+      withheldReason: studentForm.resultWithheld ? studentForm.withheldReason.trim() : '',
       registeredAt: editingStudent ? editingStudent.registeredAt : new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       accessCode: code
     };
 
     try {
-      await saveStudent(newStudent);
+      const saved = await saveStudent(newStudent);
       setStudents(prev => {
         const filtered = prev.filter(s => s.id !== studentId);
-        return [newStudent, ...filtered];
+        return [saved, ...filtered];
       });
       setShowAddStudentModal(false);
-      showNotification(`Student ${newStudent.fullName} saved with Admission No ${newStudent.admissionNumber}!`);
+      showNotification(`Student ${saved.fullName} saved and synchronized with database!`);
     } catch (err) {
       console.error('Error saving student:', err);
       showNotification('Could not save student to database', 'error');
     }
   };
 
-  const handleDeleteStudent = async (student: Student) => {
-    if (confirm(`Delete student "${student.fullName}" (${student.admissionNumber})?`)) {
-      try {
-        await deleteStudent(student.id);
-        setStudents(prev => prev.filter(s => s.id !== student.id));
-        showNotification(`Student "${student.fullName}" deleted.`);
-      } catch (err) {
-        showNotification('Failed to delete student', 'error');
+  const handleDeleteStudent = (student: Student) => {
+    setPendingConfirm({
+      title: 'Delete Student Profile',
+      message: `Are you sure you want to delete "${student.fullName}" (${student.admissionNumber})?`,
+      confirmLabel: 'Delete Student',
+      onConfirm: async () => {
+        try {
+          await deleteStudent(student.id);
+          setStudents(prev => prev.filter(s => s.id !== student.id));
+          showNotification(`Student "${student.fullName}" deleted and synchronized.`);
+        } catch (err) {
+          showNotification('Failed to delete student', 'error');
+        }
       }
-    }
+    });
   };
 
   // Filtered staff list
@@ -1204,6 +1270,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             subjects={subjects}
             academicSession={settings.academicSession}
             currentTerm={settings.currentTerm}
+            caWeights={settings.caWeights}
             onExamsUpdated={loadData}
             showNotification={showNotification}
           />
@@ -1215,6 +1282,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             students={students}
             subjects={subjects}
             classes={classes}
+            exams={exams}
             settings={settings}
             showNotification={showNotification}
             onRefreshData={loadData}
@@ -1851,6 +1919,77 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 </div>
               </div>
 
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Status</label>
+                  <select
+                    value={studentForm.status}
+                    onChange={(e) => setStudentForm({ ...studentForm, status: e.target.value as 'active' | 'suspended' | 'graduated' })}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold"
+                  >
+                    <option value="active">Active</option>
+                    <option value="suspended">Suspended</option>
+                    <option value="graduated">Graduated</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Gender</label>
+                  <select
+                    value={studentForm.gender}
+                    onChange={(e) => setStudentForm({ ...studentForm, gender: e.target.value as '' | 'Male' | 'Female' })}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl"
+                  >
+                    <option value="">Unspecified</option>
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Department</label>
+                  <input
+                    type="text"
+                    placeholder="Science / Arts"
+                    value={studentForm.department}
+                    onChange={(e) => setStudentForm({ ...studentForm, department: e.target.value })}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Parent / Student Phone Number (Optional)</label>
+                  <input
+                    type="text"
+                    placeholder="+234 800 000 0000"
+                    value={studentForm.phoneNumber}
+                    onChange={(e) => setStudentForm({ ...studentForm, phoneNumber: e.target.value })}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+              </div>
+
+              <div className="p-3 bg-rose-50/60 border border-rose-200 rounded-xl space-y-2">
+                <label className="flex items-center gap-2 text-xs font-bold text-rose-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={studentForm.resultWithheld}
+                    onChange={(e) => setStudentForm({ ...studentForm, resultWithheld: e.target.checked })}
+                    className="rounded text-rose-700"
+                  />
+                  <span>Withhold Student Terminal Results</span>
+                </label>
+                {studentForm.resultWithheld && (
+                  <input
+                    type="text"
+                    placeholder="Reason for withholding (e.g. Unpaid Tuition / Disciplinary)"
+                    value={studentForm.withheldReason}
+                    onChange={(e) => setStudentForm({ ...studentForm, withheldReason: e.target.value })}
+                    className="w-full px-3 py-1.5 text-xs bg-white border border-rose-300 rounded-lg"
+                  />
+                )}
+              </div>
+
               <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
                 <button
                   type="button"
@@ -1901,6 +2040,41 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         currentSession={settings.academicSession || '2025/2026'}
         existingStudents={students}
       />
+
+      {/* In-App Confirmation Modal */}
+      {pendingConfirm && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-rose-900 text-white px-5 py-4 flex items-center gap-2.5">
+              <AlertCircle className="w-5 h-5 text-amber-300 shrink-0" />
+              <h3 className="font-bold text-sm">{pendingConfirm.title}</h3>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-700 leading-relaxed">{pendingConfirm.message}</p>
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setPendingConfirm(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const action = pendingConfirm.onConfirm;
+                    setPendingConfirm(null);
+                    await action();
+                  }}
+                  className="px-4 py-2 text-xs font-bold bg-rose-700 hover:bg-rose-800 text-white rounded-xl cursor-pointer"
+                >
+                  {pendingConfirm.confirmLabel}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

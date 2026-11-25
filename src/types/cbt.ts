@@ -5,6 +5,7 @@ export interface SchoolClass {
   arm?: string; // e.g. "A", "Gold", "Science"
   academicSession: string; // e.g. "2025/2026"
   studentCount?: number;
+  updatedAt?: string;
 }
 
 export interface Subject {
@@ -12,6 +13,7 @@ export interface Subject {
   name: string; // e.g. "Computer Studies", "Mathematics", "Physics"
   code: string; // e.g. "CSC", "MTH", "PHY"
   department: string; // e.g. "Science & Tech", "Humanities", "Commercial"
+  updatedAt?: string;
 }
 
 export interface Student {
@@ -39,7 +41,10 @@ export interface Student {
   resultWithheld?: boolean; // When true, student cannot view results across the school
   withheldSubjectIds?: string[]; // Specific subject IDs withheld from student
   withheldReason?: string; // e.g. "Pending bursary clearance"
+  updatedAt?: string;
 }
+
+export type CbtTargetComponent = 'first_ca' | 'second_ca' | 'exam';
 
 export interface Examination {
   id: string;
@@ -50,6 +55,7 @@ export interface Examination {
   academicSession: string;
   term: '1st Term' | '2nd Term' | '3rd Term';
   examType: 'Mid-Term Test' | 'Final Examination' | 'Continuous Assessment';
+  targetCaComponent?: CbtTargetComponent;
   durationMinutes: number;
   totalQuestions: number;
   instructions: string;
@@ -88,10 +94,11 @@ export interface ExamAttempt {
   studentName: string;
   startTime: string;
   endTime: string; // Absolute expiry timestamp in ISO
-  status: 'in_progress' | 'submitted' | 'timed_out';
+  status: 'in_progress' | 'submitted' | 'timed_out' | 'retake_granted';
   savedAnswers: Record<string, 'A' | 'B' | 'C' | 'D'>;
   flaggedQuestions?: Record<string, boolean>;
   lastHeartbeatAt: string;
+  retakeGrantedAt?: string;
 }
 
 export interface QuestionResultDetail {
@@ -136,6 +143,9 @@ export interface Submission {
   detailedResults?: QuestionResultDetail[];
   topicAnalysis?: Record<string, TopicScore>;
   aiRevisionRecommendations?: string[];
+  attemptNumber?: number; // Chronological sitting index per student & subject (1, 2, 3...)
+  sittingLabel?: string;  // e.g. "1st Exam", "2nd Exam", "3rd Exam"
+  targetCaComponent?: CbtTargetComponent; // Broadsheet target column ('first_ca' | 'second_ca' | 'exam')
 }
 
 export interface AdminUser {
@@ -150,6 +160,7 @@ export interface AdminUser {
   assignedPermissions?: string[];
   createdAt: string;
   lastLoginAt?: string;
+  updatedAt?: string;
 }
 
 export interface CaWeightsConfig {
@@ -248,6 +259,44 @@ export function resolveCaWeights(raw?: Partial<CaWeightsConfig> | null): Require
   };
 }
 
+export function resolveExamTargetComponent(
+  exam?: Partial<Examination> | null,
+  submission?: Partial<Submission> | null
+): CbtTargetComponent {
+  const explicit = exam?.targetCaComponent || submission?.targetCaComponent;
+  if (explicit === 'first_ca' || explicit === 'second_ca' || explicit === 'exam') {
+    return explicit;
+  }
+  const titleHint = `${exam?.title || submission?.examTitle || ''}`.toLowerCase();
+  if (/\b(1st|first)\s*(c\.?a\.?|continuous\s*assessment|test)\b/.test(titleHint)) {
+    return 'first_ca';
+  }
+  if (/\b(2nd|second)\s*(c\.?a\.?|continuous\s*assessment|test)\b/.test(titleHint)) {
+    return 'second_ca';
+  }
+  return 'exam';
+}
+
+export function formatTargetComponentLabel(
+  target?: CbtTargetComponent | null,
+  caWeights?: Partial<CaWeightsConfig> | null
+): string {
+  const weights = resolveCaWeights(caWeights);
+  if (target === 'first_ca') return weights.firstCaLabel || '1st CA';
+  if (target === 'second_ca') return weights.secondCaLabel || '2nd CA';
+  return weights.examLabel || "Term's Exam";
+}
+
+export function getTargetComponentMax(
+  target?: CbtTargetComponent | null,
+  caWeights?: Partial<CaWeightsConfig> | null
+): number {
+  const weights = resolveCaWeights(caWeights);
+  if (target === 'first_ca') return Math.max(1, weights.firstCaMax || 20);
+  if (target === 'second_ca') return Math.max(1, weights.secondCaMax || 20);
+  return Math.max(1, weights.examMax || 50);
+}
+
 export const DEFAULT_GRADE_SCALE: GradeScaleItem[] = [
   { grade: 'A1', minScore: 75, maxScore: 100, gradePoint: 5.0, remark: 'Excellent' },
   { grade: 'B2', minScore: 70, maxScore: 74, gradePoint: 4.0, remark: 'Very Good' },
@@ -288,6 +337,9 @@ export interface SchoolSettings {
   enablePracticeCenter?: boolean;
   enableChatHub?: boolean;
   enableLessonGenerator?: boolean;
+  nextTermBegins?: string;
+  nextTermFees?: string;
+  updatedAt?: string;
 }
 
 export interface SavedStudentLogin {
@@ -335,6 +387,21 @@ export interface StaffMember {
   updatedAt?: string; // ISO timestamp for fast cross-platform sync
 }
 
+export interface CbtExamEntry {
+  submissionId: string;
+  examId: string;
+  examTitle: string;
+  sittingNumber: number;
+  sittingLabel: string; // e.g. "1st Exam", "2nd Exam", "3rd Exam"
+  targetCaComponent?: CbtTargetComponent;
+  rawScore: number;
+  totalQuestions: number;
+  percentage: number;
+  scaledScore: number;
+  examMax: number;
+  submittedAt: string;
+}
+
 export interface StudentAssessmentRecord {
   id: string; // e.g. ca_stu123_subcsc_2025-2026_1stTerm
   studentId: string;
@@ -346,17 +413,18 @@ export interface StudentAssessmentRecord {
   academicSession: string; // e.g. "2025/2026"
   term: '1st Term' | '2nd Term' | '3rd Term';
   assignmentScore: number; // Assignment (0 - 10)
-  firstCaScore?: number;   // 1st CA Summary (0 - 15)
-  secondCaScore?: number;  // 2nd CA Summary (0 - 15)
+  firstCaScore?: number;   // 1st CA Summary (0 - 20)
+  secondCaScore?: number;  // 2nd CA Summary (0 - 20)
   projectScore: number;    // Compatible alias for secondCaScore
   testScore: number;       // Compatible alias for firstCaScore
-  examScore: number;       // Term's Exam (0 - 60)
+  examScore: number;       // Term's Exam (0 - 50)
   totalScore: number;      // 0 - 100
   grade: string;           // A, B, C, D, E, F9
   remark: string;          // EXCELLENT, V.GOOD, GOOD, FAIR, FAIL
   classAverage?: number;   // e.g. 62.6%
   teacherSignature?: string; // e.g. "Signed"
   cbtSubmissionId?: string;
+  examEntries?: CbtExamEntry[]; // Individual CBT sittings (1st Exam, 2nd Exam, etc.) preserved separately
   isAutoSynced?: boolean;
   teacherComment?: string;
   updatedAt: string;
@@ -487,6 +555,7 @@ export interface LessonNote {
   summary: string;
   assignment: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface ExamTimeWindowStatus {
@@ -498,7 +567,8 @@ export interface ExamTimeWindowStatus {
 }
 
 export function checkExamTimeWindow(exam: Examination): ExamTimeWindowStatus {
-  if (exam.status !== 'published') {
+  const normalizedStatus = (exam.status || '').trim().toLowerCase();
+  if (normalizedStatus !== 'published') {
     return {
       isOpen: false,
       code: 'unpublished',
@@ -508,10 +578,11 @@ export function checkExamTimeWindow(exam: Examination): ExamTimeWindowStatus {
 
   const now = new Date().getTime();
 
-  if (exam.startDate) {
-    const startTime = new Date(exam.startDate).getTime();
+  const rawStart = (exam.startDate || '').trim();
+  if (rawStart) {
+    const startTime = new Date(rawStart).getTime();
     if (!isNaN(startTime) && now < startTime) {
-      const formatted = new Date(exam.startDate).toLocaleString(undefined, {
+      const formatted = new Date(rawStart).toLocaleString(undefined, {
         dateStyle: 'medium',
         timeStyle: 'short'
       });
@@ -524,10 +595,11 @@ export function checkExamTimeWindow(exam: Examination): ExamTimeWindowStatus {
     }
   }
 
-  if (exam.endDate) {
-    const endTime = new Date(exam.endDate).getTime();
+  const rawEnd = (exam.endDate || '').trim();
+  if (rawEnd) {
+    const endTime = new Date(rawEnd).getTime();
     if (!isNaN(endTime) && now > endTime) {
-      const formatted = new Date(exam.endDate).toLocaleString(undefined, {
+      const formatted = new Date(rawEnd).toLocaleString(undefined, {
         dateStyle: 'medium',
         timeStyle: 'short'
       });
@@ -679,3 +751,54 @@ export interface CumulativeStudentTranscript {
   totalPassedCourses: number;
   standing: { title: string; color: string; badge: string };
 }
+
+export function formatOrdinalSuffix(n: number): string {
+  const num = Math.max(1, Math.floor(n));
+  const mod100 = num % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${num}th`;
+  switch (num % 10) {
+    case 1: return `${num}st`;
+    case 2: return `${num}nd`;
+    case 3: return `${num}rd`;
+    default: return `${num}th`;
+  }
+}
+
+export function formatOrdinalExamLabel(n: number): string {
+  return `${formatOrdinalSuffix(n)} Exam`;
+}
+
+/**
+ * Computes deterministic chronological sitting labels ("1st Exam", "2nd Exam", ...)
+ * per student & subject within a term/session, while preserving reverse-chronological sort for display.
+ */
+export function enrichSubmissionsWithOrdinals(submissions: Submission[]): Submission[] {
+  if (!Array.isArray(submissions) || submissions.length === 0) return [];
+
+  const asc = [...submissions].sort(
+    (a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime()
+  );
+
+  const counters = new Map<string, number>();
+  const enrichedAsc = asc.map((sub) => {
+    const stuKey = (sub.studentId || sub.admissionNumber || 'stu').trim().toUpperCase();
+    const subjKey = (sub.subject || 'GENERAL').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const sessKey = (sub.academicSession || '').trim().toUpperCase();
+    const termKey = (sub.term || '').trim().toUpperCase().replace(/\s+/g, '');
+    const groupKey = `${stuKey}__${subjKey}__${sessKey}__${termKey}`;
+
+    const nextCount = (counters.get(groupKey) || 0) + 1;
+    counters.set(groupKey, nextCount);
+
+    return {
+      ...sub,
+      attemptNumber: nextCount,
+      sittingLabel: formatOrdinalExamLabel(nextCount)
+    };
+  });
+
+  return enrichedAsc.sort(
+    (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
+  );
+}
+

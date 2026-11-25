@@ -49,6 +49,14 @@ export const AdminCurriculumTab: React.FC<AdminCurriculumTabProps> = ({
     department: 'Science & Tech'
   });
 
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => Promise<void>;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+
   // Class Handlers
   const handleOpenAddClass = () => {
     setEditingClass(null);
@@ -97,16 +105,21 @@ export const AdminCurriculumTab: React.FC<AdminCurriculumTabProps> = ({
     }
   };
 
-  const handleDeleteClass = async (cls: SchoolClass) => {
-    if (confirm(`Are you sure you want to delete class cohort "${cls.code}"?`)) {
-      try {
-        await deleteSchoolClass(cls.id);
-        onCurriculumUpdated();
-        showNotification(`Class "${cls.code}" deleted.`);
-      } catch (err: any) {
-        showNotification(err.message || 'Failed to delete class.', 'error');
+  const handleDeleteClass = (cls: SchoolClass) => {
+    setPendingConfirm({
+      title: 'Delete Class Cohort',
+      message: `Are you sure you want to delete class cohort "${cls.code}" (${cls.name})?`,
+      confirmLabel: 'Delete Class',
+      onConfirm: async () => {
+        try {
+          await deleteSchoolClass(cls.id);
+          onCurriculumUpdated();
+          showNotification(`Class "${cls.code}" deleted.`);
+        } catch (err: any) {
+          showNotification(err.message || 'Failed to delete class.', 'error');
+        }
       }
-    }
+    });
   };
 
   // Subject Handlers
@@ -155,16 +168,21 @@ export const AdminCurriculumTab: React.FC<AdminCurriculumTabProps> = ({
     }
   };
 
-  const handleDeleteSubject = async (sub: Subject) => {
-    if (confirm(`Are you sure you want to delete curriculum subject "${sub.name}"?`)) {
-      try {
-        await deleteSubject(sub.id);
-        onCurriculumUpdated();
-        showNotification(`Subject "${sub.name}" deleted.`);
-      } catch (err: any) {
-        showNotification(err.message || 'Failed to delete subject.', 'error');
+  const handleDeleteSubject = (sub: Subject) => {
+    setPendingConfirm({
+      title: 'Delete Curriculum Subject',
+      message: `Are you sure you want to delete curriculum subject "${sub.name}" (${sub.code})?`,
+      confirmLabel: 'Delete Subject',
+      onConfirm: async () => {
+        try {
+          await deleteSubject(sub.id);
+          onCurriculumUpdated();
+          showNotification(`Subject "${sub.name}" deleted.`);
+        } catch (err: any) {
+          showNotification(err.message || 'Failed to delete subject.', 'error');
+        }
       }
-    }
+    });
   };
 
   return (
@@ -415,6 +433,47 @@ export const AdminCurriculumTab: React.FC<AdminCurriculumTabProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* In-app Confirmation Modal */}
+      {pendingConfirm && (
+        <div className="fixed inset-0 z-70 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-rose-950 text-white px-5 py-4 flex items-center gap-2.5">
+              <AlertCircle className="w-5 h-5 text-rose-300 shrink-0" />
+              <h3 className="font-bold text-sm">{pendingConfirm.title}</h3>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-700 leading-relaxed">{pendingConfirm.message}</p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={confirmBusy}
+                  onClick={() => setPendingConfirm(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={confirmBusy}
+                  onClick={async () => {
+                    setConfirmBusy(true);
+                    try {
+                      await pendingConfirm.onConfirm();
+                    } finally {
+                      setConfirmBusy(false);
+                      setPendingConfirm(null);
+                    }
+                  }}
+                  className="px-4 py-2 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  {confirmBusy ? 'Deleting...' : pendingConfirm.confirmLabel}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

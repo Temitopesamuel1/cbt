@@ -23,16 +23,20 @@ import {
   Submission,
   calculateGrade,
   calculateGradePoint,
+  resolveCaWeights,
+  resolveExamTargetComponent,
+  formatTargetComponentLabel,
+  getTargetComponentMax,
   SchoolSettings,
   Student
 } from '../../types/cbt';
 import { DEFAULT_SCHOOL_SETTINGS } from '../../data/initialSchoolData';
-import { HwsOfficialResultSlip } from '../common/HwsOfficialResultSlip';
 
 interface StudentResultViewProps {
   submission: Submission;
   allowReview?: boolean;
   onReturnToDashboard: () => void;
+  onOpenReportSheet?: () => void;
   settings?: SchoolSettings;
   student?: Student | null;
 }
@@ -41,12 +45,20 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
   submission,
   allowReview = true,
   onReturnToDashboard,
+  onOpenReportSheet,
   settings,
   student
 }) => {
-  const [activeTab, setActiveTab] = useState<'official-sheet' | 'cbt-paper'>('official-sheet');
   const [showQuestionsReview, setShowQuestionsReview] = useState(false);
   const activeSettings = settings || DEFAULT_SCHOOL_SETTINGS;
+  const caWeights = resolveCaWeights(activeSettings.caWeights);
+  const targetComponent = resolveExamTargetComponent(null, submission);
+  const targetLabel = formatTargetComponentLabel(targetComponent, caWeights);
+  const targetMax = getTargetComponentMax(targetComponent, caWeights);
+  const scaledReportExamScore = Math.min(
+    targetMax,
+    Math.max(0, Math.round((submission.percentage / 100) * targetMax))
+  );
 
   const grade = calculateGrade(submission.percentage);
   const gradePoint = calculateGradePoint(submission.percentage);
@@ -83,18 +95,6 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
 
   // Logo URL with graceful fallbacks
   const schoolLogoUrl = activeSettings.schoolLogo || '/school-logo.png';
-
-  const studentObj: Student = student || {
-    id: submission.studentId,
-    admissionNumber: submission.admissionNumber,
-    firstName: submission.studentName.split(' ')[0] || 'Student',
-    surname: submission.studentName.split(' ').slice(1).join(' ') || '',
-    fullName: submission.studentName,
-    classGrade: submission.classGrade,
-    academicSession: submission.academicSession,
-    status: 'active',
-    registeredAt: new Date().toISOString()
-  };
 
   const handlePrint = () => {
     window.print();
@@ -172,13 +172,26 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
         {/* Navigation & Action Bar (Hidden on print) */}
         <div className="space-y-3 no-print">
           <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
-            <button
-              onClick={onReturnToDashboard}
-              className="px-4 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg transition-colors flex items-center gap-2 cursor-pointer shadow-2xs"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Return to Student Dashboard</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={onReturnToDashboard}
+                className="px-4 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg transition-colors flex items-center gap-2 cursor-pointer shadow-2xs"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Return to Student Dashboard</span>
+              </button>
+
+              {onOpenReportSheet && (
+                <button
+                  type="button"
+                  onClick={onOpenReportSheet}
+                  className="px-4 py-2 text-xs font-bold text-blue-900 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors flex items-center gap-2 cursor-pointer shadow-2xs"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Open Terminal Report Sheet</span>
+                </button>
+              )}
+            </div>
 
             <div className="flex items-center gap-2">
               <span className="hidden sm:inline-block text-xs font-semibold text-slate-500">
@@ -189,58 +202,31 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
                 className="px-5 py-2.5 text-xs font-bold text-white bg-blue-900 hover:bg-blue-950 rounded-lg shadow-sm transition-all flex items-center gap-2 cursor-pointer active:scale-98"
               >
                 <Printer className="w-4 h-4 text-amber-300" />
-                <span>{activeTab === 'official-sheet' ? 'Print Official 2-Page Slip' : 'Print CBT Result Slip'}</span>
+                <span>Print CBT Result Slip</span>
               </button>
             </div>
           </div>
 
-          {/* View Mode Switcher: Official 2-Page Report Card vs CBT Paper Diagnostics */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 p-1.5 bg-slate-200/80 rounded-xl border border-slate-300 text-xs font-bold gap-1.5">
-            <button
-              type="button"
-              onClick={() => setActiveTab('official-sheet')}
-              className={`py-2.5 px-3 rounded-lg flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                activeTab === 'official-sheet'
-                  ? 'bg-blue-900 text-white shadow-md'
-                  : 'text-slate-700 hover:text-slate-900 hover:bg-white/60'
-              }`}
-            >
-              <FileSpreadsheet className="w-4 h-4 text-amber-300" />
-              <span>Official Terminal Report Sheet (2-Page Honey's World Standard)</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('cbt-paper')}
-              className={`py-2.5 px-3 rounded-lg flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                activeTab === 'cbt-paper'
-                  ? 'bg-blue-900 text-white shadow-md'
-                  : 'text-slate-700 hover:text-slate-900 hover:bg-white/60'
-              }`}
-            >
-              <Award className="w-4 h-4 text-amber-300" />
-              <span>CBT Paper Diagnostics & Question Corrections</span>
-            </button>
+          {/* Report Sheet Auto-Sync Confirmation Banner */}
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 text-emerald-900 font-semibold">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>
+                <span className="inline-block px-2 py-0.5 mr-1.5 rounded bg-emerald-700 text-white font-bold text-[10px] uppercase">
+                  {submission.sittingLabel || '1st Exam'}
+                </span>
+                CBT Score Recorded & Filled into Broadsheet / Report Sheet ({targetLabel}):{' '}
+                <strong className="font-mono">{scaledReportExamScore} / {targetMax} Marks</strong>
+              </span>
+            </div>
+            <span className="text-[11px] text-emerald-700 font-mono">
+              Raw CBT: {submission.score}/{submission.totalQuestions} ({submission.percentage}%)
+            </span>
           </div>
         </div>
 
-        {/* Tab 1: Official 2-Page Term Report Sheet Matching Exact PDF Sample */}
-        {activeTab === 'official-sheet' && (
-          <div className="space-y-4">
-            <HwsOfficialResultSlip
-              student={studentObj}
-              academicSession={submission.academicSession}
-              term={(submission.term as any) || '1st Term'}
-              settings={activeSettings}
-              isEditable={false}
-              onClose={onReturnToDashboard}
-            />
-          </div>
-        )}
-
-        {/* Tab 2: CBT Paper Diagnostics & Question Corrections */}
-        {activeTab === 'cbt-paper' && (
-          <div className="space-y-6">
+        {/* Standalone CBT Paper Result Slip & Question Corrections */}
+        <div className="space-y-6">
             {/* OFFICIAL INSTITUTIONAL RESULT SLIP */}
             <div className="bg-white rounded-2xl border-2 border-slate-800 shadow-lg overflow-hidden printable-slip">
           {/* Formal Header Triggered Specifically on Paper Print */}
@@ -355,7 +341,7 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
                 OFFICIAL CANDIDATE EXAMINATION RESULT SLIP & EVALUATION SHEET
               </span>
               <span className="bg-amber-400 text-slate-950 px-3 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider font-mono">
-                {submission.academicSession} · {submission.term}
+                {submission.sittingLabel || '1st Exam'} · {submission.academicSession} · {submission.term}
               </span>
             </div>
           </div>
@@ -430,11 +416,16 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
 
                   <div className="flex flex-col border-b border-slate-200/80 pb-1.5">
                     <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
-                      Subject / Course
+                      Subject / Course & Sitting
                     </span>
-                    <span className="font-bold text-blue-900">
-                      {submission.subject}
-                    </span>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-blue-900">
+                        {submission.subject}
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-900 font-black text-[10px] uppercase border border-blue-200">
+                        {submission.sittingLabel || '1st Exam'}
+                      </span>
+                    </div>
                   </div>
 
                   <div className="flex flex-col border-b border-slate-200/80 pb-1.5">
@@ -803,8 +794,7 @@ export const StudentResultView: React.FC<StudentResultViewProps> = ({
             </div>
           ) : null}
         </div>
-      )}
+      </div>
     </div>
-  </div>
-);
+  );
 };

@@ -10,9 +10,10 @@ import {
   Eye,
   Clock,
   GraduationCap,
-  Award
+  Award,
+  X
 } from 'lucide-react';
-import { Submission, Examination, SchoolClass, SchoolSettings } from '../../types/cbt';
+import { Submission, Examination, SchoolClass, SchoolSettings, enrichSubmissionsWithOrdinals } from '../../types/cbt';
 import { deleteSubmission, restartStudentExamTimer } from '../../services/firebase';
 import { StudentResultView } from '../student/StudentResultView';
 
@@ -37,37 +38,67 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
   const [selectedExamFilter, setSelectedExamFilter] = useState('All');
   const [selectedClassFilter, setSelectedClassFilter] = useState('All');
   const [viewingSlipSubmission, setViewingSlipSubmission] = useState<Submission | null>(null);
+  const [pendingActionSubmission, setPendingActionSubmission] = useState<Submission | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
 
-  const filtered = submissions.filter(sub => {
+  const enrichedSubmissions = React.useMemo(
+    () => enrichSubmissionsWithOrdinals(submissions),
+    [submissions]
+  );
+
+  const filtered = enrichedSubmissions.filter(sub => {
     const q = searchQuery.toLowerCase();
     const matchSearch =
       sub.studentName.toLowerCase().includes(q) ||
       sub.admissionNumber.toLowerCase().includes(q) ||
-      sub.examTitle.toLowerCase().includes(q);
+      sub.examTitle.toLowerCase().includes(q) ||
+      (sub.sittingLabel || '').toLowerCase().includes(q);
     const matchExam = selectedExamFilter === 'All' || sub.examId === selectedExamFilter;
     const matchClass = selectedClassFilter === 'All' || sub.classGrade === selectedClassFilter;
     return matchSearch && matchExam && matchClass;
   });
 
-  const handleResetSubmission = async (sub: Submission) => {
-    if (!sub.id) return;
-    if (confirm(`Restart timer & clear attempt for "${sub.studentName}" on "${sub.examTitle}"?\n\nThis will reset the candidate's countdown timer to the full duration, wipe any expired timer lock, delete the previous submission, and allow the student to retake the exam immediately.`)) {
-      try {
-        await restartStudentExamTimer(sub.studentId, sub.examId);
-        onSubmissionsUpdated();
-        showNotification(`Timer restarted for ${sub.studentName}! Candidate can retake "${sub.examTitle}" with full time.`);
-      } catch (err: any) {
-        showNotification(err.message || 'Failed to restart student timer.', 'error');
-      }
+  const handleConfirmUnlockRetake = async () => {
+    if (!pendingActionSubmission) return;
+    const sub = pendingActionSubmission;
+    setActionBusy(true);
+    try {
+      await restartStudentExamTimer(sub.studentId, sub.examId);
+      onSubmissionsUpdated();
+      showNotification(
+        `Retake unlocked for ${sub.studentName}! Previous sittings (${sub.sittingLabel || '1st Exam'}) remain preserved separately.`
+      );
+      setPendingActionSubmission(null);
+    } catch (err: any) {
+      showNotification(err.message || 'Failed to restart student timer.', 'error');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleConfirmDeleteSubmissionRow = async () => {
+    if (!pendingActionSubmission?.id) return;
+    const sub = pendingActionSubmission;
+    setActionBusy(true);
+    try {
+      await deleteSubmission(sub.id!);
+      onSubmissionsUpdated();
+      showNotification(`Removed ${sub.sittingLabel || 'submission'} record for ${sub.studentName}.`);
+      setPendingActionSubmission(null);
+    } catch (err: any) {
+      showNotification(err.message || 'Failed to delete submission record.', 'error');
+    } finally {
+      setActionBusy(false);
     }
   };
 
   const handleExportCsv = () => {
     if (filtered.length === 0) return;
-    const headers = ['Student Name', 'Admission Number', 'Exam Title', 'Subject', 'Class', 'Score', 'Total Questions', 'Percentage', 'Time Spent (Mins)', 'Submission Date'];
+    const headers = ['Student Name', 'Admission Number', 'Sitting', 'Exam Title', 'Subject', 'Class', 'Score', 'Total Questions', 'Percentage', 'Time Spent (Mins)', 'Submission Date'];
     const rows = filtered.map(s => [
       `"${s.studentName}"`,
       `"${s.admissionNumber}"`,
+      `"${s.sittingLabel || '1st Exam'}"`,
       `"${s.examTitle}"`,
       `"${s.subject}"`,
       `"${s.classGrade}"`,
@@ -185,8 +216,13 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
                   </td>
 
                   <td className="py-3 px-4">
-                    <div className="font-semibold text-slate-900">{sub.examTitle}</div>
-                    <div className="text-[10px] text-blue-900">{sub.subject}</div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-black text-[10px] uppercase">
+                        {sub.sittingLabel || '1st Exam'}
+                      </span>
+                      <span className="font-semibold text-slate-900">{sub.examTitle}</span>
+                    </div>
+                    <div className="text-[10px] text-blue-900 mt-0.5">{sub.subject}</div>
                   </td>
 
                   <td className="py-3 px-4 font-bold text-slate-800">
@@ -231,12 +267,12 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
                         <span>Official Slip</span>
                       </button>
                       <button
-                        onClick={() => handleResetSubmission(sub)}
-                        className="px-2 py-1 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
-                        title="Reset submission so student can retake exam"
+                        onClick={() => setPendingActionSubmission(sub)}
+                        className="px-2 py-1 text-xs font-bold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                        title="Unlock a retake (preserves prior sitting scores) or manage this record"
                       >
-                        <RotateCcw className="w-3 h-3 text-rose-600" />
-                        <span>Reset</span>
+                        <RotateCcw className="w-3 h-3 text-amber-700" />
+                        <span>Retake / Reset</span>
                       </button>
                     </div>
                   </td>
@@ -257,6 +293,81 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
               onReturnToDashboard={() => setViewingSlipSubmission(null)}
               settings={schoolSettings}
             />
+          </div>
+        </div>
+      )}
+
+      {/* Retake Unlock / Delete Record Modal */}
+      {pendingActionSubmission && (
+        <div className="fixed inset-0 z-60 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <RotateCcw className="w-4 h-4 text-amber-400" />
+                <h3 className="font-bold text-sm">Manage Sitting & Unlock Retake</h3>
+              </div>
+              <button
+                type="button"
+                disabled={actionBusy}
+                onClick={() => setPendingActionSubmission(null)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4 text-xs">
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                <div className="font-bold text-slate-900">
+                  {pendingActionSubmission.studentName} ({pendingActionSubmission.admissionNumber})
+                </div>
+                <div className="text-slate-600">
+                  <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[10px] mr-1.5">
+                    {pendingActionSubmission.sittingLabel || '1st Exam'}
+                  </span>
+                  {pendingActionSubmission.examTitle} · Score: <strong>{pendingActionSubmission.score}/{pendingActionSubmission.totalQuestions} ({pendingActionSubmission.percentage}%)</strong>
+                </div>
+              </div>
+
+              <p className="text-slate-600 leading-relaxed">
+                <strong>Unlock Retake (Recommended):</strong> Restarts the countdown timer and unlocks a fresh sitting for the candidate while keeping existing scores (1st Exam, 2nd Exam, etc.) stored separately.
+              </p>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                {pendingActionSubmission.id ? (
+                  <button
+                    type="button"
+                    disabled={actionBusy}
+                    onClick={handleConfirmDeleteSubmissionRow}
+                    className="px-3 py-2 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete This Sitting Row</span>
+                  </button>
+                ) : (
+                  <span />
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={actionBusy}
+                    onClick={() => setPendingActionSubmission(null)}
+                    className="px-3.5 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={actionBusy}
+                    onClick={handleConfirmUnlockRetake}
+                    className="px-4 py-2 text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>{actionBusy ? 'Processing...' : 'Unlock New Sitting'}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}

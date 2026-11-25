@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   User,
   Hash,
@@ -65,19 +65,33 @@ export const StudentProfileView: React.FC<StudentProfileViewProps> = ({
   // General state
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedAdm, setCopiedAdm] = useState(false);
+
+  useEffect(() => {
+    setFirstName(student.firstName || '');
+    setSurname(student.surname || '');
+    setEmail(student.email || '');
+    setPhoneNumber(student.phoneNumber || '');
+    setDateOfBirth(student.dateOfBirth || '');
+    setStateOfOrigin(student.stateOfOrigin || '');
+    setDepartment(student.department || 'Science & Technology');
+    setBio(student.bio || '');
+    setPassportUrl(student.passportUrl || '');
+  }, [student.id, student.updatedAt]);
 
   // File upload handler for custom passport from phone or computer
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setProfileError(null);
 
     try {
       const dataUrl = await compressImageFile(file, 320, 320, 0.85);
       setPassportUrl(dataUrl);
     } catch (err: any) {
-      alert(err.message || 'Unable to process passport image file.');
+      setProfileError(err.message || 'Unable to process passport image file.');
     }
   };
 
@@ -96,19 +110,22 @@ export const StudentProfileView: React.FC<StudentProfileViewProps> = ({
     e.preventDefault();
     setSaving(true);
     setSaveSuccess(false);
+    setProfileError(null);
 
-    const fullName = `${firstName.trim()} ${surname.trim()}`;
+    const nowIso = new Date().toISOString();
+    const fullName = `${firstName.trim()} ${surname.trim()}`.trim();
     const updates: Partial<Student> = {
       firstName: firstName.trim(),
       surname: surname.trim(),
       fullName,
       email: email.trim(),
       phoneNumber: phoneNumber.trim(),
-      dateOfBirth,
+      dateOfBirth: dateOfBirth || '',
       stateOfOrigin: stateOfOrigin.trim(),
-      department,
+      department: department || '',
       bio: bio.trim(),
-      passportUrl
+      passportUrl: passportUrl || '',
+      updatedAt: nowIso
     };
 
     try {
@@ -128,7 +145,7 @@ export const StudentProfileView: React.FC<StudentProfileViewProps> = ({
       setTimeout(() => setSaveSuccess(false), 3000);
     } catch (err) {
       console.warn('Profile update error:', err);
-      alert('Unable to update profile. Please verify your connection.');
+      setProfileError('Unable to update profile. Please verify your connection and try again.');
     } finally {
       setSaving(false);
     }
@@ -330,6 +347,13 @@ export const StudentProfileView: React.FC<StudentProfileViewProps> = ({
                 </span>
               )}
             </div>
+
+            {profileError && (
+              <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs font-bold text-rose-800 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{profileError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleSaveProfile} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   School,
   MapPin,
@@ -29,25 +29,25 @@ export const AdminBrandAndPoliciesTab: React.FC<AdminBrandAndPoliciesTabProps> =
   showNotification
 }) => {
   const [form, setForm] = useState<SchoolSettings>({
-    schoolName: settings.schoolName || "Honey's World High School",
-    address: settings.address || 'Gaa Ajanaku, Ilorin, Kwara State',
-    location: settings.location || 'Ilorin, Kwara State, Nigeria',
-    motto: settings.motto || 'Knowledge, Character & Academic Excellence',
-    principalName: settings.principalName || 'Mrs. A. B. Adeyemi (M.Ed, FSTAN)',
-    examOfficerName: settings.examOfficerName || 'Mr. O. P. Balogun (M.Sc, Exam Officer)',
-    resultTitle: settings.resultTitle || 'OFFICIAL CONTINUOUS ASSESSMENT & CBT EXAMINATION REPORT',
-    resultSubtitle: settings.resultSubtitle || 'HONEY\'S WORLD HIGH SCHOOL · ILORIN, KWARA STATE',
-    securityNotice: settings.securityNotice || 'Any alteration on this official slip renders it null and void. Generated directly from the school CBT and Assessment Cloud.',
-    phone: settings.phone || '+234 803 000 0000',
-    email: settings.email || 'info@honeysworldhigh.edu.ng',
-    website: settings.website || 'www.honeysworldhigh.edu.ng',
-    studentIdPrefix: settings.studentIdPrefix || 'HWHS',
-    schoolLogo: settings.schoolLogo || '/school-logo.png',
-    academicSession: settings.academicSession || '2025/2026',
-    currentTerm: settings.currentTerm || '1st Term',
-    passMarkPercentage: settings.passMarkPercentage || 50,
+    schoolName: settings.schoolName ?? "Honey's World High School",
+    address: settings.address ?? 'Gaa Ajanaku, Ilorin, Kwara State',
+    location: settings.location ?? 'Ilorin, Kwara State, Nigeria',
+    motto: settings.motto ?? 'Knowledge, Character & Academic Excellence',
+    principalName: settings.principalName ?? 'Mrs. A. B. Adeyemi (M.Ed, FSTAN)',
+    examOfficerName: settings.examOfficerName ?? 'Mr. O. P. Balogun (M.Sc, Exam Officer)',
+    resultTitle: settings.resultTitle ?? 'OFFICIAL CONTINUOUS ASSESSMENT & CBT EXAMINATION REPORT',
+    resultSubtitle: settings.resultSubtitle ?? 'HONEY\'S WORLD HIGH SCHOOL · ILORIN, KWARA STATE',
+    securityNotice: settings.securityNotice ?? 'Any alteration on this official slip renders it null and void. Generated directly from the school CBT and Assessment Cloud.',
+    phone: settings.phone ?? '+234 803 000 0000',
+    email: settings.email ?? 'info@honeysworldhigh.edu.ng',
+    website: settings.website ?? 'www.honeysworldhigh.edu.ng',
+    studentIdPrefix: settings.studentIdPrefix ?? 'HWHS',
+    schoolLogo: settings.schoolLogo ?? '/school-logo.png',
+    academicSession: settings.academicSession ?? '2025/2026',
+    currentTerm: settings.currentTerm ?? '1st Term',
+    passMarkPercentage: settings.passMarkPercentage ?? 50,
     allowImmediateResultViewing: settings.allowImmediateResultViewing ?? true,
-    announcementBanner: settings.announcementBanner || 'Welcome to Honey\'s World High School Examination Portal. 1st Term Examinations & CA Assessments are now in progress.',
+    announcementBanner: settings.announcementBanner ?? 'Welcome to Honey\'s World High School Examination Portal. 1st Term Examinations & CA Assessments are now in progress.',
     isStudentPortalActive: settings.isStudentPortalActive ?? true,
     isTeacherPortalActive: settings.isTeacherPortalActive ?? true,
     enableAiAdvisor: settings.enableAiAdvisor ?? true,
@@ -57,6 +57,14 @@ export const AdminBrandAndPoliciesTab: React.FC<AdminBrandAndPoliciesTabProps> =
     caWeights: resolveCaWeights(settings.caWeights),
     gradingScale: settings.gradingScale
   });
+
+  useEffect(() => {
+    setForm(prev => ({
+      ...prev,
+      ...settings,
+      caWeights: resolveCaWeights(settings.caWeights)
+    }));
+  }, [settings]);
 
   const [saving, setSaving] = useState(false);
 

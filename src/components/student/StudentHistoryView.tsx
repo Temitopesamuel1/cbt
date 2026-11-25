@@ -1,6 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Award, Calendar, Clock, FileText, ChevronRight, BookOpen } from 'lucide-react';
-import { Student, Submission, calculateGrade } from '../../types/cbt';
+import {
+  Student,
+  Submission,
+  calculateGrade,
+  enrichSubmissionsWithOrdinals,
+  formatOrdinalExamLabel
+} from '../../types/cbt';
 import { fetchSubmissions } from '../../services/firebase';
 
 interface StudentHistoryViewProps {
@@ -23,7 +29,7 @@ export const StudentHistoryView: React.FC<StudentHistoryViewProps> = ({
       try {
         const subs = await fetchSubmissions(undefined, student.id);
         if (subs) {
-          setSubmissions(subs);
+          setSubmissions(enrichSubmissionsWithOrdinals(subs));
         }
       } catch (err) {
         console.warn('History fetch:', err);
@@ -33,6 +39,15 @@ export const StudentHistoryView: React.FC<StudentHistoryViewProps> = ({
     };
     loadHistory();
   }, [student.id]);
+
+  const subjectSittingCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    submissions.forEach(s => {
+      const subj = s.subject || 'General';
+      map.set(subj, (map.get(subj) || 0) + 1);
+    });
+    return Array.from(map.entries());
+  }, [submissions]);
 
   return (
     <div className="min-h-[calc(100vh-4rem)] bg-slate-50 py-8 px-4 sm:px-6 lg:px-8">
@@ -46,11 +61,25 @@ export const StudentHistoryView: React.FC<StudentHistoryViewProps> = ({
           </div>
           <button
             onClick={onBackToDashboard}
-            className="px-4 py-2 text-xs font-semibold text-blue-900 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors shadow-sm"
+            className="px-4 py-2 text-xs font-semibold text-blue-900 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors shadow-sm cursor-pointer"
           >
             ← Return to Active Exams
           </button>
         </div>
+
+        {subjectSittingCounts.length > 0 && (
+          <div className="bg-white rounded-xl border border-slate-200 p-4 flex flex-wrap items-center gap-2 text-xs">
+            <span className="font-bold text-slate-700 mr-1">Total Sittings by Subject:</span>
+            {subjectSittingCounts.map(([subj, count]) => (
+              <span
+                key={subj}
+                className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200 font-semibold text-slate-800"
+              >
+                {subj}: <strong className="text-blue-900 font-mono">{count}</strong> {count === 1 ? 'sitting' : 'sittings'}
+              </span>
+            ))}
+          </div>
+        )}
 
         {loading ? (
           <div className="bg-white rounded-xl border border-slate-200 p-8 text-center text-xs text-slate-500">
@@ -71,13 +100,17 @@ export const StudentHistoryView: React.FC<StudentHistoryViewProps> = ({
                 const grade = calculateGrade(sub.percentage);
                 const mins = Math.floor(sub.timeSpentSeconds / 60);
                 const secs = sub.timeSpentSeconds % 60;
+                const sittingLabel = sub.sittingLabel || formatOrdinalExamLabel(sub.attemptNumber || 1);
 
                 return (
-                  <div key={i} className="p-5 hover:bg-slate-50/70 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div key={sub.id || i} className="p-5 hover:bg-slate-50/70 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <div className="space-y-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
                           {sub.subject}
+                        </span>
+                        <span className="text-[11px] font-black text-amber-900 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                          {sittingLabel}
                         </span>
                         <span className="text-xs text-slate-400">·</span>
                         <span className="text-xs text-slate-500 font-mono">{sub.academicSession} ({sub.term})</span>
@@ -111,7 +144,7 @@ export const StudentHistoryView: React.FC<StudentHistoryViewProps> = ({
 
                       <button
                         onClick={() => onViewResult(sub)}
-                        className="p-2 text-blue-900 hover:bg-blue-50 border border-blue-200 rounded-lg transition-colors flex items-center gap-1 text-xs font-semibold"
+                        className="p-2 text-blue-900 hover:bg-blue-50 border border-blue-200 rounded-lg transition-colors flex items-center gap-1 text-xs font-semibold cursor-pointer"
                       >
                         <span>Slip</span>
                         <ChevronRight className="w-4 h-4" />

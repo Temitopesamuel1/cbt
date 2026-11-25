@@ -15,7 +15,19 @@ import {
   Eye,
   Settings
 } from 'lucide-react';
-import { Examination, Question, SchoolClass, Subject, Student } from '../../types/cbt';
+import {
+  Examination,
+  Question,
+  SchoolClass,
+  Subject,
+  Student,
+  CaWeightsConfig,
+  CbtTargetComponent,
+  checkExamTimeWindow,
+  resolveCaWeights,
+  resolveExamTargetComponent,
+  formatTargetComponentLabel
+} from '../../types/cbt';
 import {
   saveExamination,
   deleteExamination,
@@ -32,6 +44,7 @@ interface AdminExamsTabProps {
   subjects: Subject[];
   academicSession: string;
   currentTerm: string;
+  caWeights?: CaWeightsConfig;
   onExamsUpdated: () => void;
   showNotification: (text: string, type?: 'success' | 'error') => void;
 }
@@ -43,13 +56,22 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
   subjects,
   academicSession,
   currentTerm,
+  caWeights: rawCaWeights,
   onExamsUpdated,
   showNotification
 }) => {
+  const caWeights = resolveCaWeights(rawCaWeights);
   const [timerResetModalExam, setTimerResetModalExam] = useState<Examination | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedClassFilter, setSelectedClassFilter] = useState('All');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState('All');
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => Promise<void>;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   // Exam Edit Modal
   const [showExamModal, setShowExamModal] = useState(false);
@@ -61,6 +83,7 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
     academicSession: string;
     term: '1st Term' | '2nd Term' | '3rd Term';
     examType: 'Mid-Term Test' | 'Final Examination' | 'Continuous Assessment';
+    targetCaComponent: CbtTargetComponent;
     durationMinutes: number;
     totalQuestions: number;
     instructions: string;
@@ -77,6 +100,7 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
     academicSession,
     term: currentTerm as any,
     examType: 'Final Examination',
+    targetCaComponent: 'exam',
     durationMinutes: 45,
     totalQuestions: 20,
     instructions: 'Select the best option for each question. Click Submit when done.',
@@ -128,6 +152,7 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
       academicSession,
       term: currentTerm as any,
       examType: 'Final Examination',
+      targetCaComponent: 'exam',
       durationMinutes: 45,
       totalQuestions: 20,
       instructions: 'Select the single best option for each question. All questions carry equal marks.',
@@ -144,13 +169,15 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
   // Open Exam Edit
   const handleOpenEditExam = (exam: Examination) => {
     setEditingExam(exam);
+    const resolvedTarget = resolveExamTargetComponent(exam);
     setExamForm({
       title: exam.title,
       subjectId: exam.subjectId,
       classGrade: exam.classGrade,
       academicSession: exam.academicSession || academicSession,
       term: exam.term,
-      examType: exam.examType,
+      examType: exam.examType || (resolvedTarget === 'exam' ? 'Final Examination' : 'Continuous Assessment'),
+      targetCaComponent: resolvedTarget,
       durationMinutes: exam.durationMinutes,
       totalQuestions: exam.totalQuestions,
       instructions: exam.instructions,
@@ -175,6 +202,20 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
     const subName = selectedSub ? selectedSub.name : 'General';
     const examId = editingExam ? editingExam.id : `exam_${Date.now()}`;
 
+    const cleanStart = (examForm.startDate || '').trim();
+    let cleanEnd = (examForm.endDate || '').trim();
+    let autoClearedPastEnd = false;
+    if (examForm.status === 'published' && cleanEnd) {
+      const endMs = new Date(cleanEnd).getTime();
+      if (!isNaN(endMs) && endMs <= Date.now()) {
+        cleanEnd = '';
+        autoClearedPastEnd = true;
+      }
+    }
+
+    const derivedExamType =
+      examForm.targetCaComponent === 'exam' ? 'Final Examination' : 'Continuous Assessment';
+
     const newExam: Examination = {
       id: examId,
       title: examForm.title.trim(),
@@ -183,7 +224,8 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
       classGrade: examForm.classGrade,
       academicSession: examForm.academicSession,
       term: examForm.term,
-      examType: examForm.examType,
+      examType: examForm.examType || derivedExamType,
+      targetCaComponent: examForm.targetCaComponent,
       durationMinutes: Number(examForm.durationMinutes),
       totalQuestions: Number(examForm.totalQuestions),
       instructions: examForm.instructions.trim(),
@@ -193,8 +235,8 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
       shuffleQuestions: examForm.shuffleQuestions,
       shuffleOptions: examForm.shuffleOptions,
       resultVisibility: examForm.resultVisibility,
-      startDate: examForm.startDate || undefined,
-      endDate: examForm.endDate || undefined,
+      startDate: cleanStart,
+      endDate: cleanEnd,
       createdAt: editingExam ? editingExam.createdAt : new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -204,7 +246,9 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
       setShowExamModal(false);
       onExamsUpdated();
       showNotification(
-        editingExam
+        autoClearedPastEnd
+          ? `Examination "${newExam.title}" published & expired closing date cleared so students can enter immediately!`
+          : editingExam
           ? `Examination "${newExam.title}" updated successfully!`
           : `New Examination "${newExam.title}" created!`
       );
@@ -213,30 +257,65 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
     }
   };
 
-  const handleDeleteExam = async (exam: Examination) => {
-    if (confirm(`Are you sure you want to delete examination "${exam.title}"? All associated questions will be removed.`)) {
-      try {
-        await deleteExamination(exam.id);
-        onExamsUpdated();
-        showNotification(`Examination "${exam.title}" deleted.`);
-      } catch (err: any) {
-        showNotification(err.message || 'Failed to delete exam.', 'error');
+  const handleDeleteExam = (exam: Examination) => {
+    setPendingConfirm({
+      title: 'Delete Examination',
+      message: `Are you sure you want to permanently delete "${exam.title}" and all its associated questions? Students will immediately lose access to this paper.`,
+      confirmLabel: 'Delete Examination',
+      onConfirm: async () => {
+        try {
+          await deleteExamination(exam.id);
+          onExamsUpdated();
+          showNotification(`Examination "${exam.title}" deleted.`);
+        } catch (err: any) {
+          showNotification(err.message || 'Failed to delete exam.', 'error');
+        }
       }
-    }
+    });
   };
 
   const handleTogglePublish = async (exam: Examination) => {
     const nextStatus: 'draft' | 'published' = exam.status === 'published' ? 'draft' : 'published';
+    let nextStart = (exam.startDate || '').trim();
+    let nextEnd = (exam.endDate || '').trim();
+    if (nextStatus === 'published' && nextEnd) {
+      const endMs = new Date(nextEnd).getTime();
+      if (!isNaN(endMs) && endMs <= Date.now()) {
+        nextEnd = '';
+      }
+    }
     try {
       await saveExamination({
         ...exam,
         status: nextStatus,
+        startDate: nextStart,
+        endDate: nextEnd,
         updatedAt: new Date().toISOString()
       });
       onExamsUpdated();
-      showNotification(`Exam "${exam.title}" is now ${nextStatus === 'published' ? 'PUBLISHED (live for students)' : 'PAUSED (hidden as draft)'}.`);
+      showNotification(
+        nextStatus === 'published'
+          ? `Exam "${exam.title}" is now PUBLISHED and open to students.`
+          : `Exam "${exam.title}" is now PAUSED (hidden as draft).`
+      );
     } catch (err: any) {
       showNotification(err.message || 'Failed to toggle exam status.', 'error');
+    }
+  };
+
+  const handleOpenExamNow = async (exam: Examination) => {
+    try {
+      await saveExamination({
+        ...exam,
+        status: 'published',
+        startDate: '',
+        endDate: '',
+        updatedAt: new Date().toISOString()
+      });
+      onExamsUpdated();
+      showNotification(`Exam "${exam.title}" schedule cleared and OPEN immediately to students.`);
+    } catch (err: any) {
+      showNotification(err.message || 'Failed to open examination.', 'error');
     }
   };
 
@@ -332,18 +411,33 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
     }
   };
 
-  const handleDeleteQuestion = async (q: Question) => {
+  const handleDeleteQuestion = (q: Question) => {
     if (!activeExamForQuestions) return;
-    if (confirm(`Delete Question #${q.questionNumber}?`)) {
-      try {
-        await deleteQuestion(activeExamForQuestions.id, q.id);
-        const qs = await fetchQuestions(activeExamForQuestions.id);
-        setExamQuestions(qs || []);
-        showNotification(`Question #${q.questionNumber} deleted.`);
-      } catch (err: any) {
-        showNotification(err.message || 'Failed to delete question.', 'error');
+    const examSnapshot = activeExamForQuestions;
+    const examId = examSnapshot.id;
+    setPendingConfirm({
+      title: `Delete Question #${q.questionNumber}`,
+      message: `Remove Question #${q.questionNumber} from "${examSnapshot.title}"?`,
+      confirmLabel: 'Delete Question',
+      onConfirm: async () => {
+        try {
+          await deleteQuestion(examId, q.id);
+          const qs = await fetchQuestions(examId);
+          setExamQuestions(qs || []);
+          const updatedExam: Examination = {
+            ...examSnapshot,
+            totalQuestions: qs.length,
+            updatedAt: new Date().toISOString()
+          };
+          await saveExamination(updatedExam);
+          setActiveExamForQuestions(updatedExam);
+          onExamsUpdated();
+          showNotification(`Question #${q.questionNumber} deleted.`);
+        } catch (err: any) {
+          showNotification(err.message || 'Failed to delete question.', 'error');
+        }
       }
-    }
+    });
   };
 
   // Filtered exams
@@ -455,6 +549,23 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
                     <td className="py-3.5 px-4">
                       <div className="font-bold text-blue-900">{exam.subjectName}</div>
                       <div className="text-[11px] text-slate-500 font-semibold">{exam.classGrade}</div>
+                      {(() => {
+                        const targetComp = resolveExamTargetComponent(exam);
+                        const label = formatTargetComponentLabel(targetComp, caWeights);
+                        return (
+                          <span
+                            className={`inline-block mt-1 text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                              targetComp === 'first_ca'
+                                ? 'bg-blue-50 text-blue-900 border-blue-200'
+                                : targetComp === 'second_ca'
+                                ? 'bg-indigo-50 text-indigo-900 border-indigo-200'
+                                : 'bg-amber-50 text-amber-900 border-amber-300'
+                            }`}
+                          >
+                            Broadsheet: {label}
+                          </span>
+                        );
+                      })()}
                     </td>
 
                     <td className="py-3.5 px-4">
@@ -468,21 +579,52 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
                     </td>
 
                     <td className="py-3.5 px-4">
-                      <span
-                        className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded border ${
-                          exam.status === 'published'
-                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                            : exam.status === 'draft'
-                            ? 'bg-amber-50 text-amber-800 border-amber-200'
-                            : 'bg-slate-100 text-slate-600 border-slate-300'
-                        }`}
-                      >
-                        {exam.status}
-                      </span>
+                      {(() => {
+                        const win = checkExamTimeWindow(exam);
+                        return (
+                          <div className="space-y-1">
+                            <span
+                              className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded border inline-block ${
+                                exam.status === 'published'
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                  : exam.status === 'draft'
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : 'bg-slate-100 text-slate-600 border-slate-300'
+                              }`}
+                            >
+                              {exam.status}
+                            </span>
+                            {exam.status === 'published' && (
+                              <div className={`text-[10px] font-bold ${
+                                win.isOpen
+                                  ? 'text-emerald-700'
+                                  : win.code === 'not_yet_started'
+                                  ? 'text-amber-700'
+                                  : 'text-rose-700'
+                              }`}>
+                                {win.isOpen
+                                  ? '● Open to Students'
+                                  : win.code === 'not_yet_started'
+                                  ? '○ Scheduled Start'
+                                  : '✕ Window Closed'}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </td>
 
                     <td className="py-3.5 px-4 text-right">
                       <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                        {exam.status === 'published' && !checkExamTimeWindow(exam).isOpen && (
+                          <button
+                            onClick={() => handleOpenExamNow(exam)}
+                            className="px-2.5 py-1 text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 rounded-lg cursor-pointer transition-colors shadow-2xs"
+                            title="Clear schedule dates and open immediately for students"
+                          >
+                            Open Now
+                          </button>
+                        )}
                         <button
                           onClick={() => setTimerResetModalExam(exam)}
                           className="px-2.5 py-1 text-xs font-bold bg-amber-50 text-amber-900 hover:bg-amber-100 border border-amber-300 rounded-lg flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
@@ -559,11 +701,68 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
                 <input
                   type="text"
                   required
-                  placeholder="e.g. 1st Term Computer Studies Examination"
+                  placeholder="e.g. 1st CA Test or 1st Term Computer Studies Examination"
                   value={examForm.title}
                   onChange={(e) => setExamForm({ ...examForm, title: e.target.value })}
                   className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900"
                 />
+              </div>
+
+              {/* Result Broadsheet Target Selector (1st CA / 2nd CA / Term Exam) */}
+              <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="font-bold text-blue-950 text-xs">
+                    Record Score Into Broadsheet Column
+                  </label>
+                  <span className="text-[10px] font-bold text-blue-700">Auto-scales on submission</span>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    {
+                      value: 'first_ca' as CbtTargetComponent,
+                      label: caWeights.firstCaLabel,
+                      max: caWeights.firstCaMax,
+                      examType: 'Continuous Assessment' as const
+                    },
+                    {
+                      value: 'second_ca' as CbtTargetComponent,
+                      label: caWeights.secondCaLabel,
+                      max: caWeights.secondCaMax,
+                      examType: 'Continuous Assessment' as const
+                    },
+                    {
+                      value: 'exam' as CbtTargetComponent,
+                      label: caWeights.examLabel,
+                      max: caWeights.examMax,
+                      examType: 'Final Examination' as const
+                    }
+                  ].map(opt => {
+                    const active = examForm.targetCaComponent === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() =>
+                          setExamForm({
+                            ...examForm,
+                            targetCaComponent: opt.value,
+                            examType: opt.examType
+                          })
+                        }
+                        className={`px-2.5 py-2 rounded-lg border text-left transition-all cursor-pointer ${
+                          active
+                            ? 'bg-blue-900 text-white border-blue-900 shadow-xs'
+                            : 'bg-white text-slate-700 border-slate-300 hover:border-blue-400'
+                        }`}
+                      >
+                        <div className="font-bold text-[11px] truncate">{opt.label}</div>
+                        <div className={`text-[10px] font-mono ${active ? 'text-blue-200' : 'text-slate-500'}`}>
+                          Max: {opt.max} marks
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -964,6 +1163,47 @@ export const AdminExamsTab: React.FC<AdminExamsTabProps> = ({
             showNotification(`Student timers successfully reset for "${timerResetModalExam.title}".`);
           }}
         />
+      )}
+
+      {/* In-app Confirmation Modal (iframe-safe replacement for window.confirm) */}
+      {pendingConfirm && (
+        <div className="fixed inset-0 z-70 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-rose-950 text-white px-5 py-4 flex items-center gap-2.5">
+              <AlertCircle className="w-5 h-5 text-rose-300 shrink-0" />
+              <h3 className="font-bold text-sm">{pendingConfirm.title}</h3>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-700 leading-relaxed">{pendingConfirm.message}</p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={confirmBusy}
+                  onClick={() => setPendingConfirm(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={confirmBusy}
+                  onClick={async () => {
+                    setConfirmBusy(true);
+                    try {
+                      await pendingConfirm.onConfirm();
+                    } finally {
+                      setConfirmBusy(false);
+                      setPendingConfirm(null);
+                    }
+                  }}
+                  className="px-4 py-2 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-xl cursor-pointer disabled:opacity-50"
+                >
+                  {confirmBusy ? 'Deleting...' : pendingConfirm.confirmLabel}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

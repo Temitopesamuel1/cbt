@@ -44,18 +44,12 @@ export default defineConfig(() => {
           ]
         },
         devOptions: {
-          enabled: true
+          enabled: false
         },
         workbox: {
           maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
-          navigateFallbackDenylist: [/^\/api/, /^\/__/],
-          runtimeCaching: [
-            {
-              urlPattern: /^https:\/\/(firestore|identitytoolkit|securetoken|www)\.googleapis\.com\/.*/i,
-              handler: 'NetworkOnly'
-            }
-          ]
+          navigateFallbackDenylist: [/^\/api/, /^\/__/]
         }
       })
     ],
