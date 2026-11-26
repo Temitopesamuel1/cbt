@@ -384,13 +384,12 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   const loadAllData = async () => {
     setLoading(true);
     try {
-      const [fetchedExams, fetchedClasses, fetchedSubjects, fetchedStudents, fetchedSubs, fetchedSettings] =
+      const [fetchedExams, fetchedClasses, fetchedSubjects, fetchedStudents, fetchedSettings] =
         await Promise.all([
           fetchExaminations(false),
           fetchSchoolClasses(),
           fetchSubjects(),
           fetchStudents(),
-          fetchSubmissions(),
           fetchSchoolSettings()
         ]);
 
@@ -403,7 +402,6 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       if (fetchedClasses) setClasses(fetchedClasses);
       if (fetchedSubjects) setSubjects(fetchedSubjects);
       if (fetchedStudents) setStudents(fetchedStudents);
-      if (fetchedSubs) setSubmissions(fetchedSubs);
       if (fetchedSettings) setSettings(fetchedSettings);
     } catch (err) {
       console.warn('Teacher data load warning:', err);
@@ -461,26 +459,6 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       setSubmissions(liveSubmissions);
     });
 
-    const refreshSubmissionsLive = () => {
-      fetchSubmissions().then(subs => {
-        if (subs) setSubmissions(subs);
-      }).catch(() => {});
-    };
-
-    const handleLocalSync = () => refreshSubmissionsLive();
-    window.addEventListener('prime_cbt_exams_updated', handleLocalSync);
-
-    let syncChannel: BroadcastChannel | null = null;
-    try {
-      syncChannel = new BroadcastChannel('prime_cbt_sync_channel');
-      syncChannel.onmessage = (ev) => {
-        const type = ev.data?.type;
-        if (type === 'SUBMISSIONS_UPDATED' || type === 'TIMER_RESTARTED') {
-          refreshSubmissionsLive();
-        }
-      };
-    } catch {}
-
     return () => {
       unsubStaff();
       unsubSubjects();
@@ -489,10 +467,6 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       unsubStudents();
       unsubSettings();
       unsubSubmissions();
-      window.removeEventListener('prime_cbt_exams_updated', handleLocalSync);
-      if (syncChannel) {
-        try { syncChannel.close(); } catch {}
-      }
     };
   }, []);
 
@@ -2867,6 +2841,9 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             teacher={activeStaff}
             subjects={authorizedSubjects}
             classes={authorizedClasses}
+            schoolLogo={settings.schoolLogo}
+            schoolName={settings.schoolName}
+            schoolAddress={settings.address}
           />
         )}
 
@@ -3811,6 +3788,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         onClose={() => setShowStudentSlipsModal(false)}
         students={students}
         schoolName={settings.schoolName}
+        schoolLogo={settings.schoolLogo}
         currentSession={settings.academicSession}
         currentTerm={settings.currentTerm}
       />

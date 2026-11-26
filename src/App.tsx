@@ -117,6 +117,22 @@ export default function App() {
     };
   }, []);
 
+  // Dynamically sync browser tab favicon & app touch icon to the editable school logo
+  useEffect(() => {
+    const logoHref = (schoolSettings.schoolLogo || '').trim() || '/school-logo.png';
+    try {
+      const iconLinks = document.querySelectorAll<HTMLLinkElement>('link[rel="icon"], link[rel="apple-touch-icon"]');
+      iconLinks.forEach(link => {
+        if (link.href !== logoHref) {
+          link.href = logoHref;
+        }
+      });
+    } catch {}
+    if (schoolSettings.schoolName) {
+      document.title = `${schoolSettings.schoolName} - Examination & Student Assessment System`;
+    }
+  }, [schoolSettings.schoolLogo, schoolSettings.schoolName]);
+
   // Keep active teacher session synchronized in real time when edited by Admin or self
   useEffect(() => {
     if (!teacherStaff?.id) return;
@@ -374,6 +390,7 @@ export default function App() {
             <AdminLogin
               onLoginSuccess={handleAdminLoginSuccess}
               onNavigateHome={() => navigate('/')}
+              settings={schoolSettings}
             />
           )
         )}
@@ -383,6 +400,7 @@ export default function App() {
           <TeacherLogin
             onLoginSuccess={handleTeacherLoginSuccess}
             onNavigateToStudent={() => navigate('/student/login')}
+            settings={schoolSettings}
           />
         )}
 
@@ -406,6 +424,7 @@ export default function App() {
             <TeacherLogin
               onLoginSuccess={handleTeacherLoginSuccess}
               onNavigateToStudent={() => navigate('/student/login')}
+              settings={schoolSettings}
             />
           )
         )}
@@ -415,6 +434,7 @@ export default function App() {
           <StudentLogin
             onLoginSuccess={handleStudentLoginSuccess}
             onNavigateToTeacher={() => navigate('/teacher/login')}
+            settings={schoolSettings}
           />
         )}
 
@@ -424,6 +444,7 @@ export default function App() {
             <StudentLogin
               onLoginSuccess={handleStudentLoginSuccess}
               onNavigateToTeacher={() => navigate('/teacher/login')}
+              settings={schoolSettings}
             />
           ) : (
             <>

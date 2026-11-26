@@ -16,15 +16,16 @@ import {
   Lock,
   School
 } from 'lucide-react';
-import { Student, SavedStudentLogin } from '../../types/cbt';
+import { Student, SavedStudentLogin, SchoolSettings } from '../../types/cbt';
 import { authenticateStudentWithCredentials, fetchStudents } from '../../services/firebase';
 
 interface StudentLoginProps {
   onLoginSuccess: (student: Student) => void;
   onNavigateToTeacher: () => void;
+  settings?: SchoolSettings;
 }
 
-export const StudentLogin: React.FC<StudentLoginProps> = ({ onLoginSuccess, onNavigateToTeacher }) => {
+export const StudentLogin: React.FC<StudentLoginProps> = ({ onLoginSuccess, onNavigateToTeacher, settings }) => {
   const [loginMode, setLoginMode] = useState<'passcode' | 'email'>('passcode');
   const [studentCodeOrId, setStudentCodeOrId] = useState('');
   const [studentEmail, setStudentEmail] = useState('');
@@ -160,8 +161,19 @@ export const StudentLogin: React.FC<StudentLoginProps> = ({ onLoginSuccess, onNa
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8">
           {/* Header */}
           <div className="text-center space-y-2 mb-6">
-            <div className="w-14 h-14 rounded-2xl bg-blue-900 text-white flex items-center justify-center mx-auto shadow-inner border border-blue-950">
-              <GraduationCap className="w-7 h-7" />
+            <div className="w-16 h-16 rounded-2xl bg-white p-1.5 flex items-center justify-center mx-auto shadow-md border-2 border-amber-400 overflow-hidden">
+              <img
+                src={(settings?.schoolLogo || '').trim() || '/school-logo.png'}
+                alt={settings?.schoolName || 'School Logo'}
+                className="w-full h-full object-contain rounded-xl"
+                onError={(e) => {
+                  const img = e.currentTarget;
+                  if (!img.dataset.fallbackApplied) {
+                    img.dataset.fallbackApplied = '1';
+                    img.src = '/school-logo.png';
+                  }
+                }}
+              />
             </div>
             <h1 className="text-2xl font-black text-slate-900 tracking-tight">
               Student Information Portal

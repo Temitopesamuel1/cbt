@@ -10,15 +10,16 @@ import {
   CheckCircle2,
   BookOpen
 } from 'lucide-react';
-import { StaffMember } from '../../types/cbt';
+import { StaffMember, SchoolSettings } from '../../types/cbt';
 import { authenticateStaffWithCredentials, fetchStaffMembers } from '../../services/firebase';
 
 interface TeacherLoginProps {
   onLoginSuccess: (staff: StaffMember) => void;
   onNavigateToStudent: () => void;
+  settings?: SchoolSettings;
 }
 
-export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNavigateToStudent }) => {
+export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNavigateToStudent, settings }) => {
   const [uniqueStaffId, setUniqueStaffId] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -96,8 +97,19 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onNa
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8">
           {/* Header */}
           <div className="flex items-center gap-3 pb-5 border-b border-slate-100 mb-6">
-            <div className="w-12 h-12 rounded-xl bg-slate-900 text-white flex items-center justify-center shadow-md">
-              <ShieldCheck className="w-6 h-6 text-amber-400" />
+            <div className="w-12 h-12 rounded-xl bg-white border-2 border-amber-400 p-1 flex items-center justify-center shadow-md overflow-hidden shrink-0">
+              <img
+                src={(settings?.schoolLogo || '').trim() || '/school-logo.png'}
+                alt={settings?.schoolName || 'School Logo'}
+                className="w-full h-full object-contain rounded-lg"
+                onError={(e) => {
+                  const img = e.currentTarget;
+                  if (!img.dataset.fallbackApplied) {
+                    img.dataset.fallbackApplied = '1';
+                    img.src = '/school-logo.png';
+                  }
+                }}
+              />
             </div>
             <div>
               <h1 className="text-xl font-black text-slate-900">Faculty Staff Portal</h1>

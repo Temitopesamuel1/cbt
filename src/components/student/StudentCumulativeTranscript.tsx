@@ -228,20 +228,23 @@ export const StudentCumulativeTranscript: React.FC<StudentCumulativeTranscriptPr
         <div className="border-b-2 border-slate-900 pb-6 text-center space-y-2">
           <div className="flex items-center justify-center gap-4">
             <img
-              src="/school-logo.png"
-              alt="Honey's World High School Crest"
+              src={(settings?.schoolLogo || '').trim() || '/school-logo.png'}
+              alt={settings?.schoolName || "Honey's World High School Crest"}
               className="w-16 h-16 object-contain rounded-full shadow-xs border border-amber-300/40 shrink-0 bg-white p-0.5"
               onError={(e) => {
-                // fallback to styled initials if image fails
-                (e.currentTarget as HTMLElement).style.display = 'none';
+                const img = e.currentTarget;
+                if (!img.dataset.fallbackApplied) {
+                  img.dataset.fallbackApplied = '1';
+                  img.src = '/school-logo.png';
+                }
               }}
             />
             <div className="text-left">
               <h1 className="text-lg sm:text-xl font-black uppercase tracking-wider text-slate-900">
-                HONEY'S WORLD HIGH SCHOOL
+                {(settings?.schoolName || "HONEY'S WORLD HIGH SCHOOL").toUpperCase()}
               </h1>
               <p className="text-xs text-blue-950 font-bold uppercase tracking-wider">
-                GAA AJANAKU, ILORIN, KWARA STATE
+                {(settings?.address || 'GAA AJANAKU, ILORIN, KWARA STATE').toUpperCase()}
               </p>
               <p className="text-[10px] text-slate-500 font-medium uppercase tracking-widest">
                 DIRECTORATE OF ACADEMIC AFFAIRS & STUDENT RECORDS

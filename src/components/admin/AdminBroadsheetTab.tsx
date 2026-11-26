@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   FileSpreadsheet,
   Save,
@@ -101,6 +101,9 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
   const [savedSuccessId, setSavedSuccessId] = useState<string | null>(null);
   const [savingAll, setSavingAll] = useState(false);
   const [searchFilter, setSearchFilter] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [showAllRows, setShowAllRows] = useState(false);
+  const PAGE_SIZE = 50;
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const hasUnsavedChangesRef = useRef(false);
   useEffect(() => {
@@ -251,14 +254,27 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     };
   }, [flushAutoSave]);
 
-  // Merge enrolled class students with any custom added broadsheet entries
-  const classStudents = students.filter(s => {
+  // Memoized enrolled class students (prevents re-render churn & spurious re-fetches)
+  const classStudents = useMemo(() => {
     const cleanClass = selectedClass.trim().toLowerCase().replace(/[\s\-_]/g, '');
-    const stuClass = (s.classGrade || '').trim().toLowerCase().replace(/[\s\-_]/g, '');
-    return stuClass === cleanClass || s.classGrade === selectedClass;
-  });
+    return students.filter(s => {
+      const stuClass = (s.classGrade || '').trim().toLowerCase().replace(/[\s\-_]/g, '');
+      return stuClass === cleanClass || s.classGrade === selectedClass;
+    });
+  }, [students, selectedClass]);
 
-  // Load CA Records for this combination (matching by subjectId OR subjectName, and studentId OR admissionNumber)
+  const classStudentsRef = useRef<Student[]>(classStudents);
+  useEffect(() => {
+    classStudentsRef.current = classStudents;
+  }, [classStudents]);
+
+  const studentByIdMap = useMemo(() => {
+    const map = new Map<string, Student>();
+    students.forEach(s => map.set(s.id, s));
+    return map;
+  }, [students]);
+
+  // Load CA Records for this combination (decoupled from classStudents array reference)
   const loadRecords = useCallback(async () => {
     if (!selectedSubjectId || !selectedClass) return;
     setLoading(true);
@@ -270,8 +286,11 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
         term,
         currentSubject?.name
       );
+      const currentClassStudents = classStudentsRef.current;
+      const studentIdSet = new Set<string>();
       const admToStudentId = new Map<string, string>();
-      classStudents.forEach(s => {
+      currentClassStudents.forEach(s => {
+        studentIdSet.add(s.id);
         if (s.admissionNumber) {
           admToStudentId.set(s.admissionNumber.trim().toUpperCase(), s.id);
         }
@@ -279,9 +298,8 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
 
       const map: Record<string, StudentAssessmentRecord> = {};
       fetched.forEach(r => {
-        const directStu = classStudents.find(s => s.id === r.studentId);
-        const mappedId = directStu
-          ? directStu.id
+        const mappedId = studentIdSet.has(r.studentId)
+          ? r.studentId
           : admToStudentId.get((r.admissionNumber || '').trim().toUpperCase()) || r.studentId;
         map[mappedId] = {
           ...r,
@@ -302,7 +320,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [selectedSubjectId, selectedClass, academicSession, term, currentSubject?.name, classStudents]);
+  }, [selectedSubjectId, selectedClass, academicSession, term, currentSubject?.name]);
 
   useEffect(() => {
     loadRecords();
@@ -385,16 +403,39 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     return list;
   }, [classStudents, records]);
 
+  const entryByStudentIdMap = useMemo(() => {
+    const map = new Map<string, (typeof combinedEntries)[number]>();
+    combinedEntries.forEach(e => map.set(e.studentId, e));
+    return map;
+  }, [combinedEntries]);
+
   // Filter students by search term
-  const filteredEntries = combinedEntries.filter(entry => {
-    const q = searchFilter.toLowerCase();
-    const rec = records[entry.studentId];
-    return (
-      entry.fullName.toLowerCase().includes(q) ||
-      entry.admissionNumber.toLowerCase().includes(q) ||
-      (rec?.grade && rec.grade.toLowerCase().includes(q))
-    );
-  });
+  const filteredEntries = useMemo(() => {
+    const q = searchFilter.trim().toLowerCase();
+    if (!q) return combinedEntries;
+    return combinedEntries.filter(entry => {
+      const rec = records[entry.studentId];
+      return (
+        entry.fullName.toLowerCase().includes(q) ||
+        entry.admissionNumber.toLowerCase().includes(q) ||
+        (rec?.grade && rec.grade.toLowerCase().includes(q))
+      );
+    });
+  }, [combinedEntries, records, searchFilter]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedSubjectId, selectedClass, academicSession, term, searchFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredEntries.length / PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paginatedEntries = useMemo(() => {
+    if (showAllRows || filteredEntries.length <= PAGE_SIZE) {
+      return filteredEntries;
+    }
+    const start = (safePage - 1) * PAGE_SIZE;
+    return filteredEntries.slice(start, start + PAGE_SIZE);
+  }, [filteredEntries, showAllRows, safePage]);
 
   // Handle score or text field change + immediate local stage + debounced auto-save
   const handleScoreChange = (
@@ -405,7 +446,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     setHasUnsavedChanges(true);
     setSyncState('saving');
     dirtyStudentIdsRef.current.add(studentId);
-    const entry = combinedEntries.find(e => e.studentId === studentId);
+    const entry = entryByStudentIdMap.get(studentId);
     const existingName = entry ? entry.fullName : 'Student';
     const existingAdm = entry ? entry.admissionNumber : '';
 
@@ -794,15 +835,39 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
       const syncedColumns = new Set<string>();
       const copy = { ...recordsRef.current };
       const changedRecords: StudentAssessmentRecord[] = [];
+      const cleanSubj = currentSubjectName.trim().toLowerCase();
+
+      // Index matching subject submissions in O(submissions) so lookup per student is O(1)
+      const subsByStudentId = new Map<string, typeof submissions>();
+      const subsByAdm = new Map<string, typeof submissions>();
+      for (const s of submissions) {
+        if (!s.subject || s.subject.trim().toLowerCase() !== cleanSubj) continue;
+        if (s.studentId) {
+          const arr = subsByStudentId.get(s.studentId) || [];
+          arr.push(s);
+          subsByStudentId.set(s.studentId, arr);
+        }
+        if (s.admissionNumber) {
+          const adm = s.admissionNumber.trim().toUpperCase();
+          const arr = subsByAdm.get(adm) || [];
+          arr.push(s);
+          subsByAdm.set(adm, arr);
+        }
+      }
 
       for (const entry of combinedEntries) {
-        const studentMatches = submissions
-          .filter(s => {
-            const matchStudent = s.studentId === entry.studentId || s.admissionNumber.toUpperCase() === entry.admissionNumber.toUpperCase();
-            const matchSubj = s.subject.trim().toLowerCase() === currentSubjectName.trim().toLowerCase();
-            return matchStudent && matchSubj;
-          })
-          .sort((a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime());
+        const mergedSubMap = new Map<string, (typeof submissions)[number]>();
+        (subsByStudentId.get(entry.studentId) || []).forEach(s => {
+          mergedSubMap.set(s.id || `${s.examId}_${s.submittedAt}`, s);
+        });
+        if (entry.admissionNumber) {
+          (subsByAdm.get(entry.admissionNumber.trim().toUpperCase()) || []).forEach(s => {
+            mergedSubMap.set(s.id || `${s.examId}_${s.submittedAt}`, s);
+          });
+        }
+        const studentMatches = Array.from(mergedSubMap.values()).sort(
+          (a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime()
+        );
 
         if (studentMatches.length > 0) {
           filledCount++;
@@ -993,16 +1058,28 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     document.body.removeChild(link);
   };
 
-  // Quick statistics
-  const scoreValues = combinedEntries
-    .map(e => records[e.studentId]?.totalScore)
-    .filter((s): s is number => typeof s === 'number');
-  const classAvg = scoreValues.length > 0
-    ? (scoreValues.reduce((a, b) => a + b, 0) / scoreValues.length).toFixed(1)
-    : '0';
-  const highestScore = scoreValues.length > 0 ? Math.max(...scoreValues) : 0;
-  const passCount = scoreValues.filter(s => s >= (settings.passMarkPercentage || 50)).length;
-  const passRate = scoreValues.length > 0 ? Math.round((passCount / scoreValues.length) * 100) : 0;
+  // Memoized quick statistics across all cohort rows
+  const { classAvg, highestScore, passRate } = useMemo(() => {
+    let count = 0;
+    let sum = 0;
+    let highest = 0;
+    let passes = 0;
+    const passMark = settings.passMarkPercentage || 50;
+    for (let i = 0; i < combinedEntries.length; i++) {
+      const score = records[combinedEntries[i].studentId]?.totalScore;
+      if (typeof score === 'number') {
+        count++;
+        sum += score;
+        if (score > highest) highest = score;
+        if (score >= passMark) passes++;
+      }
+    }
+    return {
+      classAvg: count > 0 ? (sum / count).toFixed(1) : '0',
+      highestScore: highest,
+      passRate: count > 0 ? Math.round((passes / count) * 100) : 0
+    };
+  }, [combinedEntries, records, settings.passMarkPercentage]);
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8 space-y-6">
@@ -1333,7 +1410,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                 </td>
               </tr>
             ) : (
-              filteredEntries.map(entry => {
+              paginatedEntries.map(entry => {
                 const rec = records[entry.studentId];
                 const displayName = rec?.studentName !== undefined ? rec.studentName : entry.fullName;
                 const displayAdm = rec?.admissionNumber !== undefined ? rec.admissionNumber : entry.admissionNumber;
@@ -1508,7 +1585,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            const enrolled = students.find(s => s.id === entry.studentId);
+                            const enrolled = studentByIdMap.get(entry.studentId);
                             const stuObj: Student = enrolled || {
                               id: entry.studentId,
                               admissionNumber: displayAdm,
@@ -1533,7 +1610,7 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            const enrolled = students.find(s => s.id === entry.studentId);
+                            const enrolled = studentByIdMap.get(entry.studentId);
                             const stuObj: Student = enrolled || {
                               id: entry.studentId,
                               admissionNumber: displayAdm,
@@ -1591,6 +1668,49 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
           </tbody>
         </table>
       </div>
+
+      {/* Pagination Controls for Large Score Sheets */}
+      {filteredEntries.length > PAGE_SIZE && (
+        <div className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs">
+          <span className="text-slate-600 font-medium">
+            {showAllRows
+              ? `Showing all ${filteredEntries.length} candidates`
+              : `Showing ${(safePage - 1) * PAGE_SIZE + 1}–${Math.min(safePage * PAGE_SIZE, filteredEntries.length)} of ${filteredEntries.length} candidates`}
+          </span>
+          <div className="flex items-center gap-2">
+            {!showAllRows && (
+              <>
+                <button
+                  type="button"
+                  disabled={safePage <= 1}
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  className="px-3 py-1 bg-white border border-slate-300 rounded-lg font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+                >
+                  Previous
+                </button>
+                <span className="font-mono font-bold text-slate-700 px-1">
+                  Page {safePage} / {totalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={safePage >= totalPages}
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  className="px-3 py-1 bg-white border border-slate-300 rounded-lg font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+                >
+                  Next
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowAllRows(prev => !prev)}
+              className="px-3 py-1 bg-blue-50 border border-blue-200 text-blue-900 rounded-lg font-bold hover:bg-blue-100 cursor-pointer"
+            >
+              {showAllRows ? `Paginate (${PAGE_SIZE}/page)` : `Show All (${filteredEntries.length})`}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Floating Bottom Quick-Save Ribbon */}
       <div className="p-4 bg-slate-900 rounded-xl text-white flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg">

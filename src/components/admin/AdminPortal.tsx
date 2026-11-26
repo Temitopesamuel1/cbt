@@ -213,14 +213,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const loadData = async () => {
     setLoading(true);
     try {
-      const [adm, st, stu, cls, subs, ex, subms, sett] = await Promise.all([
+      const [adm, st, stu, cls, subs, ex, sett] = await Promise.all([
         fetchAdmins(),
         fetchStaffMembers(),
         fetchStudents(),
         fetchSchoolClasses(),
         fetchSubjects(),
         fetchExaminations(false),
-        fetchSubmissions(),
         fetchSchoolSettings()
       ]);
 
@@ -230,7 +229,6 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       if (cls) setClasses(cls);
       if (subs) setSubjects(subs);
       if (ex) setExams(ex);
-      if (subms) setSubmissions(subms);
       if (sett) setSettings(sett);
     } catch (err) {
       console.warn('Admin load error:', err);
@@ -2080,6 +2078,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         onClose={() => setShowStaffSlipsModal(false)}
         staffList={staffList}
         schoolName={settings.schoolName || "Honey's World High School"}
+        schoolLogo={settings.schoolLogo}
       />
 
       {/* Student Slips Modal */}
@@ -2088,6 +2087,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         onClose={() => setShowStudentSlipsModal(false)}
         students={students}
         schoolName={settings.schoolName || "Honey's World High School"}
+        schoolLogo={settings.schoolLogo}
         currentSession={settings.academicSession || '2025/2026'}
         currentTerm={settings.currentTerm || '1st Term'}
       />

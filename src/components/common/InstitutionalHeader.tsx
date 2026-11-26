@@ -24,6 +24,20 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
   examInProgress,
   onOpenChat
 }) => {
+  const logoSrc = (settings?.schoolLogo || '').trim() || '/school-logo.png';
+  const [logoError, setLogoError] = React.useState(false);
+
+  React.useEffect(() => {
+    setLogoError(false);
+  }, [logoSrc]);
+
+  const initials = (settings?.schoolName || 'HW')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(w => w[0]?.toUpperCase() || '')
+    .join('') || 'HW';
+
   return (
     <header className="sticky top-0 z-40 bg-slate-900 text-white border-b border-slate-800 shadow-sm no-print">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -41,18 +55,16 @@ export const InstitutionalHeader: React.FC<InstitutionalHeaderProps> = ({
             className={`flex items-center gap-3 shrink-0 cursor-pointer ${examInProgress ? 'pointer-events-none' : ''}`}
           >
             <div className="w-10 h-10 rounded-full bg-white p-0.5 border-2 border-amber-400 shadow-xs flex items-center justify-center overflow-hidden shrink-0">
-              <img
-                src={settings?.schoolLogo || '/school-logo.png'}
-                alt="HWHS Crest"
-                className="w-full h-full object-contain rounded-full"
-                onError={(e) => {
-                  (e.currentTarget as HTMLElement).style.display = 'none';
-                  const parent = (e.currentTarget as HTMLElement).parentElement;
-                  if (parent) {
-                    parent.innerHTML = '<span class="text-blue-900 font-black text-xs font-serif">HW</span>';
-                  }
-                }}
-              />
+              {!logoError ? (
+                <img
+                  src={logoSrc}
+                  alt={settings?.schoolName ? `${settings.schoolName} Logo` : 'School Logo'}
+                  className="w-full h-full object-contain rounded-full"
+                  onError={() => setLogoError(true)}
+                />
+              ) : (
+                <span className="text-blue-900 font-black text-xs font-serif">{initials}</span>
+              )}
             </div>
             <div>
               <div className="text-base sm:text-lg font-extrabold tracking-tight text-white flex items-center gap-2">

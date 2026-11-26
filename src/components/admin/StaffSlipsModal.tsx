@@ -17,13 +17,15 @@ interface StaffSlipsModalProps {
   onClose: () => void;
   staffList: StaffMember[];
   schoolName: string;
+  schoolLogo?: string;
 }
 
 export const StaffSlipsModal: React.FC<StaffSlipsModalProps> = ({
   isOpen,
   onClose,
   staffList,
-  schoolName
+  schoolName,
+  schoolLogo
 }) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -110,7 +112,20 @@ export const StaffSlipsModal: React.FC<StaffSlipsModalProps> = ({
                 {/* School Name & Badge */}
                 <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-3">
                   <div className="flex items-center gap-2">
-                    <School className="w-4 h-4 text-blue-900" />
+                    <img
+                      src={(schoolLogo || '').trim() || '/school-logo.png'}
+                      alt={schoolName || 'School Logo'}
+                      className="w-6 h-6 object-contain rounded-full border border-amber-300 bg-white"
+                      onError={(e) => {
+                        const img = e.currentTarget;
+                        if (!img.dataset.fallbackApplied) {
+                          img.dataset.fallbackApplied = '1';
+                          img.src = '/school-logo.png';
+                        } else {
+                          img.style.display = 'none';
+                        }
+                      }}
+                    />
                     <span className="text-xs font-black tracking-wider text-blue-950 uppercase">
                       {schoolName}
                     </span>

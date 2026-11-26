@@ -16,6 +16,7 @@ interface StudentSlipsModalProps {
   onClose: () => void;
   students: Student[];
   schoolName: string;
+  schoolLogo?: string;
   currentSession: string;
   currentTerm: string;
 }
@@ -25,6 +26,7 @@ export const StudentSlipsModal: React.FC<StudentSlipsModalProps> = ({
   onClose,
   students,
   schoolName,
+  schoolLogo,
   currentSession,
   currentTerm
 }) => {
@@ -137,10 +139,18 @@ export const StudentSlipsModal: React.FC<StudentSlipsModalProps> = ({
                   <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
                     <div className="flex items-center gap-2">
                       <img
-                        src="/school-logo.png"
-                        alt="HWHS"
+                        src={(schoolLogo || '').trim() || '/school-logo.png'}
+                        alt={schoolName || 'School Logo'}
                         className="w-6 h-6 object-contain rounded-full border border-amber-300"
-                        onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
+                        onError={(e) => {
+                          const img = e.currentTarget;
+                          if (!img.dataset.fallbackApplied) {
+                            img.dataset.fallbackApplied = '1';
+                            img.src = '/school-logo.png';
+                          } else {
+                            img.style.display = 'none';
+                          }
+                        }}
                       />
                       <span className="font-black text-xs text-slate-900 tracking-tight uppercase">
                         {schoolName}

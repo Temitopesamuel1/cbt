@@ -23,12 +23,18 @@ interface TeacherLessonNotesTabProps {
   teacher: StaffMember | null;
   subjects: Subject[];
   classes: SchoolClass[];
+  schoolLogo?: string;
+  schoolName?: string;
+  schoolAddress?: string;
 }
 
 export const TeacherLessonNotesTab: React.FC<TeacherLessonNotesTabProps> = ({
   teacher,
   subjects,
-  classes
+  classes,
+  schoolLogo,
+  schoolName,
+  schoolAddress
 }) => {
   const [savedNotes, setSavedNotes] = useState<LessonNote[]>([]);
   const [loading, setLoading] = useState(false);
@@ -520,16 +526,23 @@ ${activeNote.assignment}
               <div className="border-b-2 border-slate-900 pb-4 text-center space-y-1">
                 <div className="flex items-center justify-center gap-3">
                   <img
-                    src="/school-logo.png"
-                    alt="HWHS"
+                    src={(schoolLogo || '').trim() || '/school-logo.png'}
+                    alt={schoolName || 'School Logo'}
                     className="w-12 h-12 object-contain rounded-full border border-amber-400"
+                    onError={(e) => {
+                      const img = e.currentTarget;
+                      if (!img.dataset.fallbackApplied) {
+                        img.dataset.fallbackApplied = '1';
+                        img.src = '/school-logo.png';
+                      }
+                    }}
                   />
                   <div className="text-left">
                     <h1 className="text-base sm:text-lg font-black uppercase tracking-wider text-slate-900 font-serif">
-                      HONEY'S WORLD HIGH SCHOOL
+                      {(schoolName || "HONEY'S WORLD HIGH SCHOOL").toUpperCase()}
                     </h1>
                     <p className="text-[10px] font-bold text-slate-700 uppercase tracking-widest">
-                      GAA AJANAKU, ILORIN, KWARA STATE · DEPARTMENT OF ACADEMIC PLANNING
+                      {(schoolAddress || 'GAA AJANAKU, ILORIN, KWARA STATE').toUpperCase()} · DEPARTMENT OF ACADEMIC PLANNING
                     </p>
                   </div>
                 </div>

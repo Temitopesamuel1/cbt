@@ -10,13 +10,15 @@ import {
   School
 } from 'lucide-react';
 import { verifyAdminLogin } from '../../services/firebase';
+import { SchoolSettings } from '../../types/cbt';
 
 interface AdminLoginProps {
   onLoginSuccess: (adminEmail: string) => void;
   onNavigateHome: () => void;
+  settings?: SchoolSettings;
 }
 
-export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNavigateHome }) => {
+export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNavigateHome, settings }) => {
   const [email, setEmail] = useState('');
   const [passcode, setPasscode] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -74,11 +76,22 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onNaviga
       <div className="max-w-md w-full space-y-6">
         {/* Security Crest */}
         <div className="text-center space-y-2">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-amber-500/10 border-2 border-amber-500/30 text-amber-400 shadow-xl mb-2">
-            <ShieldAlert className="w-8 h-8" />
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-white p-1.5 border-2 border-amber-400 shadow-xl mb-2 overflow-hidden">
+            <img
+              src={(settings?.schoolLogo || '').trim() || '/school-logo.png'}
+              alt={settings?.schoolName || 'School Logo'}
+              className="w-full h-full object-contain rounded-xl"
+              onError={(e) => {
+                const img = e.currentTarget;
+                if (!img.dataset.fallbackApplied) {
+                  img.dataset.fallbackApplied = '1';
+                  img.src = '/school-logo.png';
+                }
+              }}
+            />
           </div>
           <h1 className="text-2xl font-black text-white tracking-tight">
-            HONEY'S WORLD HIGH SCHOOL
+            {(settings?.schoolName || "HONEY'S WORLD HIGH SCHOOL").toUpperCase()}
           </h1>
           <p className="text-xs uppercase font-bold tracking-widest text-amber-400">
             Institutional Administration Gate

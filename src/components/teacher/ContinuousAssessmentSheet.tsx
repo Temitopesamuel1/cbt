@@ -96,6 +96,10 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   });
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [showAllRows, setShowAllRows] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
+  const PAGE_SIZE = 50;
   const [assessmentRecords, setAssessmentRecords] = useState<Record<string, StudentAssessmentRecord>>({});
   const assessmentRecordsRef = useRef<Record<string, StudentAssessmentRecord>>({});
   useEffect(() => {
@@ -214,6 +218,11 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     });
   }, [students, selectedClassCode]);
 
+  const classStudentsRef = useRef<Student[]>(classStudents);
+  useEffect(() => {
+    classStudentsRef.current = classStudents;
+  }, [classStudents]);
+
   // Filtered students by search query
   const displayedStudents = useMemo(() => {
     if (!searchQuery.trim()) return classStudents;
@@ -222,6 +231,31 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       s => s.fullName.toLowerCase().includes(q) || s.admissionNumber.toLowerCase().includes(q)
     );
   }, [classStudents, searchQuery]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedSubjectId, selectedClassCode, searchQuery]);
+
+  useEffect(() => {
+    const onBeforePrint = () => setIsPrinting(true);
+    const onAfterPrint = () => setIsPrinting(false);
+    window.addEventListener('beforeprint', onBeforePrint);
+    window.addEventListener('afterprint', onAfterPrint);
+    return () => {
+      window.removeEventListener('beforeprint', onBeforePrint);
+      window.removeEventListener('afterprint', onAfterPrint);
+    };
+  }, []);
+
+  const totalPages = Math.max(1, Math.ceil(displayedStudents.length / PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paginatedStudents = useMemo(() => {
+    if (showAllRows || isPrinting || displayedStudents.length <= PAGE_SIZE) {
+      return displayedStudents;
+    }
+    const start = (safePage - 1) * PAGE_SIZE;
+    return displayedStudents.slice(start, start + PAGE_SIZE);
+  }, [displayedStudents, showAllRows, isPrinting, safePage]);
 
   // Flush any pending dirty rows immediately to Firestore
   const flushAutoSave = useCallback(async () => {
@@ -313,8 +347,11 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
     fetchAssessmentRecords(selectedSubjectId, selectedClassCode, academicSession, currentTerm, subjName)
       .then(records => {
+        const currentClassStudents = classStudentsRef.current;
+        const studentIdSet = new Set<string>();
         const admToStudentId = new Map<string, string>();
-        classStudents.forEach(s => {
+        currentClassStudents.forEach(s => {
+          studentIdSet.add(s.id);
           if (s.admissionNumber) {
             admToStudentId.set(s.admissionNumber.trim().toUpperCase(), s.id);
           }
@@ -322,9 +359,8 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
         const recordMap: Record<string, StudentAssessmentRecord> = {};
         records.forEach(r => {
-          const directStu = classStudents.find(s => s.id === r.studentId);
-          const mappedId = directStu
-            ? directStu.id
+          const mappedId = studentIdSet.has(r.studentId)
+            ? r.studentId
             : admToStudentId.get((r.admissionNumber || '').trim().toUpperCase()) || r.studentId;
           recordMap[mappedId] = {
             ...r,
@@ -342,7 +378,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
         }
       })
       .catch(err => console.warn('Error loading assessment records:', err));
-  }, [selectedSubjectId, selectedClassCode, academicSession, currentTerm, activeSubject?.name, classStudents]);
+  }, [selectedSubjectId, selectedClassCode, academicSession, currentTerm, activeSubject?.name]);
 
   useEffect(() => {
     loadAssessmentRecords();
@@ -552,20 +588,43 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
     let matchCount = 0;
     const syncedComponents = new Set<string>();
-    const updatedMap = { ...assessmentRecords };
+    const updatedMap = { ...assessmentRecordsRef.current };
     const cleanSubj = activeSubject.name.trim().toLowerCase();
     const enrichedSubs = enrichSubmissionsWithOrdinals(submissions);
     const examById = new Map<string, Examination>();
     exams.forEach(ex => { if (ex?.id) examById.set(ex.id, ex); });
 
+    // Pre-index subject submissions by studentId and normalized admissionNumber for O(students + submissions) matching
+    const subsByStudentId = new Map<string, Submission[]>();
+    const subsByAdm = new Map<string, Submission[]>();
+    enrichedSubs.forEach(sub => {
+      if (!sub.subject || sub.subject.trim().toLowerCase() !== cleanSubj) return;
+      if (sub.studentId) {
+        const list = subsByStudentId.get(sub.studentId) || [];
+        list.push(sub);
+        subsByStudentId.set(sub.studentId, list);
+      }
+      if (sub.admissionNumber) {
+        const admKey = sub.admissionNumber.trim().toUpperCase();
+        const list = subsByAdm.get(admKey) || [];
+        list.push(sub);
+        subsByAdm.set(admKey, list);
+      }
+    });
+
     classStudents.forEach(student => {
-      const studentSubs = enrichedSubs
-        .filter(s => {
-          const matchesStudent = s.studentId === student.id || s.admissionNumber === student.admissionNumber;
-          const matchesSubj = s.subject && s.subject.trim().toLowerCase() === cleanSubj;
-          return matchesStudent && matchesSubj;
-        })
-        .sort((a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime());
+      const mergedSubMap = new Map<string, Submission>();
+      (subsByStudentId.get(student.id) || []).forEach(sub => {
+        mergedSubMap.set(sub.id || `${sub.examId}_${sub.submittedAt}`, sub);
+      });
+      if (student.admissionNumber) {
+        (subsByAdm.get(student.admissionNumber.trim().toUpperCase()) || []).forEach(sub => {
+          mergedSubMap.set(sub.id || `${sub.examId}_${sub.submittedAt}`, sub);
+        });
+      }
+      const studentSubs = Array.from(mergedSubMap.values()).sort(
+        (a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime()
+      );
 
       if (studentSubs.length > 0) {
         const examEntries: CbtExamEntry[] = studentSubs.map((sub, i) => {
@@ -845,21 +904,35 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
   // Print function
   const handlePrint = () => {
-    window.print();
+    setIsPrinting(true);
+    setTimeout(() => {
+      window.print();
+    }, 60);
   };
 
-  // Class Statistics Summary
+  // Class Statistics Summary (O(N) direct lookup without allocating blank records)
   const stats = useMemo(() => {
     if (classStudents.length === 0) return { avg: 0, high: 0, low: 0, passRate: 0 };
-    const scores = classStudents.map(s => getRecord(s).totalScore);
-    const sum = scores.reduce((a, b) => a + b, 0);
-    const avg = Math.round(sum / scores.length);
-    const high = Math.max(...scores);
-    const low = Math.min(...scores);
-    const passed = scores.filter(s => s >= 50).length;
-    const passRate = Math.round((passed / scores.length) * 100);
-    return { avg, high, low, passRate };
+    let sum = 0;
+    let high = 0;
+    let low = Infinity;
+    let passed = 0;
+    for (let i = 0; i < classStudents.length; i++) {
+      const score = assessmentRecords[classStudents[i].id]?.totalScore ?? 0;
+      sum += score;
+      if (score > high) high = score;
+      if (score < low) low = score;
+      if (score >= 50) passed++;
+    }
+    return {
+      avg: Math.round(sum / classStudents.length),
+      high,
+      low: low === Infinity ? 0 : low,
+      passRate: Math.round((passed / classStudents.length) * 100)
+    };
   }, [classStudents, assessmentRecords]);
+
+  const activeSchoolLogo = ((liveSettings || settings)?.schoolLogo || '').trim() || '/school-logo.png';
 
   return (
     <div className="space-y-6 pb-20">
@@ -867,10 +940,18 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       <div className="hidden print:block border-b-2 border-slate-900 pb-4 mb-6 text-center">
         <div className="flex items-center justify-center gap-3 mb-2">
           <img
-            src="/school-logo.png"
-            alt="Honey's World High School Crest"
+            src={activeSchoolLogo}
+            alt="Institutional Crest"
             className="w-14 h-14 object-contain rounded-full border border-amber-400"
-            onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
+            onError={(e) => {
+              const img = e.currentTarget as HTMLImageElement;
+              if (!img.dataset.fallbackApplied) {
+                img.dataset.fallbackApplied = '1';
+                img.src = '/school-logo.png';
+              } else {
+                img.style.display = 'none';
+              }
+            }}
           />
           <div className="text-left">
             <h1 className="text-xl font-black uppercase tracking-wider">{schoolName || "HONEY'S WORLD HIGH SCHOOL"}</h1>
@@ -1263,7 +1344,10 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {displayedStudents.map((student, idx) => {
+                {paginatedStudents.map((student, idx) => {
+                  const rowIndex = (showAllRows || isPrinting || displayedStudents.length <= PAGE_SIZE)
+                    ? idx + 1
+                    : (safePage - 1) * PAGE_SIZE + idx + 1;
                   const rec = getRecord(student);
                   const firstCa = rec.firstCaScore ?? rec.testScore ?? 0;
                   const secondCa = rec.secondCaScore ?? rec.projectScore ?? 0;
@@ -1277,7 +1361,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                       className="hover:bg-slate-50/80 transition-colors group"
                     >
                       <td className="py-2.5 px-3 text-center text-slate-400 font-mono text-[11px]">
-                        {idx + 1}
+                        {rowIndex}
                       </td>
 
                       <td className="py-2.5 px-3 font-mono font-bold text-slate-700 text-xs">
@@ -1505,6 +1589,49 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
           </div>
         )}
 
+        {/* Pagination Bar for Large Class Cohorts */}
+        {displayedStudents.length > PAGE_SIZE && (
+          <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs no-print">
+            <span className="text-slate-600 font-medium">
+              {showAllRows
+                ? `Showing all ${displayedStudents.length} students`
+                : `Showing ${(safePage - 1) * PAGE_SIZE + 1}–${Math.min(safePage * PAGE_SIZE, displayedStudents.length)} of ${displayedStudents.length} students`}
+            </span>
+            <div className="flex items-center gap-2">
+              {!showAllRows && (
+                <>
+                  <button
+                    type="button"
+                    disabled={safePage <= 1}
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    className="px-3 py-1 bg-white border border-slate-300 rounded-lg font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+                  >
+                    Previous
+                  </button>
+                  <span className="font-mono font-bold text-slate-700 px-1">
+                    Page {safePage} / {totalPages}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={safePage >= totalPages}
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                    className="px-3 py-1 bg-white border border-slate-300 rounded-lg font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+                  >
+                    Next
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowAllRows(prev => !prev)}
+                className="px-3 py-1 bg-blue-50 border border-blue-200 text-blue-900 rounded-lg font-bold hover:bg-blue-100 cursor-pointer"
+              >
+                {showAllRows ? `Paginate (${PAGE_SIZE}/page)` : `Show All (${displayedStudents.length})`}
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Dedicated Bottom-of-Table Save Section Card */}
         {classStudents.length > 0 && (
           <div className="bg-slate-900 text-white p-5 sm:p-6 border-t border-slate-800 flex flex-col md:flex-row items-center justify-between gap-4 no-print">
@@ -1628,7 +1755,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
                 email: "Honeysworld5@gmail.com",
                 academicSession,
                 currentTerm,
-                schoolLogo: "/school-logo.png",
+                schoolLogo: activeSchoolLogo,
                 passMarkPercentage: 50,
                 allowImmediateResultViewing: true,
                 caWeights

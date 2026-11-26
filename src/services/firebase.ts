@@ -781,6 +781,7 @@ function applyCloudSyncState(state?: CloudSyncState | null) {
     if (filtered.length > 0) {
       addTombstonesBatch(DELETED_CA_RECORDS_KEY, filtered);
       pruneLocalStorageListByIds('prime_edutech_ca_records', filtered);
+      pruneLocalCaRecordsMapByIds(filtered);
     }
   }
   if (Array.isArray(state.deletedLessonNoteIds) && state.deletedLessonNoteIds.length > 0) {
@@ -792,29 +793,55 @@ function applyCloudSyncState(state?: CloudSyncState | null) {
   }
 }
 
+let cloudSyncStateCache: CloudSyncState | null = null;
+let cloudSyncStateFetchedAt = 0;
+let inFlightCloudSyncStatePromise: Promise<CloudSyncState | null> | null = null;
+const CLOUD_SYNC_STATE_TTL_MS = 5000;
+
+function invalidateCloudSyncStateCache() {
+  cloudSyncStateFetchedAt = 0;
+  inFlightCloudSyncStatePromise = null;
+}
+
 async function fetchCloudSyncState(forceServer = false): Promise<CloudSyncState | null> {
-  try {
-    const ref = doc(db, 'settings', 'syncState');
-    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
-    let snap;
-    if (forceServer && isOnline) {
-      try {
-        snap = await getDocFromServer(ref);
-      } catch {
+  const now = Date.now();
+  if (cloudSyncStateCache && now - cloudSyncStateFetchedAt < CLOUD_SYNC_STATE_TTL_MS) {
+    return cloudSyncStateCache;
+  }
+  if (inFlightCloudSyncStatePromise) {
+    return inFlightCloudSyncStatePromise;
+  }
+
+  inFlightCloudSyncStatePromise = (async () => {
+    try {
+      const ref = doc(db, 'settings', 'syncState');
+      const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+      let snap;
+      if (forceServer && isOnline) {
+        try {
+          snap = await getDocFromServer(ref);
+        } catch {
+          snap = await getDoc(ref);
+        }
+      } else {
         snap = await getDoc(ref);
       }
-    } else {
-      snap = await getDoc(ref);
+      if (snap.exists()) {
+        const data = snap.data() as CloudSyncState;
+        applyCloudSyncState(data);
+        cloudSyncStateCache = data;
+        cloudSyncStateFetchedAt = Date.now();
+        return data;
+      }
+    } catch (err) {
+      console.warn('Cloud syncState fetch notice:', err);
+    } finally {
+      inFlightCloudSyncStatePromise = null;
     }
-    if (snap.exists()) {
-      const data = snap.data() as CloudSyncState;
-      applyCloudSyncState(data);
-      return data;
-    }
-  } catch (err) {
-    console.warn('Cloud syncState fetch notice:', err);
-  }
-  return null;
+    return cloudSyncStateCache;
+  })();
+
+  return inFlightCloudSyncStatePromise;
 }
 
 async function fetchCollectionAuthoritative(collectionPath: string, forceServer = false) {
@@ -840,6 +867,7 @@ async function fetchCollectionAuthoritative(collectionPath: string, forceServer 
 async function recordCloudDeletion(field: DeletionField, ids: string[]): Promise<void> {
   if (!ids || ids.length === 0) return;
   markSchoolBootstrappedLocal();
+  invalidateCloudSyncStateCache();
   try {
     await setDoc(
       doc(db, 'settings', 'syncState'),
@@ -858,6 +886,7 @@ async function recordCloudDeletion(field: DeletionField, ids: string[]): Promise
 async function clearCloudDeletion(field: DeletionField, id: string): Promise<void> {
   if (!id) return;
   markSchoolBootstrappedLocal();
+  invalidateCloudSyncStateCache();
   try {
     await setDoc(
       doc(db, 'settings', 'syncState'),
@@ -876,6 +905,7 @@ async function clearCloudDeletion(field: DeletionField, id: string): Promise<voi
 async function clearCloudDeletionsBatch(field: DeletionField, ids: string[]): Promise<void> {
   if (!ids || ids.length === 0) return;
   markSchoolBootstrappedLocal();
+  invalidateCloudSyncStateCache();
   try {
     for (let i = 0; i < ids.length; i += 400) {
       const chunk = ids.slice(i, i + 400);
@@ -3755,6 +3785,66 @@ export async function forceSubmitExamAttempt(attemptId: string, reason = 'Force-
   }
 }
 
+// In-memory submission cache + compact localStorage writer (prevents 5MB quota overflow & slow JSON serialization)
+const FULL_DETAIL_STORAGE_LIMIT = 40;
+let inMemorySubmissionsCache: Submission[] | null = null;
+
+function compactSubmissionsForStorage(list: Submission[]): Submission[] {
+  const sorted = [...list].sort(
+    (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
+  );
+  return sorted.map((s, idx) => {
+    if (idx < FULL_DETAIL_STORAGE_LIMIT) return s;
+    if (!s.detailedResults && !s.answers) return s;
+    const { detailedResults: _dr, answers: _ans, ...summary } = s;
+    return summary as Submission;
+  });
+}
+
+function readLocalSubmissionsList(): Submission[] {
+  const deleted = getTombstoneSet(DELETED_SUBMISSIONS_KEY);
+  const filterValid = (arr: Submission[]) =>
+    arr.filter(s => s && (!s.id || (!deleted.has(s.id) && !pendingSubmissionDeletes.has(s.id))));
+
+  if (inMemorySubmissionsCache) {
+    return filterValid(inMemorySubmissionsCache);
+  }
+  try {
+    const raw = localStorage.getItem('prime_cbt_submissions');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const clean = filterValid(parsed);
+        inMemorySubmissionsCache = clean;
+        return clean;
+      }
+    }
+  } catch {}
+  return [];
+}
+
+function writeLocalSubmissionsList(list: Submission[]) {
+  const deleted = getTombstoneSet(DELETED_SUBMISSIONS_KEY);
+  const filtered = list.filter(s => s && (!s.id || (!deleted.has(s.id) && !pendingSubmissionDeletes.has(s.id))));
+  inMemorySubmissionsCache = filtered;
+  try {
+    localStorage.setItem('prime_cbt_submissions', JSON.stringify(compactSubmissionsForStorage(filtered)));
+  } catch {}
+}
+
+export async function fetchSubmissionById(submissionId: string): Promise<Submission | null> {
+  if (!submissionId) return null;
+  const cached = readLocalSubmissionsList().find(s => s.id === submissionId && Array.isArray(s.detailedResults));
+  if (cached) return cached;
+  try {
+    const snap = await getDoc(doc(db, 'submissions', submissionId));
+    if (snap.exists()) {
+      return { id: snap.id, ...snap.data() } as Submission;
+    }
+  } catch {}
+  return null;
+}
+
 // Submissions & Results (Every sitting stored separately: 1st Exam, 2nd Exam, etc.)
 export async function saveSubmission(submission: Submission): Promise<string> {
   const path = 'submissions';
@@ -3762,14 +3852,7 @@ export async function saveSubmission(submission: Submission): Promise<string> {
     submission.id ||
     `sub_${submission.studentId}_${submission.examId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
-  let localList: Submission[] = [];
-  try {
-    const raw = localStorage.getItem('prime_cbt_submissions');
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) localList = parsed;
-    }
-  } catch {}
+  const localList = readLocalSubmissionsList();
 
   // Compute ordinal sitting number per student + normalized subject + session + term
   let computedAttemptNumber = submission.attemptNumber;
@@ -3812,13 +3895,10 @@ export async function saveSubmission(submission: Submission): Promise<string> {
   submission.attemptNumber = computedAttemptNumber;
   submission.sittingLabel = sittingLabel;
 
-  // Mirror immediately in localStorage — NEVER erase previous sittings for same exam or subject
-  try {
-    const deleted = getTombstoneSet(DELETED_SUBMISSIONS_KEY);
-    const filtered = localList.filter(s => s.id !== subId && !deleted.has(s.id || ''));
-    filtered.unshift(cleanSub);
-    localStorage.setItem('prime_cbt_submissions', JSON.stringify(filtered));
-  } catch {}
+  // Mirror immediately in memory + compact localStorage — NEVER erase previous sittings
+  const filtered = localList.filter(s => s.id !== subId);
+  filtered.unshift(cleanSub);
+  writeLocalSubmissionsList(filtered);
 
   broadcastExamSync('SUBMISSIONS_UPDATED', { examId: cleanSub.examId, studentId: cleanSub.studentId, submissionId: subId });
 
@@ -3879,7 +3959,7 @@ export async function syncCbtSubmissionToReportSheet(
     resolvedSubjectId = `sub_${(submission.subject || 'general').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')}`;
   }
 
-  // Locate any existing CA record for this student, subject, session & term so other columns & prior sittings are preserved
+  // Query ONLY this student's CA records so syncing never triggers a full collection scan
   const normSubjName = (submission.subject || '').trim().toLowerCase();
   const normAdm = (submission.admissionNumber || '').trim().toUpperCase();
   const existingPool = await fetchAssessmentRecords(
@@ -3887,7 +3967,8 @@ export async function syncCbtSubmissionToReportSheet(
     submission.classGrade,
     submission.academicSession,
     submission.term,
-    submission.subject
+    submission.subject,
+    submission.studentId
   ).catch(() => []);
 
   const existing = existingPool.find(r => {
@@ -4050,16 +4131,7 @@ export async function fetchSubmissions(examId?: string, studentId?: string): Pro
     return true;
   };
 
-  let allLocal: Submission[] = [];
-  try {
-    const raw = localStorage.getItem('prime_cbt_submissions');
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        allLocal = parsed.filter((s: Submission) => s && (!s.id || (!deleted.has(s.id) && !pendingSubmissionDeletes.has(s.id))));
-      }
-    }
-  } catch {}
+  const allLocal = readLocalSubmissionsList();
 
   try {
     let q;
@@ -4108,9 +4180,7 @@ export async function fetchSubmissions(examId?: string, studentId?: string): Pro
       const pendingMatching = Array.from(pendingSubmissionSaves.values()).filter(
         ps => matches(ps) && !remoteSubs.some(rs => rs.id === ps.id)
       );
-      try {
-        localStorage.setItem('prime_cbt_submissions', JSON.stringify([...pendingMatching, ...remoteSubs, ...preserved]));
-      } catch {}
+      writeLocalSubmissionsList([...pendingMatching, ...remoteSubs, ...preserved]);
     }
   } catch (error) {
     console.warn('Submissions fetch fallback to local cache:', error);
@@ -4137,16 +4207,7 @@ export function subscribeStudentSubmissions(
 
   const emit = () => {
     const deleted = getTombstoneSet(DELETED_SUBMISSIONS_KEY);
-    let allLocal: Submission[] = [];
-    try {
-      const raw = localStorage.getItem('prime_cbt_submissions');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          allLocal = parsed.filter((s: Submission) => s && (!s.id || (!deleted.has(s.id) && !pendingSubmissionDeletes.has(s.id))));
-        }
-      }
-    } catch {}
+    const allLocal = readLocalSubmissionsList();
 
     const map = new Map<string, Submission>();
     if (!hasServer) {
@@ -4170,9 +4231,7 @@ export function subscribeStudentSubmissions(
     const list = enrichSubmissionsWithOrdinals(Array.from(map.values()));
     if (hasServer) {
       const others = allLocal.filter(s => s.studentId !== studentId);
-      try {
-        localStorage.setItem('prime_cbt_submissions', JSON.stringify([...list, ...others]));
-      } catch {}
+      writeLocalSubmissionsList([...list, ...others]);
     }
     callback(list);
   };
@@ -4238,16 +4297,7 @@ export function subscribeSubmissions(callback: (subs: Submission[]) => void): ()
 
   const emit = () => {
     const deleted = getTombstoneSet(DELETED_SUBMISSIONS_KEY);
-    let allLocal: Submission[] = [];
-    try {
-      const raw = localStorage.getItem('prime_cbt_submissions');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          allLocal = parsed.filter((s: Submission) => s && (!s.id || (!deleted.has(s.id) && !pendingSubmissionDeletes.has(s.id))));
-        }
-      }
-    } catch {}
+    const allLocal = readLocalSubmissionsList();
 
     const map = new Map<string, Submission>();
     if (!hasServer) {
@@ -4267,9 +4317,7 @@ export function subscribeSubmissions(callback: (subs: Submission[]) => void): ()
     });
 
     const list = enrichSubmissionsWithOrdinals(Array.from(map.values()));
-    try {
-      localStorage.setItem('prime_cbt_submissions', JSON.stringify(list));
-    } catch {}
+    writeLocalSubmissionsList(list);
     callback(list);
   };
 
@@ -4366,39 +4414,97 @@ function resolveSubjectNameFromLocal(subjectId?: string): string {
   return '';
 }
 
-function readLocalCaRecords(): StudentAssessmentRecord[] {
+let localCaRecordsMap: Map<string, StudentAssessmentRecord> | null = null;
+let caStorageFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function ensureLocalCaRecordsMap(): Map<string, StudentAssessmentRecord> {
+  if (localCaRecordsMap) return localCaRecordsMap;
   const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
+  const map = new Map<string, StudentAssessmentRecord>();
   try {
     const raw = localStorage.getItem(SAVED_CA_RECORDS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        return parsed.filter(
-          (r: StudentAssessmentRecord) => r && r.id && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id)
-        );
+        parsed.forEach((r: StudentAssessmentRecord) => {
+          if (r && r.id && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id)) {
+            map.set(r.id, pickNewerRecord(map.get(r.id), r));
+          }
+        });
       }
     }
   } catch {}
-  return [];
+  localCaRecordsMap = map;
+  return map;
+}
+
+function pruneLocalCaRecordsMapByIds(ids: string[]) {
+  if (!localCaRecordsMap || !ids || ids.length === 0) return;
+  ids.forEach(id => localCaRecordsMap!.delete(id));
+}
+
+function flushCaStorageImmediately() {
+  if (caStorageFlushTimer) {
+    clearTimeout(caStorageFlushTimer);
+    caStorageFlushTimer = null;
+  }
+  if (!localCaRecordsMap) return;
+  try {
+    const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
+    pendingCaRecordSaves.forEach((pr, id) => {
+      if (pr && !deleted.has(id) && !pendingCaRecordDeletes.has(id)) {
+        localCaRecordsMap!.set(id, pickNewerRecord(localCaRecordsMap!.get(id), pr));
+      }
+    });
+    localStorage.setItem(SAVED_CA_RECORDS_KEY, JSON.stringify(Array.from(localCaRecordsMap.values())));
+  } catch {}
+}
+
+function scheduleCaStorageFlush() {
+  if (typeof window === 'undefined') {
+    flushCaStorageImmediately();
+    return;
+  }
+  if (caStorageFlushTimer) clearTimeout(caStorageFlushTimer);
+  caStorageFlushTimer = setTimeout(() => {
+    caStorageFlushTimer = null;
+    flushCaStorageImmediately();
+  }, 400);
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => flushCaStorageImmediately());
+  window.addEventListener('beforeunload', () => flushCaStorageImmediately());
+}
+
+function readLocalCaRecords(): StudentAssessmentRecord[] {
+  const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
+  const map = ensureLocalCaRecordsMap();
+  const result: StudentAssessmentRecord[] = [];
+  map.forEach((r, id) => {
+    if (!deleted.has(id) && !pendingCaRecordDeletes.has(id)) {
+      result.push(r);
+    }
+  });
+  return result;
 }
 
 function writeLocalCaRecordsMerged(incoming: StudentAssessmentRecord[]) {
-  try {
-    const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
-    const map = new Map<string, StudentAssessmentRecord>();
-    incoming.forEach(r => {
-      if (r && r.id && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id)) {
-        map.set(r.id, pickNewerRecord(map.get(r.id), r));
-      }
-    });
-    // Always preserve every dirty record in localStorage so server snapshots never erase unsynced scores
-    pendingCaRecordSaves.forEach((pr, id) => {
-      if (pr && !deleted.has(id) && !pendingCaRecordDeletes.has(id)) {
-        map.set(id, pickNewerRecord(map.get(id), pr));
-      }
-    });
-    localStorage.setItem(SAVED_CA_RECORDS_KEY, JSON.stringify(Array.from(map.values())));
-  } catch {}
+  const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
+  const map = new Map<string, StudentAssessmentRecord>();
+  incoming.forEach(r => {
+    if (r && r.id && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id)) {
+      map.set(r.id, pickNewerRecord(map.get(r.id), r));
+    }
+  });
+  // Always preserve every dirty record in localStorage so server snapshots never erase unsynced scores
+  pendingCaRecordSaves.forEach((pr, id) => {
+    if (pr && !deleted.has(id) && !pendingCaRecordDeletes.has(id)) {
+      map.set(id, pickNewerRecord(map.get(id), pr));
+    }
+  });
+  localCaRecordsMap = map;
+  flushCaStorageImmediately();
 }
 
 function normalizeCleanCaRecord(record: StudentAssessmentRecord): StudentAssessmentRecord {
@@ -4442,15 +4548,18 @@ function stageCaRecordsIntoOutbox(cleanRecords: StudentAssessmentRecord[]) {
     removeTombstone(DELETED_CA_RECORDS_KEY, id);
   });
 
+  // Synchronously persist only the small dirty outbox so immediate refreshes never lose edits
   const dirtyStorage = readDirtyCaRecordsStorage();
+  const memMap = ensureLocalCaRecordsMap();
   cleanRecords.forEach(rec => {
     pendingCaRecordSaves.set(rec.id, rec);
     dirtyStorage[rec.id] = rec;
+    memMap.set(rec.id, pickNewerRecord(memMap.get(rec.id), rec));
   });
   writeDirtyCaRecordsStorage(dirtyStorage);
 
-  const existingLocal = readLocalCaRecords();
-  writeLocalCaRecordsMerged([...existingLocal, ...cleanRecords]);
+  // Debounce rewriting the full SAVED_CA_RECORDS_KEY array so typing scores stays instant at 60fps
+  scheduleCaStorageFlush();
 }
 
 function clearConfirmedDirtyCaRecords(committedRecords: StudentAssessmentRecord[]) {
@@ -4635,13 +4744,36 @@ if (typeof window !== 'undefined') {
   });
 }
 
+// Executes one or more single-field Firestore queries in parallel (zero composite indexes required)
+async function executeSingleFieldCaQueries(
+  queries: Array<ReturnType<typeof query> | ReturnType<typeof collection>>
+): Promise<{ docs: Array<{ id: string; data: StudentAssessmentRecord }>; isAuthoritative: boolean }> {
+  const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+  const snapshots = await Promise.all(
+    queries.map(q => (isOnline ? getDocsFromServer(q).catch(() => getDocs(q)) : getDocs(q)))
+  );
+  const docMap = new Map<string, { id: string; data: StudentAssessmentRecord }>();
+  let isAuthoritative = snapshots.length > 0;
+  snapshots.forEach(snap => {
+    if (snap.metadata.fromCache) isAuthoritative = false;
+    snap.forEach(docSnap => {
+      docMap.set(docSnap.id, {
+        id: docSnap.id,
+        data: docSnap.data() as StudentAssessmentRecord
+      });
+    });
+  });
+  return { docs: Array.from(docMap.values()), isAuthoritative };
+}
+
 // Continuous Assessment / Master Gradebook Records
 export async function fetchAssessmentRecords(
   subjectId?: string,
   classGrade?: string,
   academicSession?: string,
   term?: string,
-  subjectName?: string
+  subjectName?: string,
+  studentId?: string
 ): Promise<StudentAssessmentRecord[]> {
   const path = 'caRecords';
   if (pendingCaRecordSaves.size > 0 && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
@@ -4661,6 +4793,7 @@ export async function fetchAssessmentRecords(
 
   const matchesFilters = (r: StudentAssessmentRecord) => {
     if (r.id && (deleted.has(r.id) || pendingCaRecordDeletes.has(r.id))) return false;
+    if (studentId && r.studentId !== studentId) return false;
     if (subjectId) {
       const idMatches = r.subjectId === subjectId;
       const nameMatches = Boolean(normSubjKey && normalizeCaSubjectKey(r.subjectName) === normSubjKey);
@@ -4677,15 +4810,35 @@ export async function fetchAssessmentRecords(
   const allLocal = readLocalCaRecords();
 
   try {
-    // When resolvedSubjName is known, read caRecords collection so legacy/alternate subjectIds for the same subject name are recovered
-    const q = subjectId && !normSubjKey
-      ? query(collection(db, path), where('subjectId', '==', subjectId))
-      : collection(db, path);
-    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
-    const snapshot = isOnline
-      ? await getDocsFromServer(q).catch(() => getDocs(q))
-      : await getDocs(q);
-    const isAuthoritative = !snapshot.metadata.fromCache;
+    const colRef = collection(db, path);
+    const queries: Array<ReturnType<typeof query> | ReturnType<typeof collection>> = [];
+
+    if (studentId) {
+      queries.push(query(colRef, where('studentId', '==', studentId)));
+    } else if (subjectId || resolvedSubjName) {
+      if (subjectId) {
+        queries.push(query(colRef, where('subjectId', '==', subjectId)));
+      }
+      if (resolvedSubjName) {
+        queries.push(query(colRef, where('subjectName', '==', resolvedSubjName)));
+        const trimmedSubj = resolvedSubjName.trim();
+        if (trimmedSubj !== resolvedSubjName) {
+          queries.push(query(colRef, where('subjectName', '==', trimmedSubj)));
+        }
+      }
+    } else if (classGrade) {
+      queries.push(query(colRef, where('classGrade', '==', classGrade)));
+      const compactClass = classGrade.replace(/\s+/g, '');
+      if (compactClass && compactClass !== classGrade) {
+        queries.push(query(colRef, where('classGrade', '==', compactClass)));
+      }
+    } else if (academicSession) {
+      queries.push(query(colRef, where('academicSession', '==', academicSession)));
+    } else {
+      queries.push(colRef);
+    }
+
+    const { docs, isAuthoritative } = await executeSingleFieldCaQueries(queries);
 
     if (!isAuthoritative) {
       allLocal.forEach(r => {
@@ -4695,9 +4848,9 @@ export async function fetchAssessmentRecords(
       });
     }
 
-    snapshot.forEach(docSnap => {
-      if (deleted.has(docSnap.id) || pendingCaRecordDeletes.has(docSnap.id)) return;
-      const rec = { id: docSnap.id, ...docSnap.data() } as StudentAssessmentRecord;
+    docs.forEach(({ id, data }) => {
+      if (deleted.has(id) || pendingCaRecordDeletes.has(id)) return;
+      const rec = { ...data, id } as StudentAssessmentRecord;
       if (matchesFilters(rec)) {
         mergedMap[rec.id] = pickNewerRecord(mergedMap[rec.id], rec);
       }
@@ -4775,9 +4928,8 @@ export async function deleteAssessmentRecord(recordId: string): Promise<void> {
   pendingCaRecordDeletes.add(cleanId);
   addTombstone(DELETED_CA_RECORDS_KEY, cleanId);
 
-  try {
-    pruneLocalStorageListByIds(SAVED_CA_RECORDS_KEY, [cleanId]);
-  } catch {}
+  pruneLocalCaRecordsMapByIds([cleanId]);
+  flushCaStorageImmediately();
 
   broadcastEntitySync('caRecordsUpdated', 'CA_RECORDS_UPDATED', { id: cleanId, recordId: cleanId, deleted: true });
 
@@ -4797,9 +4949,7 @@ export async function deleteSubmission(submissionId: string): Promise<void> {
   pendingSubmissionDeletes.add(submissionId);
   addTombstone(DELETED_SUBMISSIONS_KEY, submissionId);
 
-  try {
-    pruneLocalStorageListByIds('prime_cbt_submissions', [submissionId]);
-  } catch {}
+  writeLocalSubmissionsList(readLocalSubmissionsList().filter(s => s.id !== submissionId));
 
   broadcastExamSync('SUBMISSIONS_UPDATED', { submissionId, deleted: true });
 
@@ -4813,15 +4963,16 @@ export async function deleteSubmission(submissionId: string): Promise<void> {
   await commitFirestoreFast(delPromise, OperationType.DELETE, path);
 }
 
-// Real-time listener for a student's continuous assessment records across all subjects
+// Real-time listener for a student's continuous assessment records (targeted single-field queries, no full collection scan)
 export function subscribeStudentAssessmentRecords(
   studentId: string,
   admissionNumber: string,
   callback: (records: StudentAssessmentRecord[]) => void
 ): () => void {
   const path = 'caRecords';
-  let unsubFirestore: (() => void) | null = null;
-  let firestoreRecords: StudentAssessmentRecord[] = [];
+  const unsubscribes: Array<() => void> = [];
+  const recordsByQuerySlot = new Map<number, StudentAssessmentRecord[]>();
+  const serverFlags = new Map<number, boolean>();
   let hasServerSnapshot = false;
   let hasAnyRemote = false;
 
@@ -4829,7 +4980,8 @@ export function subscribeStudentAssessmentRecords(
     flushDirtyCaRecords().catch(() => {});
   }
 
-  const normAdm = (admissionNumber || '').trim().toUpperCase();
+  const cleanAdm = (admissionNumber || '').trim();
+  const normAdm = cleanAdm.toUpperCase();
   const isStudentMatch = (r: Partial<StudentAssessmentRecord>) => {
     if (studentId && r.studentId === studentId) return true;
     const rAdm = (r.admissionNumber || '').trim().toUpperCase();
@@ -4851,10 +5003,12 @@ export function subscribeStudentAssessmentRecords(
     }
 
     if (hasAnyRemote) {
-      firestoreRecords.forEach(r => {
-        if (!deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id) && isStudentMatch(r)) {
-          mergedMap[r.id] = pickNewerRecord(mergedMap[r.id], r);
-        }
+      recordsByQuerySlot.forEach(list => {
+        list.forEach(r => {
+          if (!deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id) && isStudentMatch(r)) {
+            mergedMap[r.id] = pickNewerRecord(mergedMap[r.id], r);
+          }
+        });
       });
     }
 
@@ -4877,30 +5031,47 @@ export function subscribeStudentAssessmentRecords(
   const releaseSyncState = retainSyncStateListener();
 
   try {
-    const q = collection(db, path);
-    unsubFirestore = onSnapshot(
-      q,
-      { includeMetadataChanges: true },
-      snapshot => {
-        hasAnyRemote = true;
-        if (!snapshot.metadata.fromCache) {
-          hasServerSnapshot = true;
-        }
-        const list: StudentAssessmentRecord[] = [];
-        snapshot.forEach(docSnap => {
-          const data = docSnap.data() as StudentAssessmentRecord;
-          if (isStudentMatch(data)) {
-            list.push({ ...data, id: docSnap.id });
-          }
-        });
-        firestoreRecords = list;
-        mergeAndEmit();
-      },
-      err => {
-        console.warn('Real-time score listener fallback:', err);
-        mergeAndEmit();
+    const colRef = collection(db, path);
+    const queries = [];
+    if (studentId) {
+      queries.push(query(colRef, where('studentId', '==', studentId)));
+    }
+    if (cleanAdm) {
+      queries.push(query(colRef, where('admissionNumber', '==', cleanAdm)));
+      if (normAdm !== cleanAdm) {
+        queries.push(query(colRef, where('admissionNumber', '==', normAdm)));
       }
-    );
+    }
+    if (queries.length === 0) {
+      queries.push(colRef);
+    }
+
+    queries.forEach((q, slotIdx) => {
+      serverFlags.set(slotIdx, false);
+      const unsub = onSnapshot(
+        q,
+        { includeMetadataChanges: true },
+        snapshot => {
+          hasAnyRemote = true;
+          serverFlags.set(slotIdx, !snapshot.metadata.fromCache);
+          hasServerSnapshot = Array.from(serverFlags.values()).every(Boolean);
+          const list: StudentAssessmentRecord[] = [];
+          snapshot.forEach(docSnap => {
+            const data = docSnap.data() as StudentAssessmentRecord;
+            if (isStudentMatch(data)) {
+              list.push({ ...data, id: docSnap.id });
+            }
+          });
+          recordsByQuerySlot.set(slotIdx, list);
+          mergeAndEmit();
+        },
+        err => {
+          console.warn('Real-time score listener fallback:', err);
+          mergeAndEmit();
+        }
+      );
+      unsubscribes.push(unsub);
+    });
   } catch (error) {
     console.warn('Firestore onSnapshot error, falling back to local events:', error);
   }
@@ -4923,7 +5094,7 @@ export function subscribeStudentAssessmentRecords(
 
   return () => {
     releaseSyncState();
-    if (unsubFirestore) unsubFirestore();
+    unsubscribes.forEach(u => { try { u(); } catch {} });
     if (typeof window !== 'undefined') {
       window.removeEventListener('caRecordsUpdated', handleLocalUpdate);
       window.removeEventListener('storage', handleLocalUpdate);
@@ -4934,7 +5105,7 @@ export function subscribeStudentAssessmentRecords(
   };
 }
 
-// Fetch cumulative records across all terms for a student
+// Fetch cumulative records across all terms for a student (targeted single-field queries)
 export async function fetchStudentAllAssessmentRecords(
   studentId: string,
   admissionNumber: string
@@ -4945,22 +5116,33 @@ export async function fetchStudentAllAssessmentRecords(
   }
   await fetchCloudSyncState(true).catch(() => null);
   const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
-  const normAdm = (admissionNumber || '').trim().toUpperCase();
+  const cleanAdm = (admissionNumber || '').trim();
+  const normAdm = cleanAdm.toUpperCase();
 
   const isStudentMatch = (r: Partial<StudentAssessmentRecord>) =>
     (studentId && r.studentId === studentId) ||
-    Boolean(normAdm && r.admissionNumber && r.admissionNumber.toUpperCase() === normAdm);
+    Boolean(normAdm && r.admissionNumber && r.admissionNumber.trim().toUpperCase() === normAdm);
 
   const allLocal = readLocalCaRecords();
   const mergedMap: Record<string, StudentAssessmentRecord> = {};
 
   try {
-    const q = collection(db, path);
-    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
-    const snapshot = isOnline
-      ? await getDocsFromServer(q).catch(() => getDocs(q))
-      : await getDocs(q);
-    const isAuthoritative = !snapshot.metadata.fromCache;
+    const colRef = collection(db, path);
+    const queries = [];
+    if (studentId) {
+      queries.push(query(colRef, where('studentId', '==', studentId)));
+    }
+    if (cleanAdm) {
+      queries.push(query(colRef, where('admissionNumber', '==', cleanAdm)));
+      if (normAdm !== cleanAdm) {
+        queries.push(query(colRef, where('admissionNumber', '==', normAdm)));
+      }
+    }
+    if (queries.length === 0) {
+      queries.push(colRef);
+    }
+
+    const { docs, isAuthoritative } = await executeSingleFieldCaQueries(queries);
 
     if (!isAuthoritative) {
       allLocal.forEach(lr => {
@@ -4968,11 +5150,10 @@ export async function fetchStudentAllAssessmentRecords(
       });
     }
 
-    snapshot.forEach(docSnap => {
-      if (deleted.has(docSnap.id) || pendingCaRecordDeletes.has(docSnap.id)) return;
-      const data = docSnap.data() as StudentAssessmentRecord;
+    docs.forEach(({ id, data }) => {
+      if (deleted.has(id) || pendingCaRecordDeletes.has(id)) return;
       if (isStudentMatch(data)) {
-        const rec = { ...data, id: docSnap.id };
+        const rec = { ...data, id } as StudentAssessmentRecord;
         mergedMap[rec.id] = pickNewerRecord(mergedMap[rec.id], rec);
       }
     });

@@ -35,8 +35,10 @@ import {
   deleteAssessmentRecord,
   fetchSubjects,
   fetchSchoolSettings,
-  saveSchoolSettings
+  saveSchoolSettings,
+  subscribeSchoolSettings
 } from '../../services/firebase';
+import { compressLogoFile } from '../../services/imageUtils';
 import { DEFAULT_SCHOOL_SETTINGS, DEFAULT_SUBJECTS } from '../../data/initialSchoolData';
 
 interface HwsOfficialResultSlipProps {
@@ -204,24 +206,25 @@ export const HwsOfficialResultSlip: React.FC<HwsOfficialResultSlipProps> = ({
       });
     };
 
-    if (settings && settings.caWeights) {
+    if (settings) {
       applySettings(settings);
-    } else {
-      fetchSchoolSettings()
-        .then((fetched) => {
-          applySettings(settings ? { ...fetched, ...settings, caWeights: resolveCaWeights(settings.caWeights || fetched.caWeights) } : fetched);
-        })
-        .catch(() => {
-          if (settings) applySettings(settings);
-        });
     }
+
+    const unsubSettings = subscribeSchoolSettings((live) => {
+      if (live) {
+        applySettings(live);
+      }
+    });
 
     const handleSettingsUpdated = (e: Event) => {
       const detail = (e as CustomEvent<SchoolSettings>).detail;
       if (detail) applySettings(detail);
     };
     window.addEventListener('schoolSettingsUpdated', handleSettingsUpdated);
-    return () => window.removeEventListener('schoolSettingsUpdated', handleSettingsUpdated);
+    return () => {
+      unsubSettings();
+      window.removeEventListener('schoolSettingsUpdated', handleSettingsUpdated);
+    };
   }, [settings]);
 
   // Setup isolated print portal on body so modals print ONLY the 2-page report slip
@@ -679,16 +682,17 @@ export const HwsOfficialResultSlip: React.FC<HwsOfficialResultSlipProps> = ({
     });
   };
 
-  const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLogoFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setHeaderMeta(prev => ({ ...prev, schoolLogo: reader.result as string }));
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressed = await compressLogoFile(file, 320, 220000);
+      setHeaderMeta(prev => ({ ...prev, schoolLogo: compressed }));
+    } catch (err: any) {
+      setSaveFeedback({ text: err?.message || 'Could not process logo image.', type: 'error' });
+      setTimeout(() => setSaveFeedback(null), 3500);
+    }
   };
 
   // Totals calculations
@@ -925,11 +929,15 @@ export const HwsOfficialResultSlip: React.FC<HwsOfficialResultSlipProps> = ({
           <div className="flex items-center justify-between gap-3 pb-2">
             <div className="w-16 h-16 sm:w-20 sm:h-20 shrink-0 flex flex-col items-center justify-center relative group">
               <img
-                src={headerMeta.schoolLogo}
+                src={headerMeta.schoolLogo || '/school-logo.png'}
                 alt="School Logo"
                 className="w-full h-full object-contain"
                 onError={(e) => {
-                  (e.currentTarget as HTMLElement).style.display = 'none';
+                  const img = e.currentTarget;
+                  if (!img.dataset.fallbackApplied) {
+                    img.dataset.fallbackApplied = '1';
+                    img.src = '/school-logo.png';
+                  }
                 }}
               />
               {editing && (

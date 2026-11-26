@@ -304,26 +304,28 @@ export const MasterClassBroadsheetModal: React.FC<MasterClassBroadsheetModalProp
       const existingMap = new Map<string, StudentTermReportData>();
       existingReports.forEach(r => existingMap.set(r.studentId, r));
 
-      const reportsToSave: StudentTermReportData[] = [];
-      for (const row of rankedRows) {
-        const base =
-          existingMap.get(row.student.id) ||
-          (await fetchStudentTermReport(row.student.id, academicSession, term, row.student));
+      const baseReports = await Promise.all(
+        rankedRows.map(async row => {
+          const existing = existingMap.get(row.student.id);
+          if (existing) return existing;
+          return fetchStudentTermReport(row.student.id, academicSession, term, row.student);
+        })
+      );
 
-        reportsToSave.push({
-          ...base,
-          studentId: row.student.id,
-          studentName: row.student.fullName,
-          admissionNumber: row.student.admissionNumber,
-          classGrade,
-          academicSession,
-          term,
-          noInClass: String(rankedRows.length),
-          classAverage: `${overallClassAverage}%`,
-          overallPosition: row.positionLabel,
-          updatedAt: new Date().toISOString()
-        });
-      }
+      const nowIso = new Date().toISOString();
+      const reportsToSave: StudentTermReportData[] = rankedRows.map((row, idx) => ({
+        ...baseReports[idx],
+        studentId: row.student.id,
+        studentName: row.student.fullName,
+        admissionNumber: row.student.admissionNumber,
+        classGrade,
+        academicSession,
+        term,
+        noInClass: String(rankedRows.length),
+        classAverage: `${overallClassAverage}%`,
+        overallPosition: row.positionLabel,
+        updatedAt: nowIso
+      }));
 
       const res = await saveTermReportsBatch(reportsToSave);
       const msg = res.syncedToCloud
@@ -394,8 +396,19 @@ export const MasterClassBroadsheetModal: React.FC<MasterClassBroadsheetModalProp
         {/* Header */}
         <div className="bg-slate-900 text-white px-6 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center font-black shrink-0">
-              <Trophy className="w-5 h-5" />
+            <div className="w-10 h-10 rounded-xl bg-white p-1 border border-amber-400 flex items-center justify-center shrink-0 overflow-hidden">
+              <img
+                src={(settings?.schoolLogo || '').trim() || '/school-logo.png'}
+                alt={settings?.schoolName || 'School Logo'}
+                className="w-full h-full object-contain rounded-lg"
+                onError={(e) => {
+                  const img = e.currentTarget;
+                  if (!img.dataset.fallbackApplied) {
+                    img.dataset.fallbackApplied = '1';
+                    img.src = '/school-logo.png';
+                  }
+                }}
+              />
             </div>
             <div>
               <h3 className="font-black text-sm sm:text-base tracking-tight">

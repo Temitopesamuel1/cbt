@@ -46,31 +46,47 @@ export const LandingGateway: React.FC<LandingGatewayProps> = ({ onNavigate, sett
         {/* Institutional Welcome Card */}
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="bg-slate-900 text-white p-8 sm:p-12 relative overflow-hidden">
-            <div className="max-w-3xl relative z-10 space-y-4">
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-blue-950/80 border border-blue-800 text-blue-300 text-xs font-semibold">
-                <School className="w-4 h-4 text-amber-400" />
-                <span>{settings.schoolName || "Honey's World High School"}</span>
-                <span>·</span>
-                <span className="font-mono">{settings.academicSession} ({settings.currentTerm})</span>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-6 relative z-10">
+              <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-2xl bg-white p-1.5 border-2 border-amber-400 shadow-lg flex items-center justify-center overflow-hidden shrink-0">
+                <img
+                  src={(settings.schoolLogo || '').trim() || '/school-logo.png'}
+                  alt={settings.schoolName || 'School Logo'}
+                  className="w-full h-full object-contain rounded-xl"
+                  onError={(e) => {
+                    const img = e.currentTarget;
+                    if (!img.dataset.fallbackApplied) {
+                      img.dataset.fallbackApplied = '1';
+                      img.src = '/school-logo.png';
+                    }
+                  }}
+                />
               </div>
+              <div className="max-w-3xl space-y-3">
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-blue-950/80 border border-blue-800 text-blue-300 text-xs font-semibold">
+                  <School className="w-4 h-4 text-amber-400" />
+                  <span>{settings.schoolName || "Honey's World High School"}</span>
+                  <span>·</span>
+                  <span className="font-mono">{settings.academicSession} ({settings.currentTerm})</span>
+                </div>
 
-              <div>
-                <h1 className="text-3xl sm:text-4xl font-black tracking-tight text-white">
-                  {settings.schoolName || "Honey's World High School"}
-                </h1>
-                <p className="text-sm sm:text-base text-amber-300 font-semibold mt-1">
-                  {settings.address || 'Gaa Ajanaku, Ilorin, Kwara State'}
-                </p>
-                {settings.motto && (
-                  <p className="text-xs text-slate-400 italic mt-0.5 font-medium">
-                    "{settings.motto}"
+                <div>
+                  <h1 className="text-3xl sm:text-4xl font-black tracking-tight text-white">
+                    {settings.schoolName || "Honey's World High School"}
+                  </h1>
+                  <p className="text-sm sm:text-base text-amber-300 font-semibold mt-1">
+                    {settings.address || 'Gaa Ajanaku, Ilorin, Kwara State'}
                   </p>
-                )}
-              </div>
+                  {settings.motto && (
+                    <p className="text-xs text-slate-400 italic mt-0.5 font-medium">
+                      "{settings.motto}"
+                    </p>
+                  )}
+                </div>
 
-              <p className="text-sm sm:text-base text-slate-300 leading-relaxed">
-                Computer-Based Examination, Continuous Assessment Master Broadsheet, and Student Information System.
-              </p>
+                <p className="text-sm sm:text-base text-slate-300 leading-relaxed">
+                  Computer-Based Examination, Continuous Assessment Master Broadsheet, and Student Information System.
+                </p>
+              </div>
             </div>
           </div>
 

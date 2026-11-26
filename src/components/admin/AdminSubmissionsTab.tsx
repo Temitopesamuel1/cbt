@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   CheckCircle2,
   AlertCircle,
@@ -40,23 +40,41 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
   const [viewingSlipSubmission, setViewingSlipSubmission] = useState<Submission | null>(null);
   const [pendingActionSubmission, setPendingActionSubmission] = useState<Submission | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [showAllRows, setShowAllRows] = useState(false);
+  const PAGE_SIZE = 50;
 
-  const enrichedSubmissions = React.useMemo(
+  const enrichedSubmissions = useMemo(
     () => enrichSubmissionsWithOrdinals(submissions),
     [submissions]
   );
 
-  const filtered = enrichedSubmissions.filter(sub => {
-    const q = searchQuery.toLowerCase();
-    const matchSearch =
-      sub.studentName.toLowerCase().includes(q) ||
-      sub.admissionNumber.toLowerCase().includes(q) ||
-      sub.examTitle.toLowerCase().includes(q) ||
-      (sub.sittingLabel || '').toLowerCase().includes(q);
-    const matchExam = selectedExamFilter === 'All' || sub.examId === selectedExamFilter;
-    const matchClass = selectedClassFilter === 'All' || sub.classGrade === selectedClassFilter;
-    return matchSearch && matchExam && matchClass;
-  });
+  const filtered = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return enrichedSubmissions.filter(sub => {
+      const matchSearch =
+        !q ||
+        sub.studentName.toLowerCase().includes(q) ||
+        sub.admissionNumber.toLowerCase().includes(q) ||
+        sub.examTitle.toLowerCase().includes(q) ||
+        (sub.sittingLabel || '').toLowerCase().includes(q);
+      const matchExam = selectedExamFilter === 'All' || sub.examId === selectedExamFilter;
+      const matchClass = selectedClassFilter === 'All' || sub.classGrade === selectedClassFilter;
+      return matchSearch && matchExam && matchClass;
+    });
+  }, [enrichedSubmissions, searchQuery, selectedExamFilter, selectedClassFilter]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, selectedExamFilter, selectedClassFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paginatedSubmissions = useMemo(() => {
+    if (showAllRows || filtered.length <= PAGE_SIZE) return filtered;
+    const start = (safePage - 1) * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }, [filtered, showAllRows, safePage]);
 
   const handleConfirmUnlockRetake = async () => {
     if (!pendingActionSubmission) return;
@@ -206,7 +224,7 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
                 </td>
               </tr>
             ) : (
-              filtered.map((sub, idx) => (
+              paginatedSubmissions.map((sub, idx) => (
                 <tr key={sub.id || idx} className="hover:bg-slate-50/80">
                   <td className="py-3 px-4 font-bold text-slate-900">
                     <div>{sub.studentName}</div>
@@ -282,6 +300,49 @@ export const AdminSubmissionsTab: React.FC<AdminSubmissionsTabProps> = ({
           </tbody>
         </table>
       </div>
+
+      {/* Pagination Bar */}
+      {filtered.length > PAGE_SIZE && (
+        <div className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs">
+          <span className="text-slate-600 font-medium">
+            {showAllRows
+              ? `Showing all ${filtered.length} submissions`
+              : `Showing ${(safePage - 1) * PAGE_SIZE + 1}–${Math.min(safePage * PAGE_SIZE, filtered.length)} of ${filtered.length} submissions`}
+          </span>
+          <div className="flex items-center gap-2">
+            {!showAllRows && (
+              <>
+                <button
+                  type="button"
+                  disabled={safePage <= 1}
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  className="px-3 py-1 bg-white border border-slate-300 rounded-lg font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+                >
+                  Previous
+                </button>
+                <span className="font-mono font-bold text-slate-700 px-1">
+                  Page {safePage} / {totalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={safePage >= totalPages}
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  className="px-3 py-1 bg-white border border-slate-300 rounded-lg font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+                >
+                  Next
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowAllRows(prev => !prev)}
+              className="px-3 py-1 bg-blue-50 border border-blue-200 text-blue-900 rounded-lg font-bold hover:bg-blue-100 cursor-pointer"
+            >
+              {showAllRows ? `Paginate (${PAGE_SIZE}/page)` : `Show All (${filtered.length})`}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Official Result Slip Modal for Admin Inspection & Printing */}
       {viewingSlipSubmission && (
