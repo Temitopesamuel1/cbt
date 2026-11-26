@@ -129,6 +129,9 @@ const normalizeTermCode = (val?: string) => {
   return clean;
 };
 
+const normalizeSessionCode = (val?: string) =>
+  (val || '').trim().replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+
 const normalizeSubjectKey = (name?: string) =>
   (name || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
@@ -136,6 +139,9 @@ const hasEnteredScores = (r: StudentAssessmentRecord): boolean => {
   const firstCa = resolveFirstCa(r);
   const secondCa = resolveSecondCa(r);
   return (
+    Boolean(r.explicitlySaved) ||
+    Boolean(r.isAutoSynced) ||
+    (Array.isArray(r.examEntries) && r.examEntries.length > 0) ||
     (r.assignmentScore || 0) > 0 ||
     firstCa > 0 ||
     secondCa > 0 ||
@@ -256,6 +262,7 @@ export const HwsOfficialResultSlip: React.FC<HwsOfficialResultSlipProps> = ({
       department: student.department || '',
       category: clsUpper.includes('JSS') ? 'JUNIOR SECONDARY' : 'SENIOR SECONDARY',
       classAverage: '',
+      overallPosition: '',
       behaviours: { ...DEFAULT_PSYCHOMOTOR },
       skills: { ...DEFAULT_SKILLS },
       classTeacherRemarks: "STAY FOCUS AND YOU'LL REACH YOUR GOALS.",
@@ -426,31 +433,43 @@ export const HwsOfficialResultSlip: React.FC<HwsOfficialResultSlipProps> = ({
 
     // Deduplicate by normalized subject name, always preferring the most recently updated entry with entered scores
     const bySubjectMap = new Map<string, StudentAssessmentRecord>();
-    const targetSession = (academicSession || '').trim();
+    const targetSessionNorm = normalizeSessionCode(academicSession);
+    const subjNameById = new Map<string, string>();
+    schoolSubjects.forEach(s => {
+      if (s?.id && s?.name) subjNameById.set(s.id, s.name);
+    });
+
+    const resolveRecordSubjectName = (r: StudentAssessmentRecord) => {
+      const rawName = (r.subjectName || '').trim();
+      if (rawName && rawName.toLowerCase() !== 'subject') return rawName;
+      return (r.subjectId && subjNameById.get(r.subjectId)) || rawName || r.subjectId || 'SUBJECT';
+    };
 
     combinedRaw.forEach(r => {
       if (!hasEnteredScores(r)) return;
-      const key = normalizeSubjectKey(r.subjectName || r.subjectId);
+      const resolvedName = resolveRecordSubjectName(r);
+      const key = normalizeSubjectKey(resolvedName || r.subjectId);
       if (!key) return;
+      const normalizedRec = resolvedName !== r.subjectName ? { ...r, subjectName: resolvedName } : r;
 
       const existing = bySubjectMap.get(key);
       if (!existing) {
-        bySubjectMap.set(key, r);
+        bySubjectMap.set(key, normalizedRec);
         return;
       }
 
-      const rMatchesSess = targetSession && (r.academicSession || '').trim() === targetSession;
-      const exMatchesSess = targetSession && (existing.academicSession || '').trim() === targetSession;
+      const rMatchesSess = targetSessionNorm && normalizeSessionCode(normalizedRec.academicSession) === targetSessionNorm;
+      const exMatchesSess = targetSessionNorm && normalizeSessionCode(existing.academicSession) === targetSessionNorm;
       if (rMatchesSess && !exMatchesSess) {
-        bySubjectMap.set(key, r);
+        bySubjectMap.set(key, normalizedRec);
         return;
       }
       if (!rMatchesSess && exMatchesSess) return;
 
-      const tNew = new Date(r.updatedAt || 0).getTime() || 0;
+      const tNew = new Date(normalizedRec.updatedAt || 0).getTime() || 0;
       const tOld = new Date(existing.updatedAt || 0).getTime() || 0;
       if (tNew >= tOld) {
-        bySubjectMap.set(key, r);
+        bySubjectMap.set(key, normalizedRec);
       }
     });
 
@@ -478,7 +497,7 @@ export const HwsOfficialResultSlip: React.FC<HwsOfficialResultSlipProps> = ({
       const firstCa = resolveFirstCa(rec);
       const secondCa = resolveSecondCa(rec);
       const total = Math.min(maxTotal, (rec.assignmentScore || 0) + firstCa + secondCa + (rec.examScore || 0));
-      const gradeInfo = total > 0 ? calculateHwsGrade(total, maxTotal) : { grade: '', remark: '' };
+      const gradeInfo = (total > 0 || rec.explicitlySaved) ? calculateHwsGrade(total, maxTotal) : { grade: '', remark: '' };
 
       resultRows.push({
         ...rec,
@@ -745,6 +764,7 @@ export const HwsOfficialResultSlip: React.FC<HwsOfficialResultSlipProps> = ({
               testScore: first,
               projectScore: second,
               totalScore: tot,
+              explicitlySaved: true,
               updatedAt: new Date().toISOString()
             };
           });
@@ -1632,6 +1652,22 @@ export const HwsOfficialResultSlip: React.FC<HwsOfficialResultSlipProps> = ({
                   <td className="border-r border-slate-800 p-1 font-black text-xs">{totals.grandTotal}</td>
                   <td colSpan={4} className="p-1 bg-slate-100 text-[10px] font-bold text-slate-600 text-right px-2">
                     {totals.subjectsWithScores} Subject(s) · Average: {formData.classAverage || totals.computedAverage}
+                    {(editing || formData.overallPosition) && (
+                      <span className="ml-2 inline-flex items-center gap-1">
+                        · Pos:{' '}
+                        {editing ? (
+                          <input
+                            type="text"
+                            placeholder="1st"
+                            value={formData.overallPosition || ''}
+                            onChange={(e) => setFormData({ ...formData, overallPosition: e.target.value })}
+                            className="w-12 text-center font-black bg-blue-50 border-b border-blue-400 text-[10px] text-slate-900"
+                          />
+                        ) : (
+                          <strong className="text-slate-950 font-black">{formData.overallPosition}</strong>
+                        )}
+                      </span>
+                    )}
                   </td>
                 </tr>
               </tbody>

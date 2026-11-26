@@ -108,12 +108,20 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
   const [showOfficialReportSheet, setShowOfficialReportSheet] = useState<boolean>(false);
   const [schoolSettings, setSchoolSettings] = useState<SchoolSettings | undefined>(undefined);
   const [caMeta, setCaMeta] = useState<Required<CaWeightsConfig>>(() => resolveCaWeights(undefined));
+  const [selectedCaSession, setSelectedCaSession] = useState<string>(initialStudent.academicSession || '2025/2026');
+  const [selectedCaTerm, setSelectedCaTerm] = useState<string>('1st Term');
+  const hasInitializedTermFilterRef = React.useRef(false);
 
   // Sync school settings & CA weights live
   useEffect(() => {
     fetchSchoolSettings().then(st => {
       setSchoolSettings(st);
       setCaMeta(resolveCaWeights(st.caWeights));
+      if (!hasInitializedTermFilterRef.current) {
+        hasInitializedTermFilterRef.current = true;
+        if (st.academicSession) setSelectedCaSession(st.academicSession);
+        if (st.currentTerm) setSelectedCaTerm(st.currentTerm);
+      }
     }).catch(() => {});
 
     const onSettingsUpdate = (e: Event) => {
@@ -297,9 +305,39 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
     return false;
   };
 
+  const availableCaSessions = useMemo(() => {
+    const set = new Set<string>();
+    if (schoolSettings?.academicSession) set.add(schoolSettings.academicSession);
+    if (currentStudent.academicSession) set.add(currentStudent.academicSession);
+    caRecords.forEach(r => {
+      if (r.academicSession) set.add(r.academicSession);
+    });
+    return Array.from(set);
+  }, [schoolSettings, currentStudent.academicSession, caRecords]);
+
+  const filteredCaRecords = useMemo(() => {
+    const normSess = (s?: string) => (s || '').trim().replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    const normTerm = (t?: string) => {
+      const clean = (t || '').trim().toLowerCase().replace(/[\s\-_]/g, '');
+      if (clean.startsWith('first') || clean === '1st') return '1stterm';
+      if (clean.startsWith('second') || clean === '2nd') return '2ndterm';
+      if (clean.startsWith('third') || clean === '3rd') return '3rdterm';
+      return clean;
+    };
+    const targetSess = normSess(selectedCaSession);
+    const targetTerm = normTerm(selectedCaTerm);
+
+    return caRecords.filter(r => {
+      const matchesSess = !targetSess || !r.academicSession || normSess(r.academicSession) === targetSess;
+      const matchesTerm = selectedCaTerm === 'All Terms' || !r.term || normTerm(r.term) === targetTerm;
+      return matchesSess && matchesTerm;
+    });
+  }, [caRecords, selectedCaSession, selectedCaTerm]);
+
   // Compute live CGPA and Weighted Average
   const academicSummary = useMemo(() => {
-    if (caRecords.length === 0) {
+    const pool = filteredCaRecords.length > 0 ? filteredCaRecords : caRecords;
+    if (pool.length === 0) {
       return {
         cgpa: 0,
         average: studentSubmissions.length > 0
@@ -310,10 +348,10 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
       };
     }
 
-    const totalPts = caRecords.reduce((acc, r) => acc + calculateGradePoint(r.totalScore), 0);
-    const cgpa = parseFloat((totalPts / caRecords.length).toFixed(2));
-    const totalScore = caRecords.reduce((acc, r) => acc + r.totalScore, 0);
-    const average = Math.round(totalScore / caRecords.length);
+    const totalPts = pool.reduce((acc, r) => acc + calculateGradePoint(r.totalScore), 0);
+    const cgpa = parseFloat((totalPts / pool.length).toFixed(2));
+    const totalScore = pool.reduce((acc, r) => acc + r.totalScore, 0);
+    const average = Math.round(totalScore / pool.length);
 
     return {
       cgpa,
@@ -745,9 +783,27 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-mono font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
-                  Session: {currentStudent.academicSession}
-                </span>
+                <select
+                  value={selectedCaSession}
+                  onChange={(e) => setSelectedCaSession(e.target.value)}
+                  className="text-xs font-mono font-bold text-slate-800 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 cursor-pointer"
+                  aria-label="Select Academic Session"
+                >
+                  {availableCaSessions.map(sess => (
+                    <option key={sess} value={sess}>{sess}</option>
+                  ))}
+                </select>
+                <select
+                  value={selectedCaTerm}
+                  onChange={(e) => setSelectedCaTerm(e.target.value)}
+                  className="text-xs font-bold text-slate-800 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 cursor-pointer"
+                  aria-label="Select Academic Term"
+                >
+                  <option value="1st Term">1st Term</option>
+                  <option value="2nd Term">2nd Term</option>
+                  <option value="3rd Term">3rd Term</option>
+                  <option value="All Terms">All Terms</option>
+                </select>
                 {!currentStudent.resultWithheld && (
                   <button
                     type="button"
@@ -775,8 +831,8 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                 <HwsOfficialResultSlip
                   student={currentStudent}
                   settings={schoolSettings}
-                  academicSession={schoolSettings?.academicSession || currentStudent.academicSession || '2025/2026'}
-                  term={(caRecords[0]?.term as any) || (schoolSettings?.currentTerm as any) || '1st Term'}
+                  academicSession={selectedCaSession || schoolSettings?.academicSession || currentStudent.academicSession || '2025/2026'}
+                  term={(selectedCaTerm !== 'All Terms' ? selectedCaTerm : (schoolSettings?.currentTerm || '1st Term')) as any}
                   isEditable={false}
                   usePrintPortal={true}
                   onClose={() => setShowOfficialReportSheet(false)}
@@ -785,12 +841,14 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
             ) : (
               <div className="space-y-6">
                 {/* Continuous Assessment Table */}
-                {caRecords.length === 0 ? (
+                {filteredCaRecords.length === 0 ? (
                   <div className="text-center py-8 border border-dashed border-slate-200 rounded-xl space-y-2">
                     <FileText className="w-8 h-8 mx-auto text-slate-300" />
-                    <h3 className="text-sm font-bold text-slate-800">No Continuous Assessment Ledger Records Yet</h3>
+                    <h3 className="text-sm font-bold text-slate-800">
+                      No Continuous Assessment Records for {selectedCaSession} ({selectedCaTerm})
+                    </h3>
                     <p className="text-xs text-slate-400 max-w-md mx-auto">
-                      Subject teachers are currently entering term continuous assessment marks. Individual CBT sittings are shown separately below.
+                      Subject teachers are currently entering term continuous assessment marks, or try switching Session/Term above.
                     </p>
                   </div>
                 ) : (
@@ -810,7 +868,7 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {caRecords.map(r => {
+                        {filteredCaRecords.map(r => {
                           const isWithheld = currentStudent.withheldSubjectIds?.some(
                             w => w.trim().toLowerCase() === r.subjectName.trim().toLowerCase()
                           );

@@ -21,7 +21,8 @@ import {
   EyeOff,
   ShieldAlert,
   Edit3,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Trophy
 } from 'lucide-react';
 import {
   Student,
@@ -41,7 +42,8 @@ import {
   formatTargetComponentLabel,
   calculateGrade,
   enrichSubmissionsWithOrdinals,
-  formatOrdinalExamLabel
+  formatOrdinalExamLabel,
+  buildCanonicalCaRecordId
 } from '../../types/cbt';
 import {
   fetchAssessmentRecords,
@@ -49,11 +51,15 @@ import {
   saveAssessmentRecord,
   saveStudent,
   fetchSchoolSettings,
-  saveSchoolSettings
+  saveSchoolSettings,
+  stageCaRecordsLocalDraft,
+  flushDirtyCaRecords,
+  getDirtyCaRecordsCount
 } from '../../services/firebase';
 import { BatchResultSlipsModal } from '../common/BatchResultSlipsModal';
 import { HwsOfficialResultSlip } from '../common/HwsOfficialResultSlip';
 import { StudentEvaluationEditorModal } from '../common/StudentEvaluationEditorModal';
+import { MasterClassBroadsheetModal } from '../common/MasterClassBroadsheetModal';
 
 interface ContinuousAssessmentSheetProps {
   teacherStaff?: StaffMember | null;
@@ -91,6 +97,11 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
   const [searchQuery, setSearchQuery] = useState('');
   const [assessmentRecords, setAssessmentRecords] = useState<Record<string, StudentAssessmentRecord>>({});
+  const assessmentRecordsRef = useRef<Record<string, StudentAssessmentRecord>>({});
+  useEffect(() => {
+    assessmentRecordsRef.current = assessmentRecords;
+  }, [assessmentRecords]);
+
   const [isSaving, setIsSaving] = useState(false);
   const [savingStudentId, setSavingStudentId] = useState<string | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
@@ -98,8 +109,15 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   useEffect(() => {
     hasUnsavedChangesRef.current = hasUnsavedChanges;
   }, [hasUnsavedChanges]);
+
+  const [syncState, setSyncState] = useState<'idle' | 'saving' | 'synced' | 'offline_queued'>('idle');
+  const dirtyStudentIdsRef = useRef<Set<string>>(new Set());
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isInternalSaveRef = useRef(false);
+
   const [saveStatus, setSaveStatus] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [showBatchSlipsModal, setShowBatchSlipsModal] = useState(false);
+  const [showMasterMatrixModal, setShowMasterMatrixModal] = useState(false);
   const [viewingOfficialSlipStudent, setViewingOfficialSlipStudent] = useState<Student | null>(null);
   const [editingEvaluationStudent, setEditingEvaluationStudent] = useState<Student | null>(null);
   const [liveSettings, setLiveSettings] = useState<SchoolSettings | null>(settings || null);
@@ -205,21 +223,126 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     );
   }, [classStudents, searchQuery]);
 
-  // Load existing records from Firestore / LocalStorage
+  // Flush any pending dirty rows immediately to Firestore
+  const flushAutoSave = useCallback(async () => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    const dirtyIds = Array.from(dirtyStudentIdsRef.current);
+    if (dirtyIds.length === 0) return;
+
+    const currentMap = assessmentRecordsRef.current;
+    const recordsToCommit = dirtyIds
+      .map(id => currentMap[id])
+      .filter((r): r is StudentAssessmentRecord => Boolean(r));
+
+    if (recordsToCommit.length === 0) {
+      dirtyStudentIdsRef.current.clear();
+      setHasUnsavedChanges(false);
+      return;
+    }
+
+    setSyncState('saving');
+    isInternalSaveRef.current = true;
+    try {
+      const res = await saveAssessmentBatch(recordsToCommit);
+      recordsToCommit.forEach(r => {
+        const latest = assessmentRecordsRef.current[r.studentId];
+        if (!latest || latest.updatedAt === r.updatedAt) {
+          dirtyStudentIdsRef.current.delete(r.studentId);
+        }
+      });
+      const stillDirty = dirtyStudentIdsRef.current.size > 0;
+      setHasUnsavedChanges(stillDirty);
+      setSyncState(res.syncedToCloud ? (getDirtyCaRecordsCount() > 0 ? 'offline_queued' : 'synced') : 'offline_queued');
+    } catch (err) {
+      console.warn('Auto-save deferred to durable local outbox:', err);
+      setSyncState('offline_queued');
+    } finally {
+      setTimeout(() => {
+        isInternalSaveRef.current = false;
+      }, 250);
+    }
+  }, []);
+
+  const scheduleAutoSave = useCallback(() => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      flushAutoSave().catch(() => {});
+    }, 650);
+  }, [flushAutoSave]);
+
+  // Flush before unmount / filter change / page refresh or close
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (dirtyStudentIdsRef.current.size > 0) {
+        const currentMap = assessmentRecordsRef.current;
+        const recs = Array.from(dirtyStudentIdsRef.current)
+          .map(id => currentMap[id])
+          .filter((r): r is StudentAssessmentRecord => Boolean(r));
+        if (recs.length > 0) {
+          stageCaRecordsLocalDraft(recs);
+        }
+        flushAutoSave().catch(() => {});
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        handlePageHide();
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handlePageHide);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      handlePageHide();
+    };
+  }, [flushAutoSave]);
+
+  // Load existing records from Firestore / LocalStorage (matching by subjectId OR subjectName, and studentId OR admissionNumber)
   const loadAssessmentRecords = useCallback(() => {
     if (!selectedSubjectId || !selectedClassCode) return;
+    const subjName = activeSubject?.name;
 
-    fetchAssessmentRecords(selectedSubjectId, selectedClassCode, academicSession, currentTerm)
+    fetchAssessmentRecords(selectedSubjectId, selectedClassCode, academicSession, currentTerm, subjName)
       .then(records => {
+        const admToStudentId = new Map<string, string>();
+        classStudents.forEach(s => {
+          if (s.admissionNumber) {
+            admToStudentId.set(s.admissionNumber.trim().toUpperCase(), s.id);
+          }
+        });
+
         const recordMap: Record<string, StudentAssessmentRecord> = {};
         records.forEach(r => {
-          recordMap[r.studentId] = r;
+          const directStu = classStudents.find(s => s.id === r.studentId);
+          const mappedId = directStu
+            ? directStu.id
+            : admToStudentId.get((r.admissionNumber || '').trim().toUpperCase()) || r.studentId;
+          recordMap[mappedId] = {
+            ...r,
+            studentId: mappedId
+          };
         });
+
         setAssessmentRecords(recordMap);
+        dirtyStudentIdsRef.current.clear();
         setHasUnsavedChanges(false);
+        if (getDirtyCaRecordsCount() > 0) {
+          setSyncState('offline_queued');
+        } else if (records.length > 0) {
+          setSyncState('synced');
+        }
       })
       .catch(err => console.warn('Error loading assessment records:', err));
-  }, [selectedSubjectId, selectedClassCode, academicSession, currentTerm]);
+  }, [selectedSubjectId, selectedClassCode, academicSession, currentTerm, activeSubject?.name, classStudents]);
 
   useEffect(() => {
     loadAssessmentRecords();
@@ -227,17 +350,30 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
 
   useEffect(() => {
     const handleExternalCaSync = () => {
-      if (!hasUnsavedChangesRef.current) {
+      if (!isInternalSaveRef.current && !hasUnsavedChangesRef.current) {
         loadAssessmentRecords();
       }
     };
+    const handleOnline = () => {
+      flushDirtyCaRecords()
+        .then(res => {
+          if (res.syncedToCloud && res.remaining === 0) {
+            setSyncState('synced');
+          }
+          if (!isInternalSaveRef.current && !hasUnsavedChangesRef.current) {
+            loadAssessmentRecords();
+          }
+        })
+        .catch(() => {});
+    };
     window.addEventListener('caRecordsUpdated', handleExternalCaSync);
+    window.addEventListener('online', handleOnline);
     let bc: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
       try {
         bc = new BroadcastChannel('prime_cbt_sync_channel');
         bc.onmessage = (event) => {
-          if (event.data?.type === 'CA_RECORDS_UPDATED' && !hasUnsavedChangesRef.current) {
+          if (event.data?.type === 'CA_RECORDS_UPDATED' && !isInternalSaveRef.current && !hasUnsavedChangesRef.current) {
             loadAssessmentRecords();
           }
         };
@@ -247,6 +383,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     }
     return () => {
       window.removeEventListener('caRecordsUpdated', handleExternalCaSync);
+      window.removeEventListener('online', handleOnline);
       if (bc) bc.close();
     };
   }, [loadAssessmentRecords]);
@@ -319,20 +456,21 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     };
   };
 
-  // Get or initialize record for student with sanitized Firestore ID
+  // Get or initialize record for student with canonical sanitized Firestore ID
   const getRecord = (student: Student): StudentAssessmentRecord => {
     if (assessmentRecords[student.id]) {
       return assessmentRecords[student.id];
     }
     const cleanExam = 0;
     const initialDetails = computeScoreDetails(0, 0, 0, cleanExam);
-    const cleanStudentId = (student.id || student.admissionNumber || 'stu').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const cleanSubjId = (selectedSubjectId || 'sub').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const cleanSession = (academicSession || '2024-2025').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const cleanTerm = (currentTerm || '1stTerm').replace(/[^a-zA-Z0-9_-]/g, '_');
 
     return {
-      id: `ca_${cleanStudentId}_${cleanSubjId}_${cleanSession}_${cleanTerm}`,
+      id: buildCanonicalCaRecordId(
+        student.id || student.admissionNumber || 'stu',
+        selectedSubjectId || activeSubject?.name || 'sub',
+        academicSession,
+        currentTerm
+      ),
       studentId: student.id,
       studentName: student.fullName,
       admissionNumber: student.admissionNumber,
@@ -354,7 +492,7 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
     };
   };
 
-  // Handle score change for student
+  // Handle score change for student + stage immediately to localStorage + debounce auto-save to Firestore
   const handleScoreChange = (
     student: Student,
     field: 'assignmentScore' | 'secondCaScore' | 'firstCaScore' | 'projectScore' | 'testScore' | 'examScore' | 'teacherComment',
@@ -362,36 +500,50 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   ) => {
     const current = getRecord(student);
     setHasUnsavedChanges(true);
+    setSyncState('saving');
+    dirtyStudentIdsRef.current.add(student.id);
 
+    let updated: StudentAssessmentRecord;
     if (field === 'teacherComment') {
-      const updated: StudentAssessmentRecord = {
+      updated = {
         ...current,
         teacherComment: String(value),
+        explicitlySaved: true,
         updatedAt: new Date().toISOString()
       };
-      setAssessmentRecords(prev => ({ ...prev, [student.id]: updated }));
-      return;
+    } else {
+      const numValue = Number(value) || 0;
+      const assignment = field === 'assignmentScore' ? numValue : current.assignmentScore;
+      const secondCa = (field === 'secondCaScore' || field === 'projectScore') ? numValue : (current.secondCaScore ?? current.projectScore ?? 0);
+      const firstCa = (field === 'firstCaScore' || field === 'testScore') ? numValue : (current.firstCaScore ?? current.testScore ?? 0);
+      const exam = field === 'examScore' ? numValue : current.examScore;
+
+      const computed = computeScoreDetails(assignment, secondCa, firstCa, exam);
+
+      updated = {
+        ...current,
+        ...computed,
+        isAutoSynced: field === 'examScore' ? false : current.isAutoSynced,
+        explicitlySaved: true,
+        updatedAt: new Date().toISOString()
+      };
     }
-
-    const numValue = Number(value) || 0;
-    const assignment = field === 'assignmentScore' ? numValue : current.assignmentScore;
-    const secondCa = (field === 'secondCaScore' || field === 'projectScore') ? numValue : (current.secondCaScore ?? current.projectScore ?? 0);
-    const firstCa = (field === 'firstCaScore' || field === 'testScore') ? numValue : (current.firstCaScore ?? current.testScore ?? 0);
-    const exam = field === 'examScore' ? numValue : current.examScore;
-
-    const computed = computeScoreDetails(assignment, secondCa, firstCa, exam);
-
-    const updated: StudentAssessmentRecord = {
-      ...current,
-      ...computed,
-      isAutoSynced: field === 'examScore' ? false : current.isAutoSynced,
-      updatedAt: new Date().toISOString()
-    };
 
     setAssessmentRecords(prev => ({
       ...prev,
       [student.id]: updated
     }));
+    assessmentRecordsRef.current = {
+      ...assessmentRecordsRef.current,
+      [student.id]: updated
+    };
+
+    isInternalSaveRef.current = true;
+    stageCaRecordsLocalDraft([updated]);
+    setTimeout(() => {
+      isInternalSaveRef.current = false;
+    }, 150);
+    scheduleAutoSave();
   };
 
   // Automatically scan and sync CBT scores into 1st CA, 2nd CA, or Term's Exam & preserve all sittings separately
@@ -474,25 +626,39 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
           nextExam
         );
 
-        updatedMap[student.id] = {
+        const syncedRecord: StudentAssessmentRecord = {
           ...current,
           ...computed,
           cbtSubmissionId: latest.id,
           examEntries,
           isAutoSynced: true,
+          explicitlySaved: true,
           updatedAt: new Date().toISOString()
         };
+        updatedMap[student.id] = syncedRecord;
+        dirtyStudentIdsRef.current.add(student.id);
         matchCount++;
       }
     });
 
     setAssessmentRecords(updatedMap);
-    setHasUnsavedChanges(true);
+    assessmentRecordsRef.current = updatedMap;
 
     if (matchCount > 0) {
+      setHasUnsavedChanges(true);
+      const changedRecs = Array.from(dirtyStudentIdsRef.current)
+        .map(id => updatedMap[id])
+        .filter((r): r is StudentAssessmentRecord => Boolean(r));
+      isInternalSaveRef.current = true;
+      stageCaRecordsLocalDraft(changedRecs);
+      setTimeout(() => {
+        isInternalSaveRef.current = false;
+      }, 150);
+      scheduleAutoSave();
+
       const colSummary = Array.from(syncedComponents).join(', ') || caWeights.examLabel;
       setSaveStatus({
-        text: `Synced CBT sittings for ${matchCount} student(s) into ${colSummary}! You can still edit any cell and click 'Save All Scores'.`,
+        text: `Synced CBT sittings for ${matchCount} student(s) into ${colSummary} and auto-saving to database!`,
         type: 'success'
       });
     } else {
@@ -508,28 +674,52 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
   // Save a single student's row directly
   const handleSaveSingleRecord = async (student: Student) => {
     setSavingStudentId(student.id);
+    setSyncState('saving');
+    isInternalSaveRef.current = true;
     try {
-      const rec = getRecord(student);
-      await saveAssessmentRecord(rec);
+      const rec: StudentAssessmentRecord = {
+        ...getRecord(student),
+        explicitlySaved: true,
+        updatedAt: new Date().toISOString()
+      };
+      setAssessmentRecords(prev => ({ ...prev, [student.id]: rec }));
+      assessmentRecordsRef.current = { ...assessmentRecordsRef.current, [student.id]: rec };
+      const res = await saveAssessmentRecord(rec);
+      dirtyStudentIdsRef.current.delete(student.id);
+      const stillDirty = dirtyStudentIdsRef.current.size > 0;
+      setHasUnsavedChanges(stillDirty);
+      setSyncState(res.syncedToCloud ? 'synced' : 'offline_queued');
       setSaveStatus({
-        text: `Scores for ${student.fullName} saved successfully!`,
+        text: res.syncedToCloud
+          ? `Scores for ${student.fullName} saved & published to cloud!`
+          : `Scores for ${student.fullName} saved locally and queued for cloud sync.`,
         type: 'success'
       });
     } catch (err) {
       console.error('Error saving single student score:', err);
+      setSyncState('offline_queued');
       setSaveStatus({
         text: `Failed to save score for ${student.fullName}.`,
         type: 'error'
       });
     } finally {
       setSavingStudentId(null);
+      setTimeout(() => {
+        isInternalSaveRef.current = false;
+      }, 250);
       setTimeout(() => setSaveStatus(null), 4000);
     }
   };
 
   // Save all records to Firestore
   const handleSaveAllRecords = async () => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
     setIsSaving(true);
+    setSyncState('saving');
+    isInternalSaveRef.current = true;
     try {
       if (classStudents.length === 0) {
         setSaveStatus({
@@ -540,9 +730,14 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
         return;
       }
 
+      const nowIso = new Date().toISOString();
       const recordsToSave: StudentAssessmentRecord[] = classStudents
-        .filter(s => Boolean(assessmentRecords[s.id]))
-        .map(s => getRecord(s));
+        .filter(s => Boolean(assessmentRecordsRef.current[s.id]))
+        .map(s => ({
+          ...getRecord(s),
+          explicitlySaved: true,
+          updatedAt: nowIso
+        }));
       if (recordsToSave.length === 0) {
         setSaveStatus({
           text: `Enter or modify at least one student score before saving ${activeSubject?.name || 'sheet'}.`,
@@ -551,20 +746,36 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
         setIsSaving(false);
         return;
       }
-      await saveAssessmentBatch(recordsToSave);
+
+      const nextMap = { ...assessmentRecordsRef.current };
+      recordsToSave.forEach(r => {
+        nextMap[r.studentId] = r;
+      });
+      setAssessmentRecords(nextMap);
+      assessmentRecordsRef.current = nextMap;
+
+      const res = await saveAssessmentBatch(recordsToSave);
+      dirtyStudentIdsRef.current.clear();
       setHasUnsavedChanges(false);
+      setSyncState(res.syncedToCloud ? 'synced' : 'offline_queued');
       setSaveStatus({
-        text: `Master Assessment Record Sheet for ${selectedClassCode} (${activeSubject?.name}) with ${recordsToSave.length} entered student record(s) saved & published successfully!`,
+        text: res.syncedToCloud
+          ? `Master Assessment Sheet for ${selectedClassCode} (${activeSubject?.name}) with ${recordsToSave.length} student record(s) saved & synced to cloud!`
+          : `Saved ${recordsToSave.length} record(s) locally. Cloud sync will complete automatically when online.`,
         type: 'success'
       });
     } catch (err) {
       console.error('Error saving continuous assessment records:', err);
+      setSyncState('offline_queued');
       setSaveStatus({
         text: 'Failed to save assessment records to database: ' + (err instanceof Error ? err.message : 'Network error'),
         type: 'error'
       });
     } finally {
       setIsSaving(false);
+      setTimeout(() => {
+        isInternalSaveRef.current = false;
+      }, 250);
       setTimeout(() => setSaveStatus(null), 5000);
     }
   };
@@ -699,10 +910,27 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {hasUnsavedChanges && (
+            {syncState === 'saving' && (
               <span className="px-2.5 py-1 bg-amber-100 border border-amber-300 text-amber-900 text-xs font-bold rounded-lg animate-pulse">
-                Unsaved Edits
+                Auto-saving...
               </span>
+            )}
+            {syncState === 'synced' && !hasUnsavedChanges && (
+              <span className="px-2.5 py-1 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold rounded-lg flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Saved to Cloud</span>
+              </span>
+            )}
+            {syncState === 'offline_queued' && (
+              <button
+                type="button"
+                onClick={() => flushDirtyCaRecords().then(r => { if (r.syncedToCloud) setSyncState('synced'); })}
+                className="px-2.5 py-1 bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold rounded-lg flex items-center gap-1 cursor-pointer hover:bg-amber-100"
+                title="Scores are safely saved locally and will sync automatically. Click to retry cloud sync now."
+              >
+                <RefreshCw className="w-3 h-3 text-amber-700" />
+                <span>Saved Locally · Sync Pending</span>
+              </button>
             )}
 
             <button
@@ -741,6 +969,16 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
             >
               <Printer className="w-3.5 h-3.5 text-blue-700" />
               <span>Print Sheet</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowMasterMatrixModal(true)}
+              className="px-3.5 py-2 bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+              title="View all subjects together, compute class positions (1st, 2nd, 3rd...) and sync class averages to reports"
+            >
+              <Trophy className="w-3.5 h-3.5 text-amber-700" />
+              <span>Master Class Matrix</span>
             </button>
 
             <button
@@ -1330,14 +1568,22 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
       {classStudents.length > 0 && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 backdrop-blur-md text-white px-5 py-2.5 rounded-2xl shadow-2xl border border-slate-700 flex items-center gap-4 no-print animate-fadeIn">
           <div className="flex items-center gap-2 text-xs">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className={`w-2 h-2 rounded-full ${syncState === 'saving' ? 'bg-amber-400 animate-ping' : syncState === 'offline_queued' ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
             <span className="font-bold text-amber-300">{activeSubject?.name}</span>
             <span className="text-slate-400 font-mono">({selectedClassCode})</span>
-            {hasUnsavedChanges && (
+            {syncState === 'saving' ? (
               <span className="bg-amber-400 text-slate-950 text-[10px] font-black px-2 py-0.5 rounded uppercase">
-                Unsaved
+                Saving...
               </span>
-            )}
+            ) : syncState === 'offline_queued' ? (
+              <span className="bg-amber-200 text-slate-950 text-[10px] font-black px-2 py-0.5 rounded uppercase">
+                Local Saved
+              </span>
+            ) : syncState === 'synced' ? (
+              <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold px-2 py-0.5 rounded uppercase">
+                Synced
+              </span>
+            ) : null}
           </div>
 
           <button
@@ -1411,6 +1657,24 @@ export const ContinuousAssessmentSheet: React.FC<ContinuousAssessmentSheetProps>
               type: 'success'
             });
             setTimeout(() => setSaveStatus(null), 4000);
+          }}
+        />
+      )}
+
+      {/* CLASS-WIDE ALL-SUBJECTS MASTER BROADSHEET MATRIX */}
+      {showMasterMatrixModal && (
+        <MasterClassBroadsheetModal
+          isOpen={showMasterMatrixModal}
+          onClose={() => setShowMasterMatrixModal(false)}
+          classGrade={selectedClassCode}
+          academicSession={academicSession}
+          term={currentTerm}
+          students={students}
+          subjects={subjects}
+          settings={liveSettings || settings}
+          onSyncedNotice={(text, type = 'success') => {
+            setSaveStatus({ text, type });
+            setTimeout(() => setSaveStatus(null), 5000);
           }}
         />
       )}

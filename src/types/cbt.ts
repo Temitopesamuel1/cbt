@@ -67,6 +67,9 @@ export interface Examination {
   resultVisibility: 'immediate' | 'teacher_publish';
   startDate?: string;
   endDate?: string;
+  enableAntiCheat?: boolean;
+  maxTabSwitches?: number;
+  requireFullscreen?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -76,10 +79,15 @@ export interface Question {
   examId: string;
   questionNumber: number;
   text: string;
+  imageUrl?: string;
   optionA: string;
   optionB: string;
   optionC: string;
   optionD: string;
+  optionAImage?: string;
+  optionBImage?: string;
+  optionCImage?: string;
+  optionDImage?: string;
   correctOption: 'A' | 'B' | 'C' | 'D';
   subject: string;
   topic: string;
@@ -89,6 +97,9 @@ export interface Question {
 export interface ExamAttempt {
   id: string;
   examId: string;
+  examTitle?: string;
+  subjectName?: string;
+  classGrade?: string;
   studentId: string;
   studentAdmissionNumber: string;
   studentName: string;
@@ -97,6 +108,11 @@ export interface ExamAttempt {
   status: 'in_progress' | 'submitted' | 'timed_out' | 'retake_granted';
   savedAnswers: Record<string, 'A' | 'B' | 'C' | 'D'>;
   flaggedQuestions?: Record<string, boolean>;
+  tabSwitchCount?: number;
+  currentQuestionIndex?: number;
+  answeredCount?: number;
+  totalQuestions?: number;
+  lastWarning?: string;
   lastHeartbeatAt: string;
   retakeGrantedAt?: string;
 }
@@ -426,8 +442,22 @@ export interface StudentAssessmentRecord {
   cbtSubmissionId?: string;
   examEntries?: CbtExamEntry[]; // Individual CBT sittings (1st Exam, 2nd Exam, etc.) preserved separately
   isAutoSynced?: boolean;
+  explicitlySaved?: boolean;
   teacherComment?: string;
   updatedAt: string;
+}
+
+export function buildCanonicalCaRecordId(
+  studentKey: string,
+  subjectKey: string,
+  academicSession: string,
+  term: string
+): string {
+  const s = (studentKey || 'stu').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const sub = (subjectKey || 'sub').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const sess = (academicSession || '2025-2026').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const trm = (term || '1stTerm').trim().replace(/\s+/g, '').replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `ca_${s}_${sub}_${sess}_${trm}`;
 }
 
 export interface PsychomotorRating {
@@ -466,6 +496,7 @@ export interface StudentTermReportData {
   department?: string; // e.g. "SENIOR SECONDARY", "SCIENCE", "ARTS", "COMMERCIAL"
   category?: string; // e.g. "SENIOR SECONDARY", "JUNIOR SECONDARY"
   classAverage?: number | string; // e.g. "62.6%"
+  overallPosition?: string; // e.g. "1st", "2nd", "3rd"
   // Psychomotor Behaviours (1-5)
   behaviours: PsychomotorRating;
   // Skills Assessment (1-5)

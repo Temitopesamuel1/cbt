@@ -11,6 +11,9 @@ import {
   initializeFirestore,
   getFirestore,
   memoryLocalCache,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  writeBatch,
   Firestore,
   collection,
   doc,
@@ -53,7 +56,8 @@ import {
   resolveExamTargetComponent,
   getTargetComponentMax,
   formatOrdinalExamLabel,
-  enrichSubmissionsWithOrdinals
+  enrichSubmissionsWithOrdinals,
+  buildCanonicalCaRecordId
 } from '../types/cbt';
 import {
   DEFAULT_SCHOOL_CLASSES,
@@ -67,18 +71,43 @@ import {
 } from '../data/initialSchoolData';
 
 const app = initializeApp(firebaseConfig);
+const isBrowserRuntime = typeof window !== 'undefined' && typeof document !== 'undefined';
+const browserTransportSettings = isBrowserRuntime
+  ? {
+      experimentalForceLongPolling: true,
+      experimentalLongPollingOptions: { timeoutSeconds: 15 }
+    }
+  : {};
+
 let dbInstance: Firestore;
 try {
+  const canUseIndexedDb = isBrowserRuntime && typeof indexedDB !== 'undefined';
+  const cache = canUseIndexedDb
+    ? persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+    : memoryLocalCache();
   dbInstance = initializeFirestore(
     app,
     {
       ignoreUndefinedProperties: true,
-      localCache: memoryLocalCache()
+      localCache: cache,
+      ...browserTransportSettings
     },
     firebaseConfig.firestoreDatabaseId
   );
 } catch {
-  dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  try {
+    dbInstance = initializeFirestore(
+      app,
+      {
+        ignoreUndefinedProperties: true,
+        localCache: memoryLocalCache(),
+        ...browserTransportSettings
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
 }
 export const db = dbInstance;
 export const auth = getAuth(app);
@@ -531,6 +560,8 @@ const DELETED_STUDENTS_KEY = 'prime_edutech_deleted_student_ids';
 const DELETED_EXAMS_KEY = 'prime_cbt_deleted_exam_ids';
 const DELETED_SUBMISSIONS_KEY = 'prime_cbt_deleted_submission_ids';
 const DELETED_CA_RECORDS_KEY = 'prime_edutech_deleted_ca_record_ids';
+const SAVED_CA_RECORDS_KEY = 'prime_edutech_ca_records';
+const DIRTY_CA_RECORDS_KEY = 'prime_edutech_ca_dirty_records';
 const DELETED_LESSON_NOTES_KEY = 'prime_cbt_deleted_lesson_note_ids';
 const BOOTSTRAPPED_KEY = 'prime_cbt_has_bootstrapped_v1';
 
@@ -577,6 +608,42 @@ const pendingCaRecordSaves = new Map<string, StudentAssessmentRecord>();
 const pendingCaRecordDeletes = new Set<string>();
 const pendingLessonNoteSaves = new Map<string, LessonNote>();
 const pendingLessonNoteDeletes = new Set<string>();
+
+function readDirtyCaRecordsStorage(): Record<string, StudentAssessmentRecord> {
+  try {
+    const raw = localStorage.getItem(DIRTY_CA_RECORDS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDirtyCaRecordsStorage(mapObj: Record<string, StudentAssessmentRecord>) {
+  try {
+    const keys = Object.keys(mapObj);
+    if (keys.length === 0) {
+      localStorage.removeItem(DIRTY_CA_RECORDS_KEY);
+    } else {
+      localStorage.setItem(DIRTY_CA_RECORDS_KEY, JSON.stringify(mapObj));
+    }
+  } catch {}
+}
+
+// Hydrate any unsynced CA records from localStorage so page refreshes never lose logged scores
+(function hydratePendingCaOutbox() {
+  try {
+    const storedDirty = readDirtyCaRecordsStorage();
+    const deletedRaw = localStorage.getItem(DELETED_CA_RECORDS_KEY);
+    const deletedSet = deletedRaw ? new Set<string>(JSON.parse(deletedRaw)) : new Set<string>();
+    Object.entries(storedDirty).forEach(([id, rec]) => {
+      if (rec && id && !deletedSet.has(id)) {
+        pendingCaRecordSaves.set(id, rec);
+      }
+    });
+  } catch {}
+})();
 
 function getTombstoneSet(storageKey: string): Set<string> {
   try {
@@ -803,6 +870,27 @@ async function clearCloudDeletion(field: DeletionField, id: string): Promise<voi
     );
   } catch (err) {
     console.warn(`Cloud tombstone clear warning (${field}):`, err);
+  }
+}
+
+async function clearCloudDeletionsBatch(field: DeletionField, ids: string[]): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  markSchoolBootstrappedLocal();
+  try {
+    for (let i = 0; i < ids.length; i += 400) {
+      const chunk = ids.slice(i, i + 400);
+      await setDoc(
+        doc(db, 'settings', 'syncState'),
+        {
+          hasBootstrapped: true,
+          [field]: arrayRemove(...chunk),
+          updatedAt: new Date().toISOString()
+        },
+        { merge: true }
+      );
+    }
+  } catch (err) {
+    console.warn(`Cloud batch tombstone clear warning (${field}):`, err);
   }
 }
 
@@ -2389,7 +2477,7 @@ export async function saveQuestion(examId: string, question: Question): Promise<
   broadcastExamSync('EXAM_SAVED', { examId });
 }
 
-// Batch save questions with explicit Replace vs Append control (also deletes replaced questions in Firestore)
+// Batch save questions atomically via chunked writeBatch with explicit Replace vs Append control
 export async function saveQuestionsBatch(examId: string, newQuestions: Question[], replaceExisting = true): Promise<void> {
   const cleanNew = newQuestions.map(q => sanitizeFirestoreData(q));
   let finalList: Question[] = [];
@@ -2422,36 +2510,66 @@ export async function saveQuestionsBatch(examId: string, newQuestions: Question[
   } catch {}
 
   const syncBatch = async () => {
+    const deleteRefs: ReturnType<typeof doc>[] = [];
     if (replaceExisting) {
       try {
         const existingSnap = await getDocs(collection(db, 'examinations', examId, 'questions'));
         const keepIds = new Set(cleanNew.map(q => q.id));
-        const deletes: Promise<unknown>[] = [];
         existingSnap.forEach(d => {
           if (!keepIds.has(d.id)) {
-            deletes.push(deleteDoc(d.ref).catch(() => {}));
+            deleteRefs.push(d.ref);
           }
         });
-        await Promise.all(deletes);
       } catch {}
     }
 
-    await Promise.all(
-      cleanNew.map(q =>
-        setDoc(doc(db, 'examinations', examId, 'questions', q.id), q, { merge: true }).catch(err => {
-          console.warn('Firestore batch question write error:', err);
-        })
-      )
-    );
+    const ops: Array<() => void> = [];
+    const CHUNK_SIZE = 350;
+    const now = new Date().toISOString();
 
-    await setDoc(
-      doc(db, 'examinations', examId),
-      { totalQuestions: finalList.length, updatedAt: new Date().toISOString() },
-      { merge: true }
-    ).catch(() => {});
+    type BatchOp =
+      | { type: 'delete'; ref: ReturnType<typeof doc> }
+      | { type: 'set'; q: Question };
+
+    const allOps: BatchOp[] = [
+      ...deleteRefs.map(ref => ({ type: 'delete' as const, ref })),
+      ...cleanNew.map(q => ({ type: 'set' as const, q }))
+    ];
+
+    if (allOps.length === 0) {
+      const batch = writeBatch(db);
+      batch.set(
+        doc(db, 'examinations', examId),
+        { totalQuestions: finalList.length, updatedAt: now },
+        { merge: true }
+      );
+      await batch.commit();
+      return;
+    }
+
+    for (let i = 0; i < allOps.length; i += CHUNK_SIZE) {
+      const chunk = allOps.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+      chunk.forEach(op => {
+        if (op.type === 'delete') {
+          batch.delete(op.ref);
+        } else {
+          batch.set(doc(db, 'examinations', examId, 'questions', op.q.id), op.q, { merge: true });
+        }
+      });
+      if (i + CHUNK_SIZE >= allOps.length) {
+        batch.set(
+          doc(db, 'examinations', examId),
+          { totalQuestions: finalList.length, updatedAt: now },
+          { merge: true }
+        );
+      }
+      await batch.commit();
+    }
+    void ops;
   };
 
-  await commitFirestoreFast(syncBatch(), OperationType.WRITE, `examinations/${examId}/questions`);
+  await commitFirestoreFast(syncBatch(), OperationType.WRITE, `examinations/${examId}/questions`, 15000);
   broadcastExamSync('EXAM_SAVED', { examId });
 }
 
@@ -3076,6 +3194,107 @@ export async function saveStudent(student: Student): Promise<Student> {
   return cleanStudent;
 }
 
+export async function saveStudentsBatch(
+  studentsList: Student[]
+): Promise<{ savedCount: number; syncedToCloud: boolean; students: Student[] }> {
+  if (!studentsList || studentsList.length === 0) {
+    return { savedCount: 0, syncedToCloud: true, students: [] };
+  }
+
+  const now = new Date().toISOString();
+  const cleanList: Student[] = studentsList.map(student => {
+    pendingStudentDeletes.delete(student.id);
+    removeTombstone(DELETED_STUDENTS_KEY, student.id);
+    const accessCode =
+      student.accessCode && student.accessCode.trim() !== ''
+        ? student.accessCode.trim().toUpperCase()
+        : generateStudentAccessCode();
+    return sanitizeFirestoreData<Student>({
+      ...student,
+      accessCode,
+      email: student.email ?? '',
+      password: student.password ?? '',
+      passportUrl: student.passportUrl ?? '',
+      phoneNumber: student.phoneNumber ?? '',
+      withheldReason: student.withheldReason ?? '',
+      bio: student.bio ?? '',
+      department: student.department ?? '',
+      gender: student.gender ?? '',
+      dateOfBirth: student.dateOfBirth ?? '',
+      stateOfOrigin: student.stateOfOrigin ?? '',
+      withheldSubjectIds: Array.isArray(student.withheldSubjectIds) ? student.withheldSubjectIds : [],
+      updatedAt: now
+    });
+  });
+
+  cleanList.forEach(s => pendingStudentSaves.set(s.id, s));
+
+  try {
+    const existing = readLocalStudentsList();
+    const byId = new Map<string, Student>();
+    existing.forEach(s => byId.set(s.id, s));
+    cleanList.forEach(s => byId.set(s.id, { ...byId.get(s.id), ...s }));
+    writeLocalStudentsList(Array.from(byId.values()));
+  } catch {}
+
+  broadcastEntitySync('studentsUpdated', 'STUDENTS_UPDATED', { count: cleanList.length });
+
+  let syncedToCloud = true;
+  try {
+    const commitBatch = async () => {
+      const CHUNK_SIZE = 350;
+      for (let i = 0; i < cleanList.length; i += CHUNK_SIZE) {
+        const chunk = cleanList.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+        chunk.forEach(s => {
+          batch.set(doc(db, 'students', s.id), s, { merge: true });
+        });
+        await batch.commit();
+      }
+      await clearCloudDeletionsBatch('deletedStudentIds', cleanList.map(s => s.id));
+    };
+
+    await commitFirestoreFast(commitBatch(), OperationType.WRITE, 'students/batch', 15000);
+    cleanList.forEach(s => {
+      const curr = pendingStudentSaves.get(s.id);
+      if (curr && curr.updatedAt === s.updatedAt) {
+        pendingStudentSaves.delete(s.id);
+      }
+    });
+  } catch (err) {
+    console.warn('Batch student cloud write warning (saved locally):', err);
+    syncedToCloud = false;
+  }
+
+  return { savedCount: cleanList.length, syncedToCloud, students: cleanList };
+}
+
+export async function promoteStudentsClassBatch(
+  allStudents: Student[],
+  studentIds: string[],
+  targetClassGrade: string,
+  targetAcademicSession: string,
+  newStatus: 'active' | 'graduated' = 'active'
+): Promise<{ promotedCount: number; syncedToCloud: boolean }> {
+  const idSet = new Set(studentIds);
+  const targets = allStudents
+    .filter(s => idSet.has(s.id))
+    .map(s => ({
+      ...s,
+      classGrade: newStatus === 'graduated' ? s.classGrade : targetClassGrade,
+      academicSession: targetAcademicSession || s.academicSession,
+      status: newStatus,
+      updatedAt: new Date().toISOString()
+    }));
+
+  if (targets.length === 0) {
+    return { promotedCount: 0, syncedToCloud: true };
+  }
+
+  const res = await saveStudentsBatch(targets);
+  return { promotedCount: res.savedCount, syncedToCloud: res.syncedToCloud };
+}
+
 export async function deleteStudent(studentId: string): Promise<void> {
   const path = `students/${studentId}`;
   pendingStudentSaves.delete(studentId);
@@ -3358,27 +3577,43 @@ export async function ensureInitialSchoolData(): Promise<void> {
 
 // Exam Attempts & Disconnection Recovery
 export async function createExamAttempt(attempt: ExamAttempt): Promise<void> {
-  const path = `attempts/${attempt.id}`;
+  const cleanAttempt = sanitizeFirestoreData<ExamAttempt>({
+    ...attempt,
+    tabSwitchCount: attempt.tabSwitchCount ?? 0,
+    answeredCount: attempt.answeredCount ?? Object.keys(attempt.savedAnswers || {}).length,
+    lastHeartbeatAt: attempt.lastHeartbeatAt || new Date().toISOString()
+  });
   try {
-    await setDoc(doc(db, 'attempts', attempt.id), attempt);
-    // Also save in localStorage for client-side offline tolerance
-    localStorage.setItem(`prime_cbt_attempt_${attempt.id}`, JSON.stringify(attempt));
+    localStorage.setItem(`prime_cbt_attempt_${attempt.id}`, JSON.stringify(cleanAttempt));
+  } catch {}
+  try {
+    await commitFirestoreFast(
+      setDoc(doc(db, 'attempts', attempt.id), cleanAttempt, { merge: true }),
+      OperationType.WRITE,
+      `attempts/${attempt.id}`
+    );
   } catch (error) {
     console.warn('Attempt cached in localStorage:', error);
-    localStorage.setItem(`prime_cbt_attempt_${attempt.id}`, JSON.stringify(attempt));
   }
 }
 
 export async function getExamAttempt(attemptId: string): Promise<ExamAttempt | null> {
-  const path = `attempts/${attemptId}`;
   try {
-    const snap = await getDoc(doc(db, 'attempts', attemptId));
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const docRef = doc(db, 'attempts', attemptId);
+    const snap = isOnline
+      ? await getDocFromServer(docRef).catch(() => getDoc(docRef))
+      : await getDoc(docRef);
     if (snap.exists()) {
-      return snap.data() as ExamAttempt;
+      const data = { id: snap.id, ...snap.data() } as ExamAttempt;
+      try {
+        localStorage.setItem(`prime_cbt_attempt_${attemptId}`, JSON.stringify(data));
+      } catch {}
+      return data;
     }
     const local = localStorage.getItem(`prime_cbt_attempt_${attemptId}`);
     return local ? JSON.parse(local) : null;
-  } catch (error) {
+  } catch {
     const local = localStorage.getItem(`prime_cbt_attempt_${attemptId}`);
     return local ? JSON.parse(local) : null;
   }
@@ -3387,26 +3622,136 @@ export async function getExamAttempt(attemptId: string): Promise<ExamAttempt | n
 export async function updateExamAttemptProgress(
   attemptId: string,
   answers: Record<string, 'A' | 'B' | 'C' | 'D'>,
-  flagged?: Record<string, boolean>
+  flagged?: Record<string, boolean>,
+  meta?: {
+    tabSwitchCount?: number;
+    currentQuestionIndex?: number;
+    answeredCount?: number;
+    totalQuestions?: number;
+    lastWarning?: string;
+    examTitle?: string;
+    subjectName?: string;
+    classGrade?: string;
+  }
 ): Promise<void> {
-  const path = `attempts/${attemptId}`;
   const now = new Date().toISOString();
+  const payload = sanitizeFirestoreData({
+    savedAnswers: answers,
+    flaggedQuestions: flagged || {},
+    answeredCount: meta?.answeredCount ?? Object.keys(answers || {}).length,
+    ...(meta?.tabSwitchCount !== undefined ? { tabSwitchCount: meta.tabSwitchCount } : {}),
+    ...(meta?.currentQuestionIndex !== undefined ? { currentQuestionIndex: meta.currentQuestionIndex } : {}),
+    ...(meta?.totalQuestions !== undefined ? { totalQuestions: meta.totalQuestions } : {}),
+    ...(meta?.lastWarning !== undefined ? { lastWarning: meta.lastWarning } : {}),
+    ...(meta?.examTitle ? { examTitle: meta.examTitle } : {}),
+    ...(meta?.subjectName ? { subjectName: meta.subjectName } : {}),
+    ...(meta?.classGrade ? { classGrade: meta.classGrade } : {}),
+    lastHeartbeatAt: now
+  });
+
   try {
-    await updateDoc(doc(db, 'attempts', attemptId), {
-      savedAnswers: answers,
-      flaggedQuestions: flagged || {},
-      lastHeartbeatAt: now
-    });
-  } catch (err) {
-    // Keep local cache up to date even if network drops
     const local = localStorage.getItem(`prime_cbt_attempt_${attemptId}`);
     if (local) {
       const parsed = JSON.parse(local);
-      parsed.savedAnswers = answers;
-      parsed.flaggedQuestions = flagged;
-      parsed.lastHeartbeatAt = now;
-      localStorage.setItem(`prime_cbt_attempt_${attemptId}`, JSON.stringify(parsed));
+      localStorage.setItem(`prime_cbt_attempt_${attemptId}`, JSON.stringify({ ...parsed, ...payload }));
     }
+  } catch {}
+
+  try {
+    await setDoc(doc(db, 'attempts', attemptId), payload, { merge: true });
+  } catch (err) {
+    console.warn('Attempt heartbeat cached locally:', err);
+  }
+}
+
+export function subscribeExamAttempts(
+  callback: (attempts: ExamAttempt[]) => void,
+  examId?: string
+): () => void {
+  const colRef = examId
+    ? query(collection(db, 'attempts'), where('examId', '==', examId))
+    : collection(db, 'attempts');
+
+  let unsub: (() => void) | null = null;
+  try {
+    unsub = onSnapshot(
+      colRef,
+      { includeMetadataChanges: true },
+      snapshot => {
+        const list: ExamAttempt[] = [];
+        snapshot.forEach(d => {
+          list.push({ id: d.id, ...d.data() } as ExamAttempt);
+        });
+        list.sort(
+          (a, b) => new Date(b.lastHeartbeatAt || 0).getTime() - new Date(a.lastHeartbeatAt || 0).getTime()
+        );
+        callback(list);
+      },
+      err => {
+        console.warn('Live exam monitor snapshot warning:', err);
+      }
+    );
+  } catch (err) {
+    console.warn('Live exam monitor subscription failed:', err);
+  }
+
+  return () => {
+    if (unsub) unsub();
+  };
+}
+
+export async function extendExamAttemptTime(attemptId: string, extraMinutes: number): Promise<ExamAttempt | null> {
+  const existing = await getExamAttempt(attemptId);
+  const nowMs = Date.now();
+  const baseDeadline = existing?.endTime ? Math.max(nowMs, new Date(existing.endTime).getTime()) : nowMs;
+  const newEndTime = new Date(baseDeadline + Math.max(1, extraMinutes) * 60 * 1000).toISOString();
+  const nowIso = new Date(nowMs).toISOString();
+
+  const patch: Partial<ExamAttempt> = {
+    endTime: newEndTime,
+    status: 'in_progress',
+    lastWarning: `Invigilator extended timer by +${extraMinutes} min(s)`,
+    lastHeartbeatAt: nowIso
+  };
+
+  await commitFirestoreFast(
+    setDoc(doc(db, 'attempts', attemptId), sanitizeFirestoreData(patch), { merge: true }),
+    OperationType.WRITE,
+    `attempts/${attemptId}`
+  );
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('prime_cbt_attempt_updated', { detail: { attemptId, ...patch } }));
+    try {
+      const bc = new BroadcastChannel('prime_cbt_sync_channel');
+      bc.postMessage({ type: 'TIMER_EXTENDED', attemptId, ...patch });
+      bc.close();
+    } catch {}
+  }
+
+  return existing ? { ...existing, ...patch } : null;
+}
+
+export async function forceSubmitExamAttempt(attemptId: string, reason = 'Force-submitted by Invigilator'): Promise<void> {
+  const nowIso = new Date().toISOString();
+  const patch: Partial<ExamAttempt> = {
+    status: 'submitted',
+    lastWarning: reason,
+    lastHeartbeatAt: nowIso
+  };
+  await commitFirestoreFast(
+    setDoc(doc(db, 'attempts', attemptId), sanitizeFirestoreData(patch), { merge: true }),
+    OperationType.WRITE,
+    `attempts/${attemptId}`
+  );
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('prime_cbt_force_submit_attempt', { detail: { attemptId, reason } }));
+    try {
+      const bc = new BroadcastChannel('prime_cbt_sync_channel');
+      bc.postMessage({ type: 'FORCE_SUBMIT_ATTEMPT', attemptId, reason });
+      bc.close();
+    } catch {}
   }
 }
 
@@ -3538,10 +3883,11 @@ export async function syncCbtSubmissionToReportSheet(
   const normSubjName = (submission.subject || '').trim().toLowerCase();
   const normAdm = (submission.admissionNumber || '').trim().toUpperCase();
   const existingPool = await fetchAssessmentRecords(
-    undefined,
+    resolvedSubjectId,
     submission.classGrade,
     submission.academicSession,
-    submission.term
+    submission.term,
+    submission.subject
   ).catch(() => []);
 
   const existing = existingPool.find(r => {
@@ -3554,12 +3900,14 @@ export async function syncCbtSubmissionToReportSheet(
     return sameStudent && sameSubject;
   });
 
-  const cleanStudentId = (submission.studentId || submission.admissionNumber || 'stu').replace(/[^a-zA-Z0-9_-]/g, '_');
-  const cleanSubjId = resolvedSubjectId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const cleanSession = (submission.academicSession || settings.academicSession || '2025-2026').replace(/[^a-zA-Z0-9_-]/g, '_');
-  const cleanTerm = (submission.term || settings.currentTerm || '1stTerm').replace(/[^a-zA-Z0-9_-]/g, '_');
-
-  const recordId = existing?.id || `ca_${cleanStudentId}_${cleanSubjId}_${cleanSession}_${cleanTerm}`;
+  const recordId =
+    existing?.id ||
+    buildCanonicalCaRecordId(
+      submission.studentId || submission.admissionNumber || 'stu',
+      resolvedSubjectId,
+      submission.academicSession || settings.academicSession || '2025/2026',
+      submission.term || settings.currentTerm || '1st Term'
+    );
 
   // Build separate CBT sitting entries list without overwriting earlier sittings or other columns
   const priorEntries: CbtExamEntry[] = Array.isArray(existing?.examEntries) ? [...existing.examEntries] : [];
@@ -3989,6 +4337,12 @@ const normalizeTermCode = (val?: string) => {
   return clean;
 };
 
+const normalizeSessionCode = (val?: string) =>
+  (val || '').trim().replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+
+const normalizeCaSubjectKey = (val?: string) =>
+  (val || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+
 const pickNewerRecord = (
   a: StudentAssessmentRecord | undefined,
   b: StudentAssessmentRecord
@@ -3999,44 +4353,332 @@ const pickNewerRecord = (
   return tB >= tA ? b : a;
 };
 
+function resolveSubjectNameFromLocal(subjectId?: string): string {
+  if (!subjectId) return '';
+  try {
+    const raw = localStorage.getItem(SAVED_SUBJECTS_KEY);
+    if (raw) {
+      const list = JSON.parse(raw) as Subject[];
+      const match = Array.isArray(list) ? list.find(s => s && s.id === subjectId) : undefined;
+      if (match?.name) return match.name;
+    }
+  } catch {}
+  return '';
+}
+
+function readLocalCaRecords(): StudentAssessmentRecord[] {
+  const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
+  try {
+    const raw = localStorage.getItem(SAVED_CA_RECORDS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter(
+          (r: StudentAssessmentRecord) => r && r.id && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id)
+        );
+      }
+    }
+  } catch {}
+  return [];
+}
+
+function writeLocalCaRecordsMerged(incoming: StudentAssessmentRecord[]) {
+  try {
+    const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
+    const map = new Map<string, StudentAssessmentRecord>();
+    incoming.forEach(r => {
+      if (r && r.id && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id)) {
+        map.set(r.id, pickNewerRecord(map.get(r.id), r));
+      }
+    });
+    // Always preserve every dirty record in localStorage so server snapshots never erase unsynced scores
+    pendingCaRecordSaves.forEach((pr, id) => {
+      if (pr && !deleted.has(id) && !pendingCaRecordDeletes.has(id)) {
+        map.set(id, pickNewerRecord(map.get(id), pr));
+      }
+    });
+    localStorage.setItem(SAVED_CA_RECORDS_KEY, JSON.stringify(Array.from(map.values())));
+  } catch {}
+}
+
+function normalizeCleanCaRecord(record: StudentAssessmentRecord): StudentAssessmentRecord {
+  const canonicalId = record.id
+    ? record.id.replace(/[^a-zA-Z0-9_-]/g, '_')
+    : buildCanonicalCaRecordId(
+        record.studentId || record.admissionNumber || 'stu',
+        record.subjectId || record.subjectName || 'sub',
+        record.academicSession || '2025/2026',
+        record.term || '1st Term'
+      );
+
+  const firstCa =
+    typeof record.firstCaScore === 'number'
+      ? record.firstCaScore
+      : (record.testScore ?? 0);
+  const secondCa =
+    typeof record.secondCaScore === 'number'
+      ? record.secondCaScore
+      : (record.projectScore ?? 0);
+
+  return sanitizeFirestoreData<StudentAssessmentRecord>({
+    ...record,
+    id: canonicalId,
+    firstCaScore: firstCa,
+    secondCaScore: secondCa,
+    testScore: firstCa,
+    projectScore: secondCa,
+    explicitlySaved: true,
+    teacherComment: record.teacherComment ?? '',
+    teacherSignature: record.teacherSignature ?? 'Signed',
+    updatedAt: record.updatedAt || new Date().toISOString()
+  });
+}
+
+function stageCaRecordsIntoOutbox(cleanRecords: StudentAssessmentRecord[]) {
+  if (cleanRecords.length === 0) return;
+  const ids = cleanRecords.map(r => r.id);
+  ids.forEach(id => {
+    pendingCaRecordDeletes.delete(id);
+    removeTombstone(DELETED_CA_RECORDS_KEY, id);
+  });
+
+  const dirtyStorage = readDirtyCaRecordsStorage();
+  cleanRecords.forEach(rec => {
+    pendingCaRecordSaves.set(rec.id, rec);
+    dirtyStorage[rec.id] = rec;
+  });
+  writeDirtyCaRecordsStorage(dirtyStorage);
+
+  const existingLocal = readLocalCaRecords();
+  writeLocalCaRecordsMerged([...existingLocal, ...cleanRecords]);
+}
+
+function clearConfirmedDirtyCaRecords(committedRecords: StudentAssessmentRecord[]) {
+  if (committedRecords.length === 0) return;
+  const dirtyStorage = readDirtyCaRecordsStorage();
+  let changed = false;
+
+  committedRecords.forEach(rec => {
+    const curr = pendingCaRecordSaves.get(rec.id);
+    if (curr && curr.updatedAt === rec.updatedAt) {
+      pendingCaRecordSaves.delete(rec.id);
+    }
+    if (dirtyStorage[rec.id] && dirtyStorage[rec.id].updatedAt === rec.updatedAt) {
+      delete dirtyStorage[rec.id];
+      changed = true;
+    }
+  });
+
+  if (changed) {
+    writeDirtyCaRecordsStorage(dirtyStorage);
+  }
+}
+
+/**
+ * Synchronously persists edited CA rows to localStorage & the durable dirty-outbox
+ * so an immediate page refresh or browser close never loses typed scores.
+ */
+export function stageCaRecordsLocalDraft(records: StudentAssessmentRecord[]): void {
+  if (!records || records.length === 0) return;
+  const cleanRecords = records.map(r =>
+    normalizeCleanCaRecord({
+      ...r,
+      updatedAt: r.updatedAt || new Date().toISOString()
+    })
+  );
+  stageCaRecordsIntoOutbox(cleanRecords);
+  broadcastEntitySync('caRecordsUpdated', 'CA_RECORDS_UPDATED', {
+    stagedCount: cleanRecords.length
+  });
+}
+
+export function getDirtyCaRecordsCount(): number {
+  return pendingCaRecordSaves.size;
+}
+
+function deduplicateCaRecordsByEntity(records: StudentAssessmentRecord[]): StudentAssessmentRecord[] {
+  const byLogicalKey = new Map<string, StudentAssessmentRecord>();
+  records.forEach(rec => {
+    if (!rec) return;
+    const stuKey = (rec.studentId || rec.admissionNumber || rec.id || '').trim().toUpperCase();
+    const subjKey = normalizeCaSubjectKey(rec.subjectName || rec.subjectId);
+    const sessKey = normalizeSessionCode(rec.academicSession);
+    const termKey = normalizeTermCode(rec.term);
+    const logicalKey = stuKey && subjKey ? `${stuKey}::${subjKey}::${sessKey}::${termKey}` : rec.id;
+    const prev = byLogicalKey.get(logicalKey);
+    if (!prev) {
+      byLogicalKey.set(logicalKey, rec);
+      return;
+    }
+    byLogicalKey.set(logicalKey, pickNewerRecord(prev, rec));
+  });
+  return Array.from(byLogicalKey.values());
+}
+
+function isRetryableNetworkError(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    msg.includes('offline') ||
+    msg.includes('unavailable') ||
+    msg.includes('network') ||
+    msg.includes('failed to fetch') ||
+    msg.includes('could not reach') ||
+    msg.includes('deadline-exceeded') ||
+    msg.includes('timed out')
+  );
+}
+
+async function commitCaRecordsBatchToFirestore(
+  cleanRecords: StudentAssessmentRecord[],
+  timeoutMs = 20000
+): Promise<boolean> {
+  if (cleanRecords.length === 0) return true;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return false;
+  }
+
+  const commitWork = async () => {
+    const CHUNK_SIZE = 350;
+    for (let i = 0; i < cleanRecords.length; i += CHUNK_SIZE) {
+      const chunk = cleanRecords.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+      chunk.forEach(rec => {
+        batch.set(doc(db, 'caRecords', rec.id), rec, { merge: true });
+      });
+      await batch.commit();
+    }
+    await clearCloudDeletionsBatch(
+      'deletedCaRecordIds',
+      cleanRecords.map(r => r.id)
+    );
+  };
+
+  let timedOut = false;
+  try {
+    await Promise.race([
+      commitWork(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => {
+          timedOut = true;
+          reject(new Error('Firestore commit timed out'));
+        }, timeoutMs)
+      )
+    ]);
+    clearConfirmedDirtyCaRecords(cleanRecords);
+    return true;
+  } catch (error) {
+    if (timedOut || isRetryableNetworkError(error)) {
+      console.warn('CA records queued in durable outbox awaiting cloud reconnection:', error);
+      return false;
+    }
+    handleFirestoreError(error, OperationType.WRITE, 'caRecords');
+  }
+}
+
+let activeCaFlushPromise: Promise<{ flushed: number; remaining: number; syncedToCloud: boolean }> | null = null;
+
+export async function flushDirtyCaRecords(): Promise<{
+  flushed: number;
+  remaining: number;
+  syncedToCloud: boolean;
+}> {
+  if (pendingCaRecordSaves.size === 0) {
+    return { flushed: 0, remaining: 0, syncedToCloud: true };
+  }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return { flushed: 0, remaining: pendingCaRecordSaves.size, syncedToCloud: false };
+  }
+  if (activeCaFlushPromise) {
+    return activeCaFlushPromise;
+  }
+
+  activeCaFlushPromise = (async () => {
+    const snapshotList = Array.from(pendingCaRecordSaves.values());
+    if (snapshotList.length === 0) {
+      return { flushed: 0, remaining: 0, syncedToCloud: true };
+    }
+    try {
+      const synced = await commitCaRecordsBatchToFirestore(snapshotList, 20000);
+      return {
+        flushed: synced ? snapshotList.length : 0,
+        remaining: pendingCaRecordSaves.size,
+        syncedToCloud: synced
+      };
+    } finally {
+      activeCaFlushPromise = null;
+    }
+  })();
+
+  return activeCaFlushPromise;
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    if (pendingCaRecordSaves.size > 0) {
+      flushDirtyCaRecords()
+        .then(res => {
+          if (res.flushed > 0) {
+            broadcastEntitySync('caRecordsUpdated', 'CA_RECORDS_UPDATED', { flushed: res.flushed });
+          }
+        })
+        .catch(() => {});
+    }
+    if (pendingTermReportSaves.size > 0) {
+      flushDirtyTermReports()
+        .then(res => {
+          if (res.flushed > 0) {
+            broadcastEntitySync('termReportsUpdated', 'TERM_REPORT_UPDATED', { flushed: res.flushed });
+          }
+        })
+        .catch(() => {});
+    }
+  });
+}
+
 // Continuous Assessment / Master Gradebook Records
 export async function fetchAssessmentRecords(
   subjectId?: string,
   classGrade?: string,
   academicSession?: string,
-  term?: string
+  term?: string,
+  subjectName?: string
 ): Promise<StudentAssessmentRecord[]> {
   const path = 'caRecords';
+  if (pendingCaRecordSaves.size > 0 && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+    // Replay any queued local edits before reading so server and local converge immediately
+    await flushDirtyCaRecords().catch(() => null);
+  }
   await fetchCloudSyncState(true).catch(() => null);
+
   const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
   const mergedMap: Record<string, StudentAssessmentRecord> = {};
 
   const normClass = normalizeClassCode(classGrade);
   const normTerm = normalizeTermCode(term);
-  const normSession = (academicSession || '').trim();
+  const normSession = normalizeSessionCode(academicSession);
+  const resolvedSubjName = subjectName || resolveSubjectNameFromLocal(subjectId);
+  const normSubjKey = normalizeCaSubjectKey(resolvedSubjName);
 
   const matchesFilters = (r: StudentAssessmentRecord) => {
     if (r.id && (deleted.has(r.id) || pendingCaRecordDeletes.has(r.id))) return false;
-    if (subjectId && r.subjectId !== subjectId) return false;
+    if (subjectId) {
+      const idMatches = r.subjectId === subjectId;
+      const nameMatches = Boolean(normSubjKey && normalizeCaSubjectKey(r.subjectName) === normSubjKey);
+      if (!idMatches && !nameMatches) return false;
+    } else if (normSubjKey) {
+      if (normalizeCaSubjectKey(r.subjectName) !== normSubjKey) return false;
+    }
     if (normClass && normalizeClassCode(r.classGrade) !== normClass) return false;
-    if (normSession && (r.academicSession || '').trim() !== normSession) return false;
+    if (normSession && normalizeSessionCode(r.academicSession) !== normSession) return false;
     if (normTerm && normalizeTermCode(r.term) !== normTerm) return false;
     return true;
   };
 
-  let allLocal: StudentAssessmentRecord[] = [];
-  try {
-    const local = localStorage.getItem('prime_edutech_ca_records');
-    if (local) {
-      const parsed = JSON.parse(local);
-      if (Array.isArray(parsed)) {
-        allLocal = parsed.filter((r: StudentAssessmentRecord) => r && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id));
-      }
-    }
-  } catch {}
+  const allLocal = readLocalCaRecords();
 
   try {
-    const q = subjectId
+    // When resolvedSubjName is known, read caRecords collection so legacy/alternate subjectIds for the same subject name are recovered
+    const q = subjectId && !normSubjKey
       ? query(collection(db, path), where('subjectId', '==', subjectId))
       : collection(db, path);
     const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
@@ -4061,6 +4703,7 @@ export async function fetchAssessmentRecords(
       }
     });
 
+    // Always merge durable dirty-outbox records on top so unsynced scores survive refreshes
     pendingCaRecordSaves.forEach((pRec, id) => {
       if (!deleted.has(id) && !pendingCaRecordDeletes.has(id) && matchesFilters(pRec)) {
         mergedMap[id] = pickNewerRecord(mergedMap[id], pRec);
@@ -4069,10 +4712,7 @@ export async function fetchAssessmentRecords(
 
     if (isAuthoritative) {
       const preserved = allLocal.filter(r => !matchesFilters(r));
-      const updatedLocal = [...preserved, ...Object.values(mergedMap)];
-      try {
-        localStorage.setItem('prime_edutech_ca_records', JSON.stringify(updatedLocal));
-      } catch {}
+      writeLocalCaRecordsMerged([...preserved, ...Object.values(mergedMap)]);
     }
   } catch (error) {
     console.warn('Fallback fetching CA records from local cache:', error);
@@ -4088,65 +4728,55 @@ export async function fetchAssessmentRecords(
     });
   }
 
-  return Object.values(mergedMap);
+  return deduplicateCaRecordsByEntity(Object.values(mergedMap));
 }
 
-export async function saveAssessmentRecord(record: StudentAssessmentRecord): Promise<void> {
-  const sanitizedId = (record.id || `ca_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`)
-    .replace(/[^a-zA-Z0-9_-]/g, '_');
-
-  pendingCaRecordDeletes.delete(sanitizedId);
-  removeTombstone(DELETED_CA_RECORDS_KEY, sanitizedId);
-
-  const cleanRecord = sanitizeFirestoreData<StudentAssessmentRecord>({
-    ...record,
-    id: sanitizedId,
-    teacherComment: record.teacherComment ?? '',
-    teacherSignature: record.teacherSignature ?? 'Signed',
-    updatedAt: new Date().toISOString()
-  });
-
-  pendingCaRecordSaves.set(sanitizedId, cleanRecord);
-
-  // Always mirror in localStorage immediately for instant offline access
-  try {
-    const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
-    const local = localStorage.getItem('prime_edutech_ca_records');
-    const records: StudentAssessmentRecord[] = local ? JSON.parse(local) : [];
-    const filtered = records.filter(r => r.id !== sanitizedId && !deleted.has(r.id));
-    filtered.push(cleanRecord);
-    localStorage.setItem('prime_edutech_ca_records', JSON.stringify(filtered));
-  } catch {}
-
-  broadcastEntitySync('caRecordsUpdated', 'CA_RECORDS_UPDATED', { recordId: sanitizedId, ...cleanRecord });
-
-  const writePromise = Promise.all([
-    setDoc(doc(db, 'caRecords', sanitizedId), cleanRecord, { merge: true }),
-    clearCloudDeletion('deletedCaRecordIds', sanitizedId)
-  ]).then(() => {
-    const curr = pendingCaRecordSaves.get(sanitizedId);
-    if (curr && curr.updatedAt === cleanRecord.updatedAt) {
-      pendingCaRecordSaves.delete(sanitizedId);
-    }
-  });
-
-  await commitFirestoreFast(writePromise, OperationType.WRITE, `caRecords/${sanitizedId}`);
+export async function saveAssessmentRecord(
+  record: StudentAssessmentRecord
+): Promise<{ savedCount: number; syncedToCloud: boolean }> {
+  return saveAssessmentBatch([record]);
 }
 
-export async function saveAssessmentBatch(records: StudentAssessmentRecord[]): Promise<void> {
-  for (const record of records) {
-    await saveAssessmentRecord(record);
+export async function saveAssessmentBatch(
+  records: StudentAssessmentRecord[]
+): Promise<{ savedCount: number; syncedToCloud: boolean }> {
+  if (!records || records.length === 0) {
+    return { savedCount: 0, syncedToCloud: true };
   }
+
+  const now = new Date().toISOString();
+  const cleanRecords = records.map(rec =>
+    normalizeCleanCaRecord({
+      ...rec,
+      updatedAt: now
+    })
+  );
+
+  // Persist locally & into durable dirty outbox immediately BEFORE cloud commit
+  stageCaRecordsIntoOutbox(cleanRecords);
+
+  broadcastEntitySync('caRecordsUpdated', 'CA_RECORDS_UPDATED', {
+    recordIds: cleanRecords.map(r => r.id),
+    count: cleanRecords.length
+  });
+
+  const syncedToCloud = await commitCaRecordsBatchToFirestore(cleanRecords);
+  return { savedCount: cleanRecords.length, syncedToCloud };
 }
 
 export async function deleteAssessmentRecord(recordId: string): Promise<void> {
   const cleanId = recordId.replace(/[^a-zA-Z0-9_-]/g, '_');
   pendingCaRecordSaves.delete(cleanId);
+  const dirtyStorage = readDirtyCaRecordsStorage();
+  if (dirtyStorage[cleanId]) {
+    delete dirtyStorage[cleanId];
+    writeDirtyCaRecordsStorage(dirtyStorage);
+  }
   pendingCaRecordDeletes.add(cleanId);
   addTombstone(DELETED_CA_RECORDS_KEY, cleanId);
 
   try {
-    pruneLocalStorageListByIds('prime_edutech_ca_records', [cleanId]);
+    pruneLocalStorageListByIds(SAVED_CA_RECORDS_KEY, [cleanId]);
   } catch {}
 
   broadcastEntitySync('caRecordsUpdated', 'CA_RECORDS_UPDATED', { id: cleanId, recordId: cleanId, deleted: true });
@@ -4195,6 +4825,10 @@ export function subscribeStudentAssessmentRecords(
   let hasServerSnapshot = false;
   let hasAnyRemote = false;
 
+  if (pendingCaRecordSaves.size > 0 && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+    flushDirtyCaRecords().catch(() => {});
+  }
+
   const normAdm = (admissionNumber || '').trim().toUpperCase();
   const isStudentMatch = (r: Partial<StudentAssessmentRecord>) => {
     if (studentId && r.studentId === studentId) return true;
@@ -4206,16 +4840,7 @@ export function subscribeStudentAssessmentRecords(
     const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
     const mergedMap: Record<string, StudentAssessmentRecord> = {};
 
-    let allLocal: StudentAssessmentRecord[] = [];
-    try {
-      const local = localStorage.getItem('prime_edutech_ca_records');
-      if (local) {
-        const parsed = JSON.parse(local);
-        if (Array.isArray(parsed)) {
-          allLocal = parsed.filter((r: StudentAssessmentRecord) => r && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id));
-        }
-      }
-    } catch {}
+    const allLocal = readLocalCaRecords();
 
     if (!hasServerSnapshot) {
       allLocal.forEach(lr => {
@@ -4233,18 +4858,17 @@ export function subscribeStudentAssessmentRecords(
       });
     }
 
+    // Always merge durable dirty-outbox records on top
     pendingCaRecordSaves.forEach((pr, id) => {
       if (!deleted.has(id) && !pendingCaRecordDeletes.has(id) && isStudentMatch(pr)) {
         mergedMap[id] = pickNewerRecord(mergedMap[id], pr);
       }
     });
 
-    const result = Object.values(mergedMap);
+    const result = deduplicateCaRecordsByEntity(Object.values(mergedMap));
     if (hasServerSnapshot) {
       const others = allLocal.filter(r => !isStudentMatch(r));
-      try {
-        localStorage.setItem('prime_edutech_ca_records', JSON.stringify([...others, ...result]));
-      } catch {}
+      writeLocalCaRecordsMerged([...others, ...result]);
     }
     callback(result);
   };
@@ -4316,6 +4940,9 @@ export async function fetchStudentAllAssessmentRecords(
   admissionNumber: string
 ): Promise<StudentAssessmentRecord[]> {
   const path = 'caRecords';
+  if (pendingCaRecordSaves.size > 0 && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+    await flushDirtyCaRecords().catch(() => null);
+  }
   await fetchCloudSyncState(true).catch(() => null);
   const deleted = getTombstoneSet(DELETED_CA_RECORDS_KEY);
   const normAdm = (admissionNumber || '').trim().toUpperCase();
@@ -4324,18 +4951,9 @@ export async function fetchStudentAllAssessmentRecords(
     (studentId && r.studentId === studentId) ||
     Boolean(normAdm && r.admissionNumber && r.admissionNumber.toUpperCase() === normAdm);
 
-  let allLocal: StudentAssessmentRecord[] = [];
-  try {
-    const local = localStorage.getItem('prime_edutech_ca_records');
-    if (local) {
-      const parsed = JSON.parse(local);
-      if (Array.isArray(parsed)) {
-        allLocal = parsed.filter((r: StudentAssessmentRecord) => r && !deleted.has(r.id) && !pendingCaRecordDeletes.has(r.id));
-      }
-    }
-  } catch {}
-
+  const allLocal = readLocalCaRecords();
   const mergedMap: Record<string, StudentAssessmentRecord> = {};
+
   try {
     const q = collection(db, path);
     const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
@@ -4365,12 +4983,10 @@ export async function fetchStudentAllAssessmentRecords(
       }
     });
 
-    const result = Object.values(mergedMap);
+    const result = deduplicateCaRecordsByEntity(Object.values(mergedMap));
     if (isAuthoritative) {
       const others = allLocal.filter(r => !isStudentMatch(r));
-      try {
-        localStorage.setItem('prime_edutech_ca_records', JSON.stringify([...others, ...result]));
-      } catch {}
+      writeLocalCaRecordsMerged([...others, ...result]);
     }
     return result;
   } catch (err) {
@@ -4383,7 +4999,7 @@ export async function fetchStudentAllAssessmentRecords(
         mergedMap[id] = pickNewerRecord(mergedMap[id], pr);
       }
     });
-    return Object.values(mergedMap);
+    return deduplicateCaRecordsByEntity(Object.values(mergedMap));
   }
 }
 
@@ -4498,8 +5114,150 @@ export async function authenticateStudentWithCredentials(
 }
 
 /**
- * Terminal Student Report Card Data (Psychomotor, Skills, Remarks, Bio)
+ * Class-wide assessment fetch across ALL subjects for Master Broadsheet ranking & class averages
  */
+export async function fetchClassAllAssessmentRecords(
+  classGrade: string,
+  academicSession: string,
+  term: string
+): Promise<StudentAssessmentRecord[]> {
+  return fetchAssessmentRecords(undefined, classGrade, academicSession, term);
+}
+
+/**
+ * Durable Outbox & Batch Persistence for Terminal Student Report Cards (Psychomotor, Skills, Remarks, Ranking)
+ */
+const DIRTY_TERM_REPORTS_KEY = 'prime_term_reports_dirty';
+const pendingTermReportSaves = new Map<string, StudentTermReportData>();
+
+function readDirtyTermReportsStorage(): Record<string, StudentTermReportData> {
+  try {
+    const raw = localStorage.getItem(DIRTY_TERM_REPORTS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDirtyTermReportsStorage(mapObj: Record<string, StudentTermReportData>): void {
+  try {
+    if (Object.keys(mapObj).length === 0) {
+      localStorage.removeItem(DIRTY_TERM_REPORTS_KEY);
+    } else {
+      localStorage.setItem(DIRTY_TERM_REPORTS_KEY, JSON.stringify(mapObj));
+    }
+  } catch {}
+}
+
+(function hydrateTermReportOutbox() {
+  const stored = readDirtyTermReportsStorage();
+  Object.entries(stored).forEach(([id, rep]) => {
+    if (rep && id) pendingTermReportSaves.set(id, rep);
+  });
+})();
+
+function stageTermReportsIntoOutbox(reports: StudentTermReportData[]): void {
+  const dirty = readDirtyTermReportsStorage();
+  reports.forEach(r => {
+    pendingTermReportSaves.set(r.id, r);
+    dirty[r.id] = r;
+    try {
+      localStorage.setItem(`prime_term_report_${r.id}`, JSON.stringify(r));
+    } catch {}
+  });
+  writeDirtyTermReportsStorage(dirty);
+
+  try {
+    const allKey = 'prime_term_reports_all';
+    const existing = localStorage.getItem(allKey);
+    const list: StudentTermReportData[] = existing ? JSON.parse(existing) : [];
+    const byId = new Map<string, StudentTermReportData>();
+    if (Array.isArray(list)) list.forEach(item => byId.set(item.id, item));
+    reports.forEach(r => byId.set(r.id, r));
+    localStorage.setItem(allKey, JSON.stringify(Array.from(byId.values())));
+  } catch {}
+}
+
+function clearConfirmedDirtyTermReports(reports: StudentTermReportData[]): void {
+  const dirty = readDirtyTermReportsStorage();
+  reports.forEach(r => {
+    const inMem = pendingTermReportSaves.get(r.id);
+    if (!inMem || inMem.updatedAt === r.updatedAt) {
+      pendingTermReportSaves.delete(r.id);
+    }
+    const stored = dirty[r.id];
+    if (!stored || stored.updatedAt === r.updatedAt) {
+      delete dirty[r.id];
+    }
+  });
+  writeDirtyTermReportsStorage(dirty);
+}
+
+async function commitTermReportsBatchToFirestore(
+  cleanReports: StudentTermReportData[],
+  timeoutMs = 20000
+): Promise<boolean> {
+  if (cleanReports.length === 0) return true;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return false;
+  }
+
+  const commitWork = async () => {
+    const CHUNK_SIZE = 350;
+    for (let i = 0; i < cleanReports.length; i += CHUNK_SIZE) {
+      const chunk = cleanReports.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+      chunk.forEach(rep => {
+        batch.set(doc(db, 'termReports', rep.id), rep, { merge: true });
+      });
+      await batch.commit();
+    }
+  };
+
+  let timedOut = false;
+  try {
+    await Promise.race([
+      commitWork(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => {
+          timedOut = true;
+          reject(new Error('Firestore termReports batch timed out'));
+        }, timeoutMs)
+      )
+    ]);
+    clearConfirmedDirtyTermReports(cleanReports);
+    return true;
+  } catch (err) {
+    if (timedOut || isRetryableNetworkError(err)) {
+      console.warn('Term reports queued in durable outbox awaiting reconnection:', err);
+      return false;
+    }
+    throw err;
+  }
+}
+
+export async function flushDirtyTermReports(): Promise<{
+  flushed: number;
+  remaining: number;
+  syncedToCloud: boolean;
+}> {
+  if (pendingTermReportSaves.size === 0) {
+    return { flushed: 0, remaining: 0, syncedToCloud: true };
+  }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return { flushed: 0, remaining: pendingTermReportSaves.size, syncedToCloud: false };
+  }
+  const snapshot = Array.from(pendingTermReportSaves.values());
+  const synced = await commitTermReportsBatchToFirestore(snapshot, 20000).catch(() => false);
+  return {
+    flushed: synced ? snapshot.length : 0,
+    remaining: pendingTermReportSaves.size,
+    syncedToCloud: synced
+  };
+}
+
 export async function fetchStudentTermReport(
   studentId: string,
   academicSession: string,
@@ -4511,6 +5269,8 @@ export async function fetchStudentTermReport(
   const cleanTerm = (term || '1stTerm').replace(/[^a-zA-Z0-9_-]/g, '_');
   const reportDocId = `report_${cleanStudentId}_${cleanSession}_${cleanTerm}`;
 
+  const dirtyDraft = pendingTermReportSaves.get(reportDocId);
+
   try {
     const docRef = doc(db, 'termReports', reportDocId);
     const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
@@ -4519,6 +5279,12 @@ export async function fetchStudentTermReport(
       : await getDoc(docRef);
     if (snap.exists()) {
       const serverData = { id: snap.id, ...snap.data() } as StudentTermReportData;
+      if (
+        dirtyDraft &&
+        new Date(dirtyDraft.updatedAt || 0).getTime() > new Date(serverData.updatedAt || 0).getTime()
+      ) {
+        return dirtyDraft;
+      }
       try {
         localStorage.setItem(`prime_term_report_${reportDocId}`, JSON.stringify(serverData));
       } catch {}
@@ -4527,6 +5293,8 @@ export async function fetchStudentTermReport(
   } catch (err) {
     console.warn('Firestore fetch warning for termReport, checking local cache:', err);
   }
+
+  if (dirtyDraft) return dirtyDraft;
 
   try {
     const local = localStorage.getItem(`prime_term_report_${reportDocId}`);
@@ -4551,6 +5319,7 @@ export async function fetchStudentTermReport(
     department: fallbackStudent?.department || '',
     category: clsUpper.includes('JSS') ? 'JUNIOR SECONDARY' : 'SENIOR SECONDARY',
     classAverage: '',
+    overallPosition: '',
     behaviours: { ...DEFAULT_PSYCHOMOTOR },
     skills: { ...DEFAULT_SKILLS },
     classTeacherRemarks: "STAY FOCUS AND YOU'LL REACH YOUR GOALS.",
@@ -4564,32 +5333,35 @@ export async function fetchStudentTermReport(
   };
 }
 
-export async function saveStudentTermReport(report: StudentTermReportData): Promise<void> {
-  const cleanId = (report.id || `report_${report.studentId}_${report.academicSession}_${report.term}`)
-    .replace(/[^a-zA-Z0-9_-]/g, '_');
-  const cleanReport = sanitizeFirestoreData<StudentTermReportData>({
-    ...report,
-    id: cleanId,
-    updatedAt: new Date().toISOString()
+export async function saveTermReportsBatch(
+  reports: StudentTermReportData[]
+): Promise<{ savedCount: number; syncedToCloud: boolean }> {
+  if (!reports || reports.length === 0) {
+    return { savedCount: 0, syncedToCloud: true };
+  }
+  const now = new Date().toISOString();
+  const cleanReports = reports.map(rep => {
+    const cleanId = (rep.id || `report_${rep.studentId}_${rep.academicSession}_${rep.term}`)
+      .replace(/[^a-zA-Z0-9_-]/g, '_');
+    return sanitizeFirestoreData<StudentTermReportData>({
+      ...rep,
+      id: cleanId,
+      updatedAt: now
+    });
   });
 
-  try {
-    localStorage.setItem(`prime_term_report_${cleanId}`, JSON.stringify(cleanReport));
-    const allKey = 'prime_term_reports_all';
-    const existing = localStorage.getItem(allKey);
-    const list: StudentTermReportData[] = existing ? JSON.parse(existing) : [];
-    const filtered = list.filter(r => r.id !== cleanId);
-    filtered.push(cleanReport);
-    localStorage.setItem(allKey, JSON.stringify(filtered));
-  } catch {}
+  stageTermReportsIntoOutbox(cleanReports);
+  broadcastEntitySync('termReportsUpdated', 'TERM_REPORT_UPDATED', {
+    count: cleanReports.length,
+    reportIds: cleanReports.map(r => r.id)
+  });
 
-  broadcastEntitySync('termReportsUpdated', 'TERM_REPORT_UPDATED', { reportId: cleanId, ...cleanReport });
+  const syncedToCloud = await commitTermReportsBatchToFirestore(cleanReports, 20000);
+  return { savedCount: cleanReports.length, syncedToCloud };
+}
 
-  await commitFirestoreFast(
-    setDoc(doc(db, 'termReports', cleanId), cleanReport, { merge: true }),
-    OperationType.WRITE,
-    `termReports/${cleanId}`
-  );
+export async function saveStudentTermReport(report: StudentTermReportData): Promise<void> {
+  await saveTermReportsBatch([report]);
 }
 
 export async function fetchClassTermReports(
@@ -4632,6 +5404,15 @@ export async function fetchClassTermReports(
       }
     });
 
+    pendingTermReportSaves.forEach(pr => {
+      if (pr.classGrade === classGrade && pr.academicSession === academicSession && pr.term === term) {
+        const prev = mergedMap[pr.id];
+        if (!prev || new Date(pr.updatedAt || 0).getTime() >= new Date(prev.updatedAt || 0).getTime()) {
+          mergedMap[pr.id] = pr;
+        }
+      }
+    });
+
     if (isAuthoritative) {
       const others = allLocal.filter(
         r => !(r.classGrade === classGrade && r.academicSession === academicSession && r.term === term)
@@ -4645,6 +5426,11 @@ export async function fetchClassTermReports(
     allLocal.forEach(r => {
       if (r.classGrade === classGrade && r.academicSession === academicSession && r.term === term) {
         mergedMap[r.id] = r;
+      }
+    });
+    pendingTermReportSaves.forEach(pr => {
+      if (pr.classGrade === classGrade && pr.academicSession === academicSession && pr.term === term) {
+        mergedMap[pr.id] = pr;
       }
     });
   }

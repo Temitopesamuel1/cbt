@@ -33,8 +33,8 @@ export const BatchResultSlipsModal: React.FC<BatchResultSlipsModalProps> = ({
   classes = [],
   settings,
   initialClassFilter = 'All',
-  academicSession = '2024/2025',
-  term = '1st Term'
+  academicSession,
+  term
 }) => {
   const [selectedClass, setSelectedClass] = useState<string>(initialClassFilter);
   const [selectedStudentIds, setSelectedStudentIds] = useState<Set<string>>(new Set());
@@ -43,6 +43,8 @@ export const BatchResultSlipsModal: React.FC<BatchResultSlipsModalProps> = ({
   const batchPrintRef = useRef<HTMLDivElement>(null);
 
   const activeSettings = settings || DEFAULT_SCHOOL_SETTINGS;
+  const resolvedAcademicSession = academicSession || activeSettings.academicSession || '2025/2026';
+  const resolvedTerm = (term || activeSettings.currentTerm || '1st Term') as '1st Term' | '2nd Term' | '3rd Term';
 
   // Manage isolated print root for batch printing when not previewing an individual student
   useEffect(() => {
@@ -106,7 +108,7 @@ export const BatchResultSlipsModal: React.FC<BatchResultSlipsModalProps> = ({
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Batch Report Sheets - ${selectedClass} - ${academicSession} ${term}</title>
+<title>Batch Report Sheets - ${selectedClass} - ${resolvedAcademicSession} ${resolvedTerm}</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   @page { size: A4 portrait; margin: 8mm; }
@@ -133,7 +135,7 @@ export const BatchResultSlipsModal: React.FC<BatchResultSlipsModalProps> = ({
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `Batch_Report_Sheets_${selectedClass.replace(/\s+/g, '_')}_${term.replace(/\s+/g, '_')}.html`;
+    link.download = `Batch_Report_Sheets_${selectedClass.replace(/\s+/g, '_')}_${resolvedTerm.replace(/\s+/g, '_')}.html`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -189,7 +191,7 @@ export const BatchResultSlipsModal: React.FC<BatchResultSlipsModalProps> = ({
             <div>
               <label className="block font-bold text-slate-700 mb-1">Term & Session:</label>
               <div className="px-3 py-2 bg-slate-100 border border-slate-200 rounded-lg font-mono font-bold text-slate-800 text-xs">
-                {academicSession} · {term}
+                {resolvedAcademicSession} · {resolvedTerm}
               </div>
             </div>
           </div>
@@ -346,8 +348,8 @@ export const BatchResultSlipsModal: React.FC<BatchResultSlipsModalProps> = ({
             <HwsOfficialResultSlip
               student={previewStudent}
               settings={activeSettings}
-              academicSession={academicSession}
-              term={term}
+              academicSession={resolvedAcademicSession}
+              term={resolvedTerm}
               isEditable={true}
               usePrintPortal={true}
               onClose={() => setPreviewStudent(null)}
@@ -379,8 +381,8 @@ export const BatchResultSlipsModal: React.FC<BatchResultSlipsModalProps> = ({
               <HwsOfficialResultSlip
                 student={stu}
                 settings={activeSettings}
-                academicSession={academicSession}
-                term={term}
+                academicSession={resolvedAcademicSession}
+                term={resolvedTerm}
                 isEditable={false}
                 usePrintPortal={false}
               />

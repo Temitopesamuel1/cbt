@@ -35,7 +35,10 @@ import {
   MessageSquare,
   Layers,
   Archive,
-  CheckSquare
+  CheckSquare,
+  Activity,
+  Image as ImageIcon,
+  X
 } from 'lucide-react';
 import { StudentBatchUploadModal } from './StudentBatchUploadModal';
 import { StudentSlipsModal } from './StudentSlipsModal';
@@ -45,6 +48,9 @@ import { TeacherLessonNotesTab } from './TeacherLessonNotesTab';
 import { BatchResultSlipsModal } from '../common/BatchResultSlipsModal';
 import { CampusChatModal } from '../common/CampusChatModal';
 import { StudentTimerResetModal } from '../common/StudentTimerResetModal';
+import { LiveExamMonitorView } from '../common/LiveExamMonitorView';
+import { FormattedAcademicText } from '../common/FormattedAcademicText';
+import { compressImageFile } from '../../services/imageUtils';
 import {
   Examination,
   Question,
@@ -137,6 +143,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   const getTabFromRoute = (route: string) => {
     if (route.includes('/assessment-sheet') || route.includes('/assessment') || route.includes('/gradebook')) return 'assessment-sheet';
     if (route.includes('/lesson-notes') || route.includes('/notes') || route.includes('/scheme')) return 'lesson-notes';
+    if (route.includes('/live-monitor')) return 'live-monitor';
     if (route.includes('/profile') || route.includes('/security') || route.includes('/credentials')) return 'profile';
     if (route.includes('/examinations')) return 'examinations';
     if (route.includes('/questions')) return 'questions';
@@ -325,12 +332,16 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     endDate: '',
     shuffleQuestions: true,
     shuffleOptions: false,
-    resultVisibility: 'immediate'
+    resultVisibility: 'immediate',
+    enableAntiCheat: false,
+    maxTabSwitches: 3,
+    requireFullscreen: false
   });
 
   const [questionForm, setQuestionForm] = useState<Partial<Question>>({
     questionNumber: 1,
     text: '',
+    imageUrl: '',
     optionA: '',
     optionB: '',
     optionC: '',
@@ -516,7 +527,10 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       endDate: '',
       shuffleQuestions: true,
       shuffleOptions: false,
-      resultVisibility: 'immediate'
+      resultVisibility: 'immediate',
+      enableAntiCheat: false,
+      maxTabSwitches: 3,
+      requireFullscreen: false
     });
     setShowCreateExamModal(true);
   };
@@ -541,7 +555,10 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       endDate: exam.endDate || '',
       shuffleQuestions: exam.shuffleQuestions ?? true,
       shuffleOptions: exam.shuffleOptions ?? false,
-      resultVisibility: exam.resultVisibility || 'immediate'
+      resultVisibility: exam.resultVisibility || 'immediate',
+      enableAntiCheat: Boolean(exam.enableAntiCheat),
+      maxTabSwitches: exam.maxTabSwitches ?? 3,
+      requireFullscreen: Boolean(exam.requireFullscreen)
     });
     setShowCreateExamModal(true);
   };
@@ -593,6 +610,9 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         shuffleQuestions: Boolean(examForm.shuffleQuestions),
         shuffleOptions: Boolean(examForm.shuffleOptions),
         resultVisibility: (examForm.resultVisibility as 'immediate' | 'teacher_publish') || 'immediate',
+        enableAntiCheat: Boolean(examForm.enableAntiCheat),
+        maxTabSwitches: Math.max(1, Number(examForm.maxTabSwitches) || 3),
+        requireFullscreen: Boolean(examForm.requireFullscreen),
         createdAt: existingExam?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
@@ -626,7 +646,10 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         endDate: '',
         shuffleQuestions: true,
         shuffleOptions: false,
-        resultVisibility: 'immediate'
+        resultVisibility: 'immediate',
+        enableAntiCheat: false,
+        maxTabSwitches: 3,
+        requireFullscreen: false
       });
     } catch (err) {
       console.error('Failed to save examination:', err);
@@ -795,6 +818,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       examId: selectedExamId,
       questionNumber: qNumber,
       text: questionForm.text || '',
+      imageUrl: questionForm.imageUrl?.trim() || '',
       optionA: questionForm.optionA || '',
       optionB: questionForm.optionB || '',
       optionC: questionForm.optionC || '',
@@ -816,6 +840,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     setQuestionForm({
       questionNumber: updatedQs.length + 1,
       text: '',
+      imageUrl: '',
       optionA: '',
       optionB: '',
       optionC: '',
@@ -1323,6 +1348,16 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 }`}
               >
                 Examinations ({authorizedExams.length})
+              </button>
+
+              <button
+                onClick={() => handleTabChange('live-monitor')}
+                className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                  activeTab === 'live-monitor' ? 'bg-emerald-700 text-white font-bold' : 'bg-emerald-50 text-emerald-900 border border-emerald-200 hover:bg-emerald-100'
+                }`}
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>Live Hall Monitor</span>
               </button>
 
               <button
@@ -2039,6 +2074,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                     setQuestionForm({
                       questionNumber: questions.length + 1,
                       text: '',
+                      imageUrl: '',
                       optionA: '',
                       optionB: '',
                       optionC: '',
@@ -2085,11 +2121,22 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   {questions.map(q => (
                     <div key={q.id} className="p-5 hover:bg-slate-50/60 transition-colors">
                       <div className="flex items-start justify-between gap-4 mb-2">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-start gap-2.5 flex-1">
                           <span className="w-6 h-6 rounded bg-slate-900 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">
                             {q.questionNumber}
                           </span>
-                          <h4 className="text-xs font-bold text-slate-900">{q.text}</h4>
+                          <div className="space-y-2 flex-1">
+                            <div className="text-xs font-bold text-slate-900">
+                              <FormattedAcademicText text={q.text} />
+                            </div>
+                            {q.imageUrl && (
+                              <img
+                                src={q.imageUrl}
+                                alt={`Question ${q.questionNumber} diagram`}
+                                className="max-h-44 rounded-lg border border-slate-200 object-contain bg-white"
+                              />
+                            )}
+                          </div>
                         </div>
 
                         <div className="flex items-center gap-1 shrink-0">
@@ -2101,7 +2148,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                           <button
                             onClick={() => {
                               setEditingQuestionId(q.id);
-                              setQuestionForm({ ...q });
+                              setQuestionForm({ ...q, imageUrl: q.imageUrl || '' });
                               setShowAddQuestionModal(true);
                             }}
                             className="p-1.5 text-slate-500 hover:text-blue-900 hover:bg-blue-50 rounded"
@@ -2119,16 +2166,16 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs pl-8 mt-2">
                         <div className={`p-2 rounded border ${q.correctOption === 'A' ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-bold' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
-                          A. {q.optionA}
+                          A. <FormattedAcademicText text={q.optionA} />
                         </div>
                         <div className={`p-2 rounded border ${q.correctOption === 'B' ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-bold' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
-                          B. {q.optionB}
+                          B. <FormattedAcademicText text={q.optionB} />
                         </div>
                         <div className={`p-2 rounded border ${q.correctOption === 'C' ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-bold' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
-                          C. {q.optionC}
+                          C. <FormattedAcademicText text={q.optionC} />
                         </div>
                         <div className={`p-2 rounded border ${q.correctOption === 'D' ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-bold' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
-                          D. {q.optionD}
+                          D. <FormattedAcademicText text={q.optionD} />
                         </div>
                       </div>
 
@@ -2822,6 +2869,15 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             classes={authorizedClasses}
           />
         )}
+
+        {/* SUBROUTE 13: LIVE EXAM HALL MONITOR */}
+        {activeTab === 'live-monitor' && (
+          <LiveExamMonitorView
+            exams={authorizedExams}
+            students={authorizedStudents}
+            showNotification={showToast}
+          />
+        )}
       </main>
 
       {/* CREATE / EDIT EXAM MODAL */}
@@ -3082,6 +3138,48 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 </div>
               </div>
 
+              {/* Anti-Malpractice Proctoring Settings */}
+              <div className="p-3 rounded-xl bg-rose-50/60 border border-rose-200 space-y-2.5">
+                <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-rose-950">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(examForm.enableAntiCheat)}
+                    onChange={(e) => setExamForm({ ...examForm, enableAntiCheat: e.target.checked })}
+                    className="rounded text-rose-700"
+                  />
+                  <ShieldAlert className="w-3.5 h-3.5 text-rose-700" />
+                  <span>Enable Anti-Malpractice Tab-Switch Proctoring</span>
+                </label>
+                {examForm.enableAntiCheat && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-0.5">
+                        Auto-Submit After Tab Switches
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="10"
+                        value={examForm.maxTabSwitches ?? 3}
+                        onChange={(e) =>
+                          setExamForm({ ...examForm, maxTabSwitches: Math.max(1, Number(e.target.value) || 3) })
+                        }
+                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-rose-300 rounded-lg font-bold"
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-slate-700 pt-4">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(examForm.requireFullscreen)}
+                        onChange={(e) => setExamForm({ ...examForm, requireFullscreen: e.target.checked })}
+                        className="rounded text-rose-700"
+                      />
+                      <span>Prompt Fullscreen Lock</span>
+                    </label>
+                  </div>
+                )}
+              </div>
+
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
@@ -3162,15 +3260,89 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
               </div>
 
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Question Stem</label>
+                <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
+                  <label className="block font-bold text-slate-700">Question Stem (supports ^2, _2, \sqrt{'{x}'}, \frac{'{a}{b}'})</label>
+                  <div className="flex flex-wrap gap-1">
+                    {['^2', '_2', '\\sqrt{}', '\\frac{}{}', 'π', 'θ', '°', '±', '×', '÷'].map(sym => (
+                      <button
+                        key={sym}
+                        type="button"
+                        onClick={() => setQuestionForm(prev => ({ ...prev, text: `${prev.text || ''}${sym}` }))}
+                        className="px-1.5 py-0.5 text-[10px] font-mono bg-slate-100 hover:bg-blue-100 border border-slate-300 rounded cursor-pointer"
+                      >
+                        {sym}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <textarea
                   rows={3}
                   required
-                  placeholder="Enter the examination question text..."
+                  placeholder="Enter the examination question text (e.g. Solve x^2 - 4 = 0 or Balance H_2 + O_2 -> H_2O)..."
                   value={questionForm.text}
                   onChange={(e) => setQuestionForm({ ...questionForm, text: e.target.value })}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
                 />
+                {questionForm.text?.trim() && (
+                  <div className="mt-1.5 p-2 rounded-lg bg-blue-50/60 border border-blue-200 text-xs text-slate-800">
+                    <span className="text-[10px] font-bold text-blue-900 uppercase block mb-0.5">Student View Preview:</span>
+                    <FormattedAcademicText text={questionForm.text} />
+                  </div>
+                )}
+              </div>
+
+              {/* Optional Diagram / Figure Image */}
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
+                    <ImageIcon className="w-3.5 h-3.5 text-blue-700" />
+                    <span>Optional Diagram / Chart Image</span>
+                  </label>
+                  {questionForm.imageUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setQuestionForm({ ...questionForm, imageUrl: '' })}
+                      className="text-[10px] text-rose-600 font-bold hover:underline flex items-center gap-0.5 cursor-pointer"
+                    >
+                      <X className="w-3 h-3" />
+                      Remove
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <label className="px-3 py-1.5 bg-white hover:bg-blue-50 border border-slate-300 rounded-lg text-[11px] font-bold text-slate-700 cursor-pointer shrink-0 text-center">
+                    Upload Image
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        try {
+                          const dataUrl = await compressImageFile(file, 720, 480, 0.85);
+                          setQuestionForm(prev => ({ ...prev, imageUrl: dataUrl }));
+                        } catch {
+                          showToast('Could not process image file.', 'error');
+                        }
+                      }}
+                    />
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Or paste diagram image URL..."
+                    value={questionForm.imageUrl || ''}
+                    onChange={(e) => setQuestionForm({ ...questionForm, imageUrl: e.target.value })}
+                    className="flex-1 px-2.5 py-1.5 text-[11px] bg-white border border-slate-300 rounded-lg"
+                  />
+                </div>
+                {questionForm.imageUrl && (
+                  <img
+                    src={questionForm.imageUrl}
+                    alt="Diagram preview"
+                    className="max-h-32 rounded-lg border border-slate-200 object-contain bg-white"
+                  />
+                )}
               </div>
 
               <div className="space-y-2">

@@ -10,8 +10,12 @@ import {
   Send,
   RotateCcw,
   Wifi,
-  WifiOff
+  WifiOff,
+  ShieldAlert,
+  Maximize2,
+  X
 } from 'lucide-react';
+import { doc, onSnapshot } from 'firebase/firestore';
 import {
   Examination,
   Question,
@@ -23,6 +27,7 @@ import {
   resolveExamTargetComponent
 } from '../../types/cbt';
 import {
+  db,
   createExamAttempt,
   getExamAttempt,
   updateExamAttemptProgress,
@@ -30,6 +35,7 @@ import {
   saveSubmission,
   syncCbtSubmissionToReportSheet
 } from '../../services/firebase';
+import { FormattedAcademicText } from '../common/FormattedAcademicText';
 
 interface StudentExamScreenProps {
   student: Student;
@@ -48,17 +54,33 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
   const [answers, setAnswers] = useState<Record<string, 'A' | 'B' | 'C' | 'D'>>({});
   const [flagged, setFlagged] = useState<Record<string, boolean>>({});
   
-  // Timer state
+  // Timer & proctoring state
   const [secondsRemaining, setSecondsRemaining] = useState<number>((exam.durationMinutes || 15) * 60);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [fontSize, setFontSize] = useState<'normal' | 'large'>('normal');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [tabSwitchCount, setTabSwitchCount] = useState<number>(0);
+  const [antiCheatWarning, setAntiCheatWarning] = useState<string | null>(null);
+  const [proctorBanner, setProctorBanner] = useState<string | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(Boolean(typeof document !== 'undefined' && document.fullscreenElement));
+  const [zoomedImageUrl, setZoomedImageUrl] = useState<string | null>(null);
 
   const attemptId = `attempt_${student.id}_${exam.id}`;
   const timerIntervalRef = useRef<number | null>(null);
   const hasSubmittedRef = useRef<boolean>(false);
   const startTimeRef = useRef<number>(Date.now());
+  const deadlineRef = useRef<number>(Date.now() + (exam.durationMinutes || 15) * 60 * 1000);
+  const answersRef = useRef(answers);
+  const flaggedRef = useRef(flagged);
+  const currentIndexRef = useRef(currentIndex);
+  const tabSwitchCountRef = useRef(tabSwitchCount);
+  const lastViolationAtRef = useRef<number>(0);
+
+  useEffect(() => { answersRef.current = answers; }, [answers]);
+  useEffect(() => { flaggedRef.current = flagged; }, [flagged]);
+  useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
+  useEffect(() => { tabSwitchCountRef.current = tabSwitchCount; }, [tabSwitchCount]);
 
   // Attempt initialization & disconnection recovery
   useEffect(() => {
@@ -68,28 +90,41 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
         const now = Date.now();
 
         if (existingAttempt && existingAttempt.status === 'in_progress') {
-          // Restore saved answers and flags
           if (existingAttempt.savedAnswers) {
             setAnswers(existingAttempt.savedAnswers);
           }
           if (existingAttempt.flaggedQuestions) {
             setFlagged(existingAttempt.flaggedQuestions);
           }
+          if (typeof existingAttempt.tabSwitchCount === 'number') {
+            setTabSwitchCount(existingAttempt.tabSwitchCount);
+            tabSwitchCountRef.current = existingAttempt.tabSwitchCount;
+          }
+          if (
+            typeof existingAttempt.currentQuestionIndex === 'number' &&
+            existingAttempt.currentQuestionIndex >= 0 &&
+            existingAttempt.currentQuestionIndex < questions.length
+          ) {
+            setCurrentIndex(existingAttempt.currentQuestionIndex);
+          }
 
-          // Compute remaining time from recorded deadline
           const deadline = new Date(existingAttempt.endTime).getTime();
+          deadlineRef.current = deadline;
           const remaining = Math.max(0, Math.floor((deadline - now) / 1000));
           setSecondsRemaining(remaining);
           startTimeRef.current = new Date(existingAttempt.startTime).getTime();
         } else {
-          // Brand new attempt
           const durationMs = (exam.durationMinutes || 15) * 60 * 1000;
           const startIso = new Date(now).toISOString();
           const endIso = new Date(now + durationMs).toISOString();
+          deadlineRef.current = now + durationMs;
 
           const newAttempt: ExamAttempt = {
             id: attemptId,
             examId: exam.id,
+            examTitle: exam.title,
+            subjectName: exam.subjectName,
+            classGrade: exam.classGrade,
             studentId: student.id,
             studentAdmissionNumber: student.admissionNumber,
             studentName: student.fullName,
@@ -97,12 +132,18 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
             endTime: endIso,
             status: 'in_progress',
             savedAnswers: {},
+            tabSwitchCount: 0,
+            currentQuestionIndex: 0,
+            answeredCount: 0,
+            totalQuestions: questions.length,
             lastHeartbeatAt: startIso
           };
 
           await createExamAttempt(newAttempt);
           setAnswers({});
           setFlagged({});
+          setTabSwitchCount(0);
+          tabSwitchCountRef.current = 0;
           setSecondsRemaining((exam.durationMinutes || 15) * 60);
           startTimeRef.current = now;
         }
@@ -117,15 +158,25 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
     window.addEventListener('online', handleOnlineStatus);
     window.addEventListener('offline', handleOnlineStatus);
 
+    const handleFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+
     const handleTimerRestarted = (e: any) => {
       const detail = e?.detail;
       if (!detail || (detail.studentId === student.id && detail.examId === exam.id)) {
-        startTimeRef.current = Date.now();
+        const now = Date.now();
+        startTimeRef.current = now;
+        deadlineRef.current = now + (exam.durationMinutes || 15) * 60 * 1000;
         setAnswers({});
         setFlagged({});
+        setTabSwitchCount(0);
+        tabSwitchCountRef.current = 0;
         setSecondsRemaining((exam.durationMinutes || 15) * 60);
         hasSubmittedRef.current = false;
         setIsSubmitting(false);
+        setAntiCheatWarning(null);
       }
     };
     window.addEventListener('prime_cbt_timer_restarted', handleTimerRestarted);
@@ -138,6 +189,16 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
           if (event.data.studentId === student.id && event.data.examId === exam.id) {
             handleTimerRestarted({ detail: event.data });
           }
+        } else if (event.data?.type === 'TIMER_EXTENDED' && event.data.attemptId === attemptId && event.data.endTime) {
+          const newDeadline = new Date(event.data.endTime).getTime();
+          if (!isNaN(newDeadline) && newDeadline > deadlineRef.current) {
+            deadlineRef.current = newDeadline;
+            setSecondsRemaining(Math.max(1, Math.floor((newDeadline - Date.now()) / 1000)));
+            setProctorBanner(event.data.lastWarning || 'Exam timer extended by invigilator.');
+          }
+        } else if (event.data?.type === 'FORCE_SUBMIT_ATTEMPT' && event.data.attemptId === attemptId) {
+          setProctorBanner(event.data.reason || 'Examination ended by invigilator.');
+          handleFinalSubmit(true);
         }
       };
     } catch (e) {}
@@ -145,12 +206,13 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
     return () => {
       window.removeEventListener('online', handleOnlineStatus);
       window.removeEventListener('offline', handleOnlineStatus);
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
       window.removeEventListener('prime_cbt_timer_restarted', handleTimerRestarted);
       if (bc) {
         try { bc.close(); } catch (e) {}
       }
     };
-  }, [attemptId, exam, student]);
+  }, [attemptId, exam, student, questions.length]);
 
   // Final submission handler
   const handleFinalSubmit = useCallback(async (isAutoSubmit = false) => {
@@ -230,6 +292,107 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
     onCompleteExam(submissionData);
   }, [isSubmitting, answers, questions, exam, student, attemptId, onCompleteExam]);
 
+  // Live Firestore attempt listener (receives invigilator +5m timer extensions or force-submit across devices)
+  useEffect(() => {
+    let unsub: (() => void) | null = null;
+    try {
+      unsub = onSnapshot(
+        doc(db, 'attempts', attemptId),
+        snap => {
+          if (!snap.exists()) return;
+          const data = snap.data() as ExamAttempt;
+          if (data.endTime) {
+            const remoteDeadline = new Date(data.endTime).getTime();
+            if (!isNaN(remoteDeadline) && remoteDeadline > deadlineRef.current + 3000) {
+              deadlineRef.current = remoteDeadline;
+              setSecondsRemaining(Math.max(1, Math.floor((remoteDeadline - Date.now()) / 1000)));
+              setProctorBanner(data.lastWarning || 'Invigilator extended your exam timer.');
+            }
+          }
+          if (data.status === 'submitted' && !hasSubmittedRef.current && !isSubmitting) {
+            setProctorBanner(data.lastWarning || 'Examination force-submitted by Invigilator.');
+            handleFinalSubmit(true);
+          }
+        },
+        () => {}
+      );
+    } catch {}
+    return () => {
+      if (unsub) unsub();
+    };
+  }, [attemptId, handleFinalSubmit, isSubmitting]);
+
+  // Live 20s heartbeat for Live Exam Hall Monitor
+  useEffect(() => {
+    const hb = window.setInterval(() => {
+      if (hasSubmittedRef.current) return;
+      updateExamAttemptProgress(attemptId, answersRef.current, flaggedRef.current, {
+        tabSwitchCount: tabSwitchCountRef.current,
+        currentQuestionIndex: currentIndexRef.current,
+        answeredCount: Object.keys(answersRef.current).length,
+        totalQuestions: questions.length,
+        examTitle: exam.title,
+        subjectName: exam.subjectName,
+        classGrade: exam.classGrade
+      });
+    }, 20000);
+    return () => clearInterval(hb);
+  }, [attemptId, exam.classGrade, exam.subjectName, exam.title, questions.length]);
+
+  // Anti-malpractice tab-switch / focus-loss monitor
+  useEffect(() => {
+    if (!exam.enableAntiCheat) return;
+    const maxSwitches = Math.max(1, exam.maxTabSwitches || 3);
+
+    const recordViolation = (reasonLabel: string) => {
+      if (hasSubmittedRef.current || isSubmitting) return;
+      const now = Date.now();
+      if (now - lastViolationAtRef.current < 1200) return;
+      lastViolationAtRef.current = now;
+
+      const nextCount = tabSwitchCountRef.current + 1;
+      tabSwitchCountRef.current = nextCount;
+      setTabSwitchCount(nextCount);
+
+      const warningMsg = `${reasonLabel} detected (${nextCount}/${maxSwitches} allowed). Leaving the examination window repeatedly will auto-submit your paper.`;
+      updateExamAttemptProgress(attemptId, answersRef.current, flaggedRef.current, {
+        tabSwitchCount: nextCount,
+        currentQuestionIndex: currentIndexRef.current,
+        answeredCount: Object.keys(answersRef.current).length,
+        totalQuestions: questions.length,
+        lastWarning: `${reasonLabel} (${nextCount}/${maxSwitches})`,
+        examTitle: exam.title,
+        subjectName: exam.subjectName,
+        classGrade: exam.classGrade
+      });
+
+      if (nextCount >= maxSwitches) {
+        setAntiCheatWarning(`Maximum tab-switch limit (${maxSwitches}) reached. Your paper is being submitted automatically.`);
+        handleFinalSubmit(true);
+      } else {
+        setAntiCheatWarning(warningMsg);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        recordViolation('Tab switch / minimized window');
+      }
+    };
+    const handleWindowBlur = () => {
+      if (document.activeElement?.tagName !== 'IFRAME') {
+        recordViolation('Window focus lost');
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleWindowBlur);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
+  }, [attemptId, exam.classGrade, exam.enableAntiCheat, exam.maxTabSwitches, exam.subjectName, exam.title, handleFinalSubmit, isSubmitting, questions.length]);
+
   // Countdown timer effect
   useEffect(() => {
     timerIntervalRef.current = window.setInterval(() => {
@@ -274,23 +437,42 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [currentIndex, questions, answers, flagged, showConfirmModal]);
 
+  const buildProgressMeta = () => ({
+    tabSwitchCount: tabSwitchCountRef.current,
+    currentQuestionIndex: currentIndexRef.current,
+    answeredCount: Object.keys(answersRef.current).length,
+    totalQuestions: questions.length,
+    examTitle: exam.title,
+    subjectName: exam.subjectName,
+    classGrade: exam.classGrade
+  });
+
   const handleSelectOption = (qId: string, opt: 'A' | 'B' | 'C' | 'D') => {
     const nextAnswers = { ...answers, [qId]: opt };
+    answersRef.current = nextAnswers;
     setAnswers(nextAnswers);
-    updateExamAttemptProgress(attemptId, nextAnswers, flagged);
+    updateExamAttemptProgress(attemptId, nextAnswers, flagged, buildProgressMeta());
   };
 
   const handleClearAnswer = (qId: string) => {
     const nextAnswers = { ...answers };
     delete nextAnswers[qId];
+    answersRef.current = nextAnswers;
     setAnswers(nextAnswers);
-    updateExamAttemptProgress(attemptId, nextAnswers, flagged);
+    updateExamAttemptProgress(attemptId, nextAnswers, flagged, buildProgressMeta());
   };
 
   const toggleFlag = (qId: string) => {
     const nextFlagged = { ...flagged, [qId]: !flagged[qId] };
+    flaggedRef.current = nextFlagged;
     setFlagged(nextFlagged);
-    updateExamAttemptProgress(attemptId, answers, nextFlagged);
+    updateExamAttemptProgress(attemptId, answers, nextFlagged, buildProgressMeta());
+  };
+
+  const handleEnterFullscreen = () => {
+    try {
+      document.documentElement.requestFullscreen?.().catch(() => {});
+    } catch {}
   };
 
   const currentQ = questions[currentIndex] || questions[0];
@@ -374,6 +556,32 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
               </button>
             </div>
 
+            {exam.enableAntiCheat && (
+              <div
+                className={`hidden md:flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-bold ${
+                  tabSwitchCount > 0
+                    ? 'bg-rose-950 text-rose-200 border-rose-500'
+                    : 'bg-slate-800 text-emerald-300 border-slate-700'
+                }`}
+                title="Anti-malpractice proctoring active"
+              >
+                <ShieldAlert className="w-3.5 h-3.5" />
+                <span>Proctored ({tabSwitchCount}/{Math.max(1, exam.maxTabSwitches || 3)})</span>
+              </div>
+            )}
+
+            {exam.requireFullscreen && !isFullscreen && (
+              <button
+                type="button"
+                onClick={handleEnterFullscreen}
+                className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold border border-slate-700 cursor-pointer"
+                title="Switch to Fullscreen Exam Mode"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span>Fullscreen</span>
+              </button>
+            )}
+
             {/* Submit Button */}
             <button
               type="button"
@@ -386,6 +594,19 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
           </div>
         </div>
       </div>
+
+      {proctorBanner && (
+        <div className="bg-blue-900 text-white px-4 py-2 text-xs font-bold text-center flex items-center justify-center gap-3">
+          <span>{proctorBanner}</span>
+          <button
+            type="button"
+            onClick={() => setProctorBanner(null)}
+            className="text-blue-200 hover:text-white underline cursor-pointer"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Main CBT Question Area */}
       <div className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col lg:flex-row gap-6">
@@ -424,15 +645,38 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
 
           {/* Question Body */}
           <div className="p-6 sm:p-8 flex-1">
-            <div className={`text-slate-900 font-medium leading-relaxed mb-8 ${fontSize === 'large' ? 'text-lg' : 'text-base'}`}>
-              {currentQ ? currentQ.text : 'Loading question...'}
+            <div className={`text-slate-900 font-medium leading-relaxed mb-6 ${fontSize === 'large' ? 'text-lg' : 'text-base'}`}>
+              {currentQ ? <FormattedAcademicText text={currentQ.text} /> : 'Loading question...'}
             </div>
+
+            {currentQ?.imageUrl && (
+              <div className="mb-6">
+                <div className="inline-block relative group rounded-xl border border-slate-200 bg-slate-50 p-2">
+                  <img
+                    src={currentQ.imageUrl}
+                    alt={`Question ${currentIndex + 1} diagram`}
+                    onClick={() => setZoomedImageUrl(currentQ.imageUrl || null)}
+                    className="max-h-64 rounded-lg object-contain bg-white cursor-zoom-in"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setZoomedImageUrl(currentQ.imageUrl || null)}
+                    className="mt-2 inline-flex items-center gap-1 text-[11px] font-bold text-blue-900 hover:underline cursor-pointer"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5" />
+                    <span>Click diagram to enlarge</span>
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Options A - D */}
             <div className="space-y-3">
               {(['A', 'B', 'C', 'D'] as const).map((opt) => {
                 const optKey = `option${opt}` as keyof Question;
+                const optImgKey = `option${opt}Image` as keyof Question;
                 const text = currentQ ? (currentQ[optKey] as string) : '';
+                const optImage = currentQ ? (currentQ[optImgKey] as string | undefined) : undefined;
                 const isSelected = answers[qId] === opt;
 
                 return (
@@ -455,8 +699,17 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
                     >
                       {opt}
                     </div>
-                    <div className={`pt-1 text-slate-800 ${fontSize === 'large' ? 'text-base' : 'text-sm'} ${isSelected ? 'font-bold text-blue-950' : ''}`}>
-                      {text}
+                    <div className={`pt-1 text-slate-800 space-y-2 ${fontSize === 'large' ? 'text-base' : 'text-sm'} ${isSelected ? 'font-bold text-blue-950' : ''}`}>
+                      <div>
+                        <FormattedAcademicText text={text} />
+                      </div>
+                      {optImage && (
+                        <img
+                          src={optImage}
+                          alt={`Option ${opt} diagram`}
+                          className="max-h-28 rounded-lg border border-slate-200 object-contain bg-white"
+                        />
+                      )}
                     </div>
                   </button>
                 );
@@ -679,6 +932,67 @@ export const StudentExamScreen: React.FC<StudentExamScreenProps> = ({
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+      {/* Anti-Malpractice Tab-Switch Warning Modal */}
+      {antiCheatWarning && (
+        <div className="fixed inset-0 z-60 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border-2 border-rose-500 overflow-hidden">
+            <div className="bg-rose-700 text-white px-5 py-4 flex items-center gap-2.5">
+              <ShieldAlert className="w-5 h-5 text-amber-300 shrink-0" />
+              <h3 className="font-bold text-sm">Examination Integrity Warning</h3>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-800 font-medium leading-relaxed">{antiCheatWarning}</p>
+              <div className="flex justify-end gap-2">
+                {exam.requireFullscreen && !isFullscreen && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleEnterFullscreen();
+                      setAntiCheatWarning(null);
+                    }}
+                    className="px-4 py-2 text-xs font-bold bg-blue-900 text-white rounded-xl cursor-pointer"
+                  >
+                    Re-enter Fullscreen & Continue
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setAntiCheatWarning(null)}
+                  className="px-4 py-2 text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white rounded-xl cursor-pointer"
+                >
+                  Acknowledge & Return
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Diagram Lightbox Zoom Modal */}
+      {zoomedImageUrl && (
+        <div
+          className="fixed inset-0 z-60 bg-slate-950/85 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setZoomedImageUrl(null)}
+        >
+          <div
+            className="relative bg-white rounded-2xl p-3 max-w-4xl max-h-[90vh] overflow-auto shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setZoomedImageUrl(null)}
+              className="absolute top-3 right-3 p-1.5 rounded-full bg-slate-900 text-white hover:bg-slate-700 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <img
+              src={zoomedImageUrl}
+              alt="Enlarged question diagram"
+              className="max-w-full max-h-[82vh] object-contain mx-auto rounded-lg"
+            />
           </div>
         </div>
       )}

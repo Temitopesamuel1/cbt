@@ -12,7 +12,7 @@ import {
   ArrowRight
 } from 'lucide-react';
 import { Student, SchoolClass, generateStudentAccessCode } from '../../types/cbt';
-import { saveStudent } from '../../services/firebase';
+import { saveStudentsBatch } from '../../services/firebase';
 
 interface StudentBatchUploadModalProps {
   isOpen: boolean;
@@ -196,12 +196,8 @@ export const StudentBatchUploadModal: React.FC<StudentBatchUploadModalProps> = (
     setError(null);
 
     try {
-      // Save all students to database
-      for (const student of previewStudents) {
-        await saveStudent(student);
-      }
-
-      onUploadSuccess(previewStudents);
+      const res = await saveStudentsBatch(previewStudents);
+      onUploadSuccess(res.students);
       onClose();
     } catch (err) {
       console.error('Batch save students error:', err);

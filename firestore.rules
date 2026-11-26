@@ -1,94 +1,606 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Health check & connectivity
+
+    // Global Safety Net: Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // GLOBAL VALIDATION PRIMITIVES
+    // =========================================================================
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 180 && id.matches('^[a-zA-Z0-9_.-]+$');
+    }
+
+    function optStr(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function optNum(data, key) {
+      return !(key in data) || (data[key] is number);
+    }
+
+    function optBool(data, key) {
+      return !(key in data) || (data[key] is bool);
+    }
+
+    function optList(data, key, maxLen) {
+      return !(key in data) || (data[key] is list && data[key].size() <= maxLen);
+    }
+
+    function optMap(data, key) {
+      return !(key in data) || (data[key] is map);
+    }
+
+    function optNumOrStr(data, key, maxLen) {
+      return !(key in data) || (data[key] is number) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    // =========================================================================
+    // ENTITY SCHEMA VALIDATORS (Anti-Shadow-Field & Value-Poisoning Guards)
+    // =========================================================================
+
+    function isValidAdmin(data) {
+      return data.keys().hasOnly([
+          'id', 'email', 'fullName', 'role', 'passcode', 'status',
+          'isMainSuperAdmin', 'phoneNumber', 'assignedPermissions',
+          'createdAt', 'lastLoginAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['email', 'fullName', 'role', 'status'])
+        && optStr(data, 'id', 180)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 120
+        && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 140
+        && data.role in ['super_admin', 'admin', 'vice_principal', 'examination_officer']
+        && optStr(data, 'passcode', 100)
+        && data.status in ['active', 'suspended']
+        && optBool(data, 'isMainSuperAdmin')
+        && optStr(data, 'phoneNumber', 30)
+        && optList(data, 'assignedPermissions', 50)
+        && optStr(data, 'createdAt', 60)
+        && optStr(data, 'lastLoginAt', 60)
+        && optStr(data, 'updatedAt', 60);
+    }
+
+    function isValidTeacher(data) {
+      return data.keys().hasOnly([
+          'id', 'uniqueId', 'fullName', 'email', 'assignedSubjectIds',
+          'assignedSubjectNames', 'assignedClasses', 'role', 'status',
+          'createdAt', 'password', 'qualification', 'courseOfStudy',
+          'phoneNumber', 'avatarUrl', 'bio', 'updatedAt'
+        ])
+        && data.keys().hasAll(['uniqueId', 'fullName', 'email', 'status'])
+        && optStr(data, 'id', 180)
+        && data.uniqueId is string && data.uniqueId.size() >= 2 && data.uniqueId.size() <= 50
+        && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 140
+        && data.email is string && data.email.size() <= 120
+        && optList(data, 'assignedSubjectIds', 100)
+        && optList(data, 'assignedSubjectNames', 100)
+        && optList(data, 'assignedClasses', 100)
+        && (!('role' in data) || data.role in ['teacher', 'hod'])
+        && data.status in ['active', 'suspended']
+        && optStr(data, 'createdAt', 60)
+        && optStr(data, 'password', 120)
+        && optStr(data, 'qualification', 120)
+        && optStr(data, 'courseOfStudy', 120)
+        && optStr(data, 'phoneNumber', 30)
+        && optStr(data, 'avatarUrl', 400000)
+        && optStr(data, 'bio', 600)
+        && optStr(data, 'updatedAt', 60);
+    }
+
+    function isValidSchoolClass(data) {
+      return data.keys().hasOnly(['id', 'name', 'code', 'arm', 'academicSession', 'studentCount', 'updatedAt'])
+        && data.keys().hasAll(['name', 'code', 'academicSession'])
+        && optStr(data, 'id', 180)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.code is string && data.code.size() >= 1 && data.code.size() <= 30
+        && optStr(data, 'arm', 30)
+        && data.academicSession is string && data.academicSession.size() <= 30
+        && optNum(data, 'studentCount')
+        && optStr(data, 'updatedAt', 60);
+    }
+
+    function isValidSubject(data) {
+      return data.keys().hasOnly(['id', 'name', 'code', 'department', 'updatedAt'])
+        && data.keys().hasAll(['name', 'code', 'department'])
+        && optStr(data, 'id', 180)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.code is string && data.code.size() >= 1 && data.code.size() <= 30
+        && data.department is string && data.department.size() <= 60
+        && optStr(data, 'updatedAt', 60);
+    }
+
+    function isValidSchoolSettings(data) {
+      return data.keys().hasOnly([
+          'schoolName', 'address', 'location', 'motto', 'phone', 'email', 'website',
+          'principalName', 'examOfficerName', 'resultTitle', 'resultSubtitle', 'securityNotice',
+          'academicSession', 'currentTerm', 'passMarkPercentage', 'allowImmediateResultViewing',
+          'studentIdPrefix', 'announcementBanner', 'schoolLogo', 'isStudentPortalActive',
+          'isTeacherPortalActive', 'caWeights', 'gradingScale', 'enableAiAdvisor',
+          'enablePracticeCenter', 'enableChatHub', 'enableLessonGenerator',
+          'nextTermBegins', 'nextTermFees', 'updatedAt'
+        ])
+        && data.keys().hasAll(['schoolName', 'academicSession', 'currentTerm'])
+        && data.schoolName is string && data.schoolName.size() >= 1 && data.schoolName.size() <= 150
+        && optStr(data, 'address', 300)
+        && optStr(data, 'location', 150)
+        && optStr(data, 'motto', 250)
+        && optStr(data, 'phone', 60)
+        && optStr(data, 'email', 120)
+        && optStr(data, 'website', 120)
+        && optStr(data, 'principalName', 120)
+        && optStr(data, 'examOfficerName', 120)
+        && optStr(data, 'resultTitle', 200)
+        && optStr(data, 'resultSubtitle', 200)
+        && optStr(data, 'securityNotice', 500)
+        && data.academicSession is string && data.academicSession.size() <= 30
+        && data.currentTerm is string && data.currentTerm.size() <= 30
+        && optNum(data, 'passMarkPercentage')
+        && optBool(data, 'allowImmediateResultViewing')
+        && optStr(data, 'studentIdPrefix', 20)
+        && optStr(data, 'announcementBanner', 1000)
+        && optStr(data, 'schoolLogo', 500000)
+        && optBool(data, 'isStudentPortalActive')
+        && optBool(data, 'isTeacherPortalActive')
+        && optMap(data, 'caWeights')
+        && optList(data, 'gradingScale', 20)
+        && optBool(data, 'enableAiAdvisor')
+        && optBool(data, 'enablePracticeCenter')
+        && optBool(data, 'enableChatHub')
+        && optBool(data, 'enableLessonGenerator')
+        && optStr(data, 'nextTermBegins', 80)
+        && optStr(data, 'nextTermFees', 60)
+        && optStr(data, 'updatedAt', 60);
+    }
+
+    function isValidCloudSyncState(data) {
+      return data.keys().hasOnly([
+          'hasBootstrapped', 'deletedAdminIds', 'deletedExamIds', 'deletedStaffIds',
+          'deletedClassIds', 'deletedSubjectIds', 'deletedStudentIds',
+          'deletedSubmissionIds', 'deletedCaRecordIds', 'deletedLessonNoteIds', 'updatedAt'
+        ])
+        && optBool(data, 'hasBootstrapped')
+        && optList(data, 'deletedAdminIds', 2000)
+        && optList(data, 'deletedExamIds', 2000)
+        && optList(data, 'deletedStaffIds', 2000)
+        && optList(data, 'deletedClassIds', 2000)
+        && optList(data, 'deletedSubjectIds', 2000)
+        && optList(data, 'deletedStudentIds', 5000)
+        && optList(data, 'deletedSubmissionIds', 5000)
+        && optList(data, 'deletedCaRecordIds', 5000)
+        && optList(data, 'deletedLessonNoteIds', 5000)
+        && optStr(data, 'updatedAt', 60);
+    }
+
+    function isValidStudent(data) {
+      return data.keys().hasOnly([
+          'id', 'admissionNumber', 'firstName', 'surname', 'fullName',
+          'classGrade', 'classId', 'academicSession', 'status', 'registeredAt',
+          'accessCode', 'gender', 'passportUrl', 'email', 'password',
+          'phoneNumber', 'dateOfBirth', 'stateOfOrigin', 'department', 'bio',
+          'cgpa', 'resultWithheld', 'withheldSubjectIds', 'withheldReason', 'updatedAt'
+        ])
+        && data.keys().hasAll(['admissionNumber', 'firstName', 'surname', 'classGrade', 'status'])
+        && optStr(data, 'id', 180)
+        && data.admissionNumber is string && data.admissionNumber.size() >= 1 && data.admissionNumber.size() <= 60
+        && data.firstName is string && data.firstName.size() >= 1 && data.firstName.size() <= 60
+        && data.surname is string && data.surname.size() >= 1 && data.surname.size() <= 60
+        && optStr(data, 'fullName', 140)
+        && data.classGrade is string && data.classGrade.size() >= 1 && data.classGrade.size() <= 50
+        && optStr(data, 'classId', 60)
+        && optStr(data, 'academicSession', 30)
+        && data.status in ['active', 'suspended', 'graduated']
+        && optStr(data, 'registeredAt', 60)
+        && optStr(data, 'accessCode', 60)
+        && optStr(data, 'gender', 20)
+        && optStr(data, 'passportUrl', 400000)
+        && optStr(data, 'email', 120)
+        && optStr(data, 'password', 120)
+        && optStr(data, 'phoneNumber', 30)
+        && optStr(data, 'dateOfBirth', 30)
+        && optStr(data, 'stateOfOrigin', 60)
+        && optStr(data, 'department', 80)
+        && optStr(data, 'bio', 600)
+        && optNum(data, 'cgpa')
+        && optBool(data, 'resultWithheld')
+        && optList(data, 'withheldSubjectIds', 100)
+        && optStr(data, 'withheldReason', 300)
+        && optStr(data, 'updatedAt', 60);
+    }
+
+    function isValidExamination(data) {
+      return data.keys().hasOnly([
+          'id', 'title', 'subjectId', 'subjectName', 'classGrade', 'academicSession',
+          'term', 'examType', 'targetCaComponent', 'durationMinutes', 'totalQuestions',
+          'totalMarks', 'passingScore', 'instructions', 'teacherId', 'teacherName',
+          'status', 'shuffleQuestions', 'shuffleOptions', 'resultVisibility',
+          'startDate', 'endDate', 'enableAntiCheat', 'maxTabSwitches',
+          'requireFullscreen', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['title', 'subjectName', 'classGrade', 'durationMinutes', 'totalQuestions', 'teacherId', 'status'])
+        && optStr(data, 'id', 180)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && optStr(data, 'subjectId', 100)
+        && data.subjectName is string && data.subjectName.size() <= 100
+        && data.classGrade is string && data.classGrade.size() <= 50
+        && optStr(data, 'academicSession', 30)
+        && optStr(data, 'term', 30)
+        && optStr(data, 'examType', 50)
+        && (!('targetCaComponent' in data) || data.targetCaComponent in ['first_ca', 'second_ca', 'exam'])
+        && data.durationMinutes is number && data.durationMinutes >= 1 && data.durationMinutes <= 600
+        && data.totalQuestions is number && data.totalQuestions >= 0 && data.totalQuestions <= 500
+        && optNum(data, 'totalMarks')
+        && optNum(data, 'passingScore')
+        && optStr(data, 'instructions', 2500)
+        && data.teacherId is string && data.teacherId.size() <= 128
+        && optStr(data, 'teacherName', 140)
+        && data.status in ['draft', 'published', 'archived']
+        && optBool(data, 'shuffleQuestions')
+        && optBool(data, 'shuffleOptions')
+        && (!('resultVisibility' in data) || data.resultVisibility in ['immediate', 'teacher_publish'])
+        && optStr(data, 'startDate', 60)
+        && optStr(data, 'endDate', 60)
+        && optBool(data, 'enableAntiCheat')
+        && optNum(data, 'maxTabSwitches')
+        && optBool(data, 'requireFullscreen')
+        && optStr(data, 'createdAt', 60)
+        && optStr(data, 'updatedAt', 60);
+    }
+
+    function isValidQuestion(data) {
+      return data.keys().hasOnly([
+          'id', 'examId', 'questionNumber', 'text', 'imageUrl',
+          'optionA', 'optionB', 'optionC', 'optionD',
+          'optionAImage', 'optionBImage', 'optionCImage', 'optionDImage',
+          'correctOption', 'subject', 'topic', 'explanation'
+        ])
+        && data.keys().hasAll(['examId', 'questionNumber', 'text', 'optionA', 'optionB', 'optionC', 'optionD', 'correctOption'])
+        && optStr(data, 'id', 180)
+        && data.examId is string && data.examId.size() >= 1 && data.examId.size() <= 128
+        && data.questionNumber is number && data.questionNumber >= 1 && data.questionNumber <= 1000
+        && data.text is string && data.text.size() <= 5000
+        && optStr(data, 'imageUrl', 400000)
+        && data.optionA is string && data.optionA.size() <= 1000
+        && data.optionB is string && data.optionB.size() <= 1000
+        && data.optionC is string && data.optionC.size() <= 1000
+        && data.optionD is string && data.optionD.size() <= 1000
+        && optStr(data, 'optionAImage', 400000)
+        && optStr(data, 'optionBImage', 400000)
+        && optStr(data, 'optionCImage', 400000)
+        && optStr(data, 'optionDImage', 400000)
+        && data.correctOption in ['A', 'B', 'C', 'D']
+        && optStr(data, 'subject', 100)
+        && optStr(data, 'topic', 140)
+        && optStr(data, 'explanation', 2500);
+    }
+
+    function isValidExamAttempt(data) {
+      return data.keys().hasOnly([
+          'id', 'examId', 'examTitle', 'subjectName', 'classGrade',
+          'studentId', 'studentAdmissionNumber', 'studentName',
+          'startTime', 'endTime', 'status', 'savedAnswers', 'flaggedQuestions',
+          'tabSwitchCount', 'currentQuestionIndex', 'answeredCount',
+          'totalQuestions', 'lastWarning', 'lastHeartbeatAt', 'retakeGrantedAt'
+        ])
+        && data.keys().hasAll(['examId', 'studentId', 'startTime', 'endTime', 'status'])
+        && optStr(data, 'id', 180)
+        && data.examId is string && data.examId.size() <= 128
+        && optStr(data, 'examTitle', 160)
+        && optStr(data, 'subjectName', 100)
+        && optStr(data, 'classGrade', 50)
+        && data.studentId is string && data.studentId.size() <= 128
+        && optStr(data, 'studentAdmissionNumber', 60)
+        && optStr(data, 'studentName', 140)
+        && data.startTime is string && data.startTime.size() <= 60
+        && data.endTime is string && data.endTime.size() <= 60
+        && data.status in ['in_progress', 'submitted', 'timed_out', 'retake_granted']
+        && optMap(data, 'savedAnswers')
+        && optMap(data, 'flaggedQuestions')
+        && optNum(data, 'tabSwitchCount')
+        && optNum(data, 'currentQuestionIndex')
+        && optNum(data, 'answeredCount')
+        && optNum(data, 'totalQuestions')
+        && optStr(data, 'lastWarning', 300)
+        && optStr(data, 'lastHeartbeatAt', 60)
+        && optStr(data, 'retakeGrantedAt', 60);
+    }
+
+    function isValidSubmission(data) {
+      return data.keys().hasOnly([
+          'id', 'attemptId', 'examId', 'examTitle', 'subject', 'classGrade',
+          'academicSession', 'term', 'studentId', 'studentName', 'admissionNumber',
+          'score', 'totalQuestions', 'percentage', 'timeSpentSeconds', 'answers',
+          'submittedAt', 'detailedResults', 'topicAnalysis', 'aiRevisionRecommendations',
+          'attemptNumber', 'sittingLabel', 'targetCaComponent'
+        ])
+        && data.keys().hasAll(['examId', 'studentName', 'admissionNumber', 'score', 'totalQuestions', 'percentage', 'submittedAt'])
+        && optStr(data, 'id', 180)
+        && optStr(data, 'attemptId', 180)
+        && data.examId is string && data.examId.size() <= 128
+        && optStr(data, 'examTitle', 160)
+        && optStr(data, 'subject', 100)
+        && optStr(data, 'classGrade', 50)
+        && optStr(data, 'academicSession', 30)
+        && optStr(data, 'term', 30)
+        && optStr(data, 'studentId', 128)
+        && data.studentName is string && data.studentName.size() <= 140
+        && data.admissionNumber is string && data.admissionNumber.size() <= 60
+        && data.score is number && data.score >= 0
+        && data.totalQuestions is number && data.totalQuestions >= 1
+        && data.percentage is number && data.percentage >= 0 && data.percentage <= 100
+        && optNum(data, 'timeSpentSeconds')
+        && optMap(data, 'answers')
+        && data.submittedAt is string && data.submittedAt.size() <= 60
+        && optList(data, 'detailedResults', 500)
+        && optMap(data, 'topicAnalysis')
+        && optList(data, 'aiRevisionRecommendations', 50)
+        && optNum(data, 'attemptNumber')
+        && optStr(data, 'sittingLabel', 40)
+        && (!('targetCaComponent' in data) || data.targetCaComponent in ['first_ca', 'second_ca', 'exam']);
+    }
+
+    function isValidAssessmentRecord(data) {
+      return data.keys().hasOnly([
+          'id', 'studentId', 'studentName', 'admissionNumber', 'classGrade',
+          'subjectId', 'subjectName', 'academicSession', 'term',
+          'assignmentScore', 'firstCaScore', 'secondCaScore', 'projectScore',
+          'testScore', 'examScore', 'totalScore', 'grade', 'remark',
+          'classAverage', 'teacherSignature', 'cbtSubmissionId', 'examEntries',
+          'isAutoSynced', 'explicitlySaved', 'teacherComment', 'updatedAt'
+        ])
+        && data.keys().hasAll(['studentId', 'subjectId', 'classGrade', 'academicSession', 'term'])
+        && optStr(data, 'id', 180)
+        && data.studentId is string && data.studentId.size() <= 128
+        && optStr(data, 'studentName', 140)
+        && optStr(data, 'admissionNumber', 60)
+        && data.classGrade is string && data.classGrade.size() <= 50
+        && data.subjectId is string && data.subjectId.size() <= 100
+        && optStr(data, 'subjectName', 100)
+        && data.academicSession is string && data.academicSession.size() <= 30
+        && data.term is string && data.term.size() <= 30
+        && optNum(data, 'assignmentScore')
+        && optNum(data, 'firstCaScore')
+        && optNum(data, 'secondCaScore')
+        && optNum(data, 'projectScore')
+        && optNum(data, 'testScore')
+        && optNum(data, 'examScore')
+        && (!('totalScore' in data) || (data.totalScore is number && data.totalScore >= 0 && data.totalScore <= 100))
+        && optStr(data, 'grade', 10)
+        && optStr(data, 'remark', 60)
+        && optNum(data, 'classAverage')
+        && optStr(data, 'teacherSignature', 120)
+        && optStr(data, 'cbtSubmissionId', 128)
+        && optList(data, 'examEntries', 100)
+        && optBool(data, 'isAutoSynced')
+        && optBool(data, 'explicitlySaved')
+        && optStr(data, 'teacherComment', 500)
+        && optStr(data, 'updatedAt', 60);
+    }
+
+    function isValidTermReport(data) {
+      return data.keys().hasOnly([
+          'id', 'studentId', 'studentName', 'admissionNumber', 'classGrade',
+          'academicSession', 'term', 'age', 'house', 'sex', 'noInClass',
+          'department', 'category', 'classAverage', 'overallPosition',
+          'behaviours', 'skills', 'classTeacherRemarks', 'principalRemarks',
+          'nextTermBegins', 'nextTermFees', 'principalSignature',
+          'proprietressSignature', 'customLabels', 'updatedAt', 'updatedBy'
+        ])
+        && data.keys().hasAll(['studentId', 'academicSession', 'term'])
+        && optStr(data, 'id', 180)
+        && data.studentId is string && data.studentId.size() <= 128
+        && optStr(data, 'studentName', 140)
+        && optStr(data, 'admissionNumber', 60)
+        && optStr(data, 'classGrade', 50)
+        && data.academicSession is string && data.academicSession.size() <= 30
+        && data.term is string && data.term.size() <= 30
+        && optNumOrStr(data, 'age', 40)
+        && optStr(data, 'house', 40)
+        && optStr(data, 'sex', 20)
+        && optNumOrStr(data, 'noInClass', 30)
+        && optStr(data, 'department', 80)
+        && optStr(data, 'category', 80)
+        && optNumOrStr(data, 'classAverage', 40)
+        && optStr(data, 'overallPosition', 20)
+        && optMap(data, 'behaviours')
+        && optMap(data, 'skills')
+        && optStr(data, 'classTeacherRemarks', 500)
+        && optStr(data, 'principalRemarks', 500)
+        && optStr(data, 'nextTermBegins', 80)
+        && optStr(data, 'nextTermFees', 60)
+        && optStr(data, 'principalSignature', 140)
+        && optStr(data, 'proprietressSignature', 140)
+        && optMap(data, 'customLabels')
+        && optStr(data, 'updatedAt', 60)
+        && optStr(data, 'updatedBy', 140);
+    }
+
+    function isValidLessonNote(data) {
+      return data.keys().hasOnly([
+          'id', 'teacherId', 'teacherName', 'subjectName', 'classGrade',
+          'term', 'weekNumber', 'topic', 'subTopic', 'durationMinutes',
+          'behavioralObjectives', 'instructionalMaterials', 'previousKnowledge',
+          'content', 'visualsAndCharts', 'teacherActivities', 'studentActivities',
+          'evaluationQuestions', 'summary', 'assignment', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['teacherId', 'subjectName', 'classGrade', 'topic'])
+        && optStr(data, 'id', 180)
+        && data.teacherId is string && data.teacherId.size() <= 128
+        && optStr(data, 'teacherName', 140)
+        && data.subjectName is string && data.subjectName.size() <= 100
+        && data.classGrade is string && data.classGrade.size() <= 50
+        && optStr(data, 'term', 30)
+        && optNum(data, 'weekNumber')
+        && data.topic is string && data.topic.size() <= 250
+        && optStr(data, 'subTopic', 250)
+        && optNum(data, 'durationMinutes')
+        && optList(data, 'behavioralObjectives', 30)
+        && optList(data, 'instructionalMaterials', 30)
+        && optStr(data, 'previousKnowledge', 1500)
+        && optStr(data, 'content', 20000)
+        && optStr(data, 'visualsAndCharts', 6000)
+        && optList(data, 'teacherActivities', 30)
+        && optList(data, 'studentActivities', 30)
+        && optList(data, 'evaluationQuestions', 40)
+        && optStr(data, 'summary', 1500)
+        && optStr(data, 'assignment', 1500)
+        && optStr(data, 'createdAt', 60)
+        && optStr(data, 'updatedAt', 60);
+    }
+
+    function isValidChatMessage(data) {
+      return data.keys().hasOnly([
+          'id', 'channelId', 'channelName', 'channelType', 'senderId',
+          'senderName', 'senderRole', 'recipientId', 'recipientName',
+          'text', 'attachmentUrl', 'attachmentType', 'attachmentName',
+          'attachmentSize', 'voiceDurationSeconds', 'replyToId',
+          'replyToSender', 'replyToText', 'deleted', 'timestamp'
+        ])
+        && data.keys().hasAll(['channelId', 'channelType', 'senderId', 'senderName', 'senderRole', 'timestamp'])
+        && optStr(data, 'id', 180)
+        && data.channelId is string && data.channelId.size() >= 1 && data.channelId.size() <= 150
+        && optStr(data, 'channelName', 150)
+        && data.channelType in ['staff_group', 'student_class_group', 'campus_group', 'direct_teacher', 'direct_student', 'student_to_teacher']
+        && data.senderId is string && data.senderId.size() <= 128
+        && data.senderName is string && data.senderName.size() <= 140
+        && data.senderRole in ['super_admin', 'admin', 'teacher', 'student']
+        && optStr(data, 'recipientId', 128)
+        && optStr(data, 'recipientName', 140)
+        && optStr(data, 'text', 5000)
+        && optStr(data, 'attachmentUrl', 400000)
+        && (!('attachmentType' in data) || data.attachmentType in ['image', 'audio', 'document'])
+        && optStr(data, 'attachmentName', 200)
+        && optStr(data, 'attachmentSize', 40)
+        && optNum(data, 'voiceDurationSeconds')
+        && optStr(data, 'replyToId', 128)
+        && optStr(data, 'replyToSender', 140)
+        && optStr(data, 'replyToText', 500)
+        && optBool(data, 'deleted')
+        && data.timestamp is string && data.timestamp.size() <= 60;
+    }
+
+    // =========================================================================
+    // COLLECTION RULES
+    // =========================================================================
+
     match /test/connection {
-      allow read: if true;
+      allow get: if true;
+      allow list, write: if false;
     }
 
-    // Administrators collection
+    match /settings/school {
+      allow get: if true;
+      allow create, update: if isValidSchoolSettings(incoming());
+      allow delete: if false;
+    }
+
+    match /settings/syncState {
+      allow get: if true;
+      allow create, update: if isValidCloudSyncState(incoming());
+      allow delete: if false;
+    }
+
     match /admins/{adminId} {
-      allow read, write: if true;
+      allow get: if isValidId(adminId);
+      allow list: if true;
+      allow create, update: if isValidId(adminId) && isValidAdmin(incoming());
+      allow delete: if isValidId(adminId);
     }
 
-    // Teachers collection
     match /teachers/{teacherId} {
-      allow read, write: if true;
+      allow get: if isValidId(teacherId);
+      allow list: if true;
+      allow create, update: if isValidId(teacherId) && isValidTeacher(incoming());
+      allow delete: if isValidId(teacherId);
     }
 
-    // Classes & Subjects
     match /classes/{classId} {
-      allow read, write: if true;
+      allow get: if isValidId(classId);
+      allow list: if true;
+      allow create, update: if isValidId(classId) && isValidSchoolClass(incoming());
+      allow delete: if isValidId(classId);
     }
 
     match /subjects/{subjectId} {
-      allow read, write: if true;
+      allow get: if isValidId(subjectId);
+      allow list: if true;
+      allow create, update: if isValidId(subjectId) && isValidSubject(incoming());
+      allow delete: if isValidId(subjectId);
     }
 
-    match /settings/{settingId} {
-      allow read, write: if true;
-    }
-
-    // Students registration
     match /students/{studentId} {
-      allow read, write: if true;
+      allow get: if isValidId(studentId);
+      allow list: if true;
+      allow create, update: if isValidId(studentId) && isValidStudent(incoming());
+      allow delete: if isValidId(studentId);
     }
 
-    // Examinations collection
     match /examinations/{examId} {
-      allow read, write: if true;
+      allow get: if isValidId(examId);
+      allow list: if true;
+      allow create, update: if isValidId(examId) && isValidExamination(incoming());
+      allow delete: if isValidId(examId);
 
-      // Questions subcollection
       match /questions/{questionId} {
-        allow read, write: if true;
+        allow get: if isValidId(examId) && isValidId(questionId);
+        allow list: if isValidId(examId);
+        allow create: if isValidId(examId) && isValidId(questionId)
+          && isValidQuestion(incoming())
+          && (
+            exists(/databases/$(database)/documents/examinations/$(examId)) ||
+            existsAfter(/databases/$(database)/documents/examinations/$(examId))
+          );
+        allow update: if isValidId(examId) && isValidId(questionId) && isValidQuestion(incoming());
+        allow delete: if isValidId(examId) && isValidId(questionId);
       }
     }
 
-    // In-progress student attempts (disconnection recovery)
     match /attempts/{attemptId} {
-      allow read, write: if true;
+      allow get: if isValidId(attemptId);
+      allow list: if true;
+      allow create, update: if isValidId(attemptId) && isValidExamAttempt(incoming());
+      allow delete: if isValidId(attemptId);
     }
 
-    // Submissions collection
     match /submissions/{submissionId} {
-      allow read, write: if true;
+      allow get: if isValidId(submissionId);
+      allow list: if true;
+      allow create, update: if isValidId(submissionId) && isValidSubmission(incoming());
+      allow delete: if isValidId(submissionId);
     }
 
-    // Continuous Assessment & Report Sheet Records
     match /caRecords/{recordId} {
-      allow read, write: if true;
+      allow get: if isValidId(recordId);
+      allow list: if true;
+      allow create, update: if isValidId(recordId) && isValidAssessmentRecord(incoming());
+      allow delete: if isValidId(recordId);
     }
 
-    // End of Term Report Cards & Evaluation (Psychomotor, Skills, Remarks)
     match /termReports/{reportId} {
-      allow read, write: if true;
-    }
-
-    // Campus Messaging & Chats
-    match /messages/{messageId} {
-      allow read, write: if true;
-    }
-
-    match /chat_messages/{messageId} {
-      allow read, write: if true;
-    }
-
-    match /chat_channels/{channelId} {
-      allow read, write: if true;
-    }
-
-    // Lesson Notes Studio
-    match /lessonNotes/{noteId} {
-      allow read, write: if true;
+      allow get: if isValidId(reportId);
+      allow list: if true;
+      allow create, update: if isValidId(reportId) && isValidTermReport(incoming());
+      allow delete: if isValidId(reportId);
     }
 
     match /lesson_notes/{noteId} {
-      allow read, write: if true;
+      allow get: if isValidId(noteId);
+      allow list: if true;
+      allow create, update: if isValidId(noteId) && isValidLessonNote(incoming());
+      allow delete: if isValidId(noteId);
     }
 
-    // Default Deny Catch-All
-    match /{document=**} {
-      allow read, write: if false;
+    match /chat_messages/{messageId} {
+      allow get: if isValidId(messageId);
+      allow list: if true;
+      allow create, update: if isValidId(messageId) && isValidChatMessage(incoming());
+      allow delete: if isValidId(messageId);
     }
   }
 }

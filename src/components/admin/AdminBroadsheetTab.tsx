@@ -19,7 +19,8 @@ import {
   X,
   Printer,
   Eye,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Trophy
 } from 'lucide-react';
 import {
   Student,
@@ -40,7 +41,8 @@ import {
   formatTargetComponentLabel,
   generateStudentAccessCode,
   enrichSubmissionsWithOrdinals,
-  formatOrdinalExamLabel
+  formatOrdinalExamLabel,
+  buildCanonicalCaRecordId
 } from '../../types/cbt';
 import {
   fetchAssessmentRecords,
@@ -50,11 +52,15 @@ import {
   fetchSubmissions,
   fetchExaminations,
   saveStudent,
-  saveSchoolSettings
+  saveSchoolSettings,
+  stageCaRecordsLocalDraft,
+  flushDirtyCaRecords,
+  getDirtyCaRecordsCount
 } from '../../services/firebase';
 import { HwsOfficialResultSlip } from '../common/HwsOfficialResultSlip';
 import { StudentEvaluationEditorModal } from '../common/StudentEvaluationEditorModal';
 import { BatchResultSlipsModal } from '../common/BatchResultSlipsModal';
+import { MasterClassBroadsheetModal } from '../common/MasterClassBroadsheetModal';
 
 interface AdminBroadsheetTabProps {
   students: Student[];
@@ -85,6 +91,11 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
   );
 
   const [records, setRecords] = useState<Record<string, StudentAssessmentRecord>>({});
+  const recordsRef = useRef<Record<string, StudentAssessmentRecord>>({});
+  useEffect(() => {
+    recordsRef.current = records;
+  }, [records]);
+
   const [loading, setLoading] = useState(false);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [savedSuccessId, setSavedSuccessId] = useState<string | null>(null);
@@ -96,10 +107,16 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     hasUnsavedChangesRef.current = hasUnsavedChanges;
   }, [hasUnsavedChanges]);
 
+  const [syncState, setSyncState] = useState<'idle' | 'saving' | 'synced' | 'offline_queued'>('idle');
+  const dirtyStudentIdsRef = useRef<Set<string>>(new Set());
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isInternalSaveRef = useRef(false);
+
   // Official Slip Preview & Batch Printing Modals
   const [viewingOfficialSlipStudent, setViewingOfficialSlipStudent] = useState<Student | null>(null);
   const [editingEvaluationStudent, setEditingEvaluationStudent] = useState<Student | null>(null);
   const [showBatchModal, setShowBatchModal] = useState(false);
+  const [showMasterMatrixModal, setShowMasterMatrixModal] = useState(false);
   const [pendingDeleteTarget, setPendingDeleteTarget] = useState<{ studentId: string; studentName: string } | null>(null);
   const [deletingRowBusy, setDeletingRowBusy] = useState(false);
 
@@ -155,24 +172,137 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
   const currentSubject = subjects.find(s => s.id === selectedSubjectId);
   const currentSubjectName = currentSubject ? currentSubject.name : 'Subject';
 
-  // Load CA Records for this combination
+  // Flush dirty rows immediately to Firestore
+  const flushAutoSave = useCallback(async () => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    const dirtyIds = Array.from(dirtyStudentIdsRef.current);
+    if (dirtyIds.length === 0) return;
+
+    const currentMap = recordsRef.current;
+    const toCommit = dirtyIds
+      .map(id => currentMap[id])
+      .filter((r): r is StudentAssessmentRecord => Boolean(r));
+
+    if (toCommit.length === 0) {
+      dirtyStudentIdsRef.current.clear();
+      setHasUnsavedChanges(false);
+      return;
+    }
+
+    setSyncState('saving');
+    isInternalSaveRef.current = true;
+    try {
+      const res = await saveAssessmentBatch(toCommit);
+      toCommit.forEach(r => {
+        const latest = recordsRef.current[r.studentId];
+        if (!latest || latest.updatedAt === r.updatedAt) {
+          dirtyStudentIdsRef.current.delete(r.studentId);
+        }
+      });
+      const stillDirty = dirtyStudentIdsRef.current.size > 0;
+      setHasUnsavedChanges(stillDirty);
+      setSyncState(res.syncedToCloud ? (getDirtyCaRecordsCount() > 0 ? 'offline_queued' : 'synced') : 'offline_queued');
+    } catch {
+      setSyncState('offline_queued');
+    } finally {
+      setTimeout(() => {
+        isInternalSaveRef.current = false;
+      }, 250);
+    }
+  }, []);
+
+  const scheduleAutoSave = useCallback(() => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      flushAutoSave().catch(() => {});
+    }, 650);
+  }, [flushAutoSave]);
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (dirtyStudentIdsRef.current.size > 0) {
+        const currentMap = recordsRef.current;
+        const recs = Array.from(dirtyStudentIdsRef.current)
+          .map(id => currentMap[id])
+          .filter((r): r is StudentAssessmentRecord => Boolean(r));
+        if (recs.length > 0) {
+          stageCaRecordsLocalDraft(recs);
+        }
+        flushAutoSave().catch(() => {});
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') handlePageHide();
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handlePageHide);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      handlePageHide();
+    };
+  }, [flushAutoSave]);
+
+  // Merge enrolled class students with any custom added broadsheet entries
+  const classStudents = students.filter(s => {
+    const cleanClass = selectedClass.trim().toLowerCase().replace(/[\s\-_]/g, '');
+    const stuClass = (s.classGrade || '').trim().toLowerCase().replace(/[\s\-_]/g, '');
+    return stuClass === cleanClass || s.classGrade === selectedClass;
+  });
+
+  // Load CA Records for this combination (matching by subjectId OR subjectName, and studentId OR admissionNumber)
   const loadRecords = useCallback(async () => {
     if (!selectedSubjectId || !selectedClass) return;
     setLoading(true);
     try {
-      const fetched = await fetchAssessmentRecords(selectedSubjectId, selectedClass, academicSession, term);
+      const fetched = await fetchAssessmentRecords(
+        selectedSubjectId,
+        selectedClass,
+        academicSession,
+        term,
+        currentSubject?.name
+      );
+      const admToStudentId = new Map<string, string>();
+      classStudents.forEach(s => {
+        if (s.admissionNumber) {
+          admToStudentId.set(s.admissionNumber.trim().toUpperCase(), s.id);
+        }
+      });
+
       const map: Record<string, StudentAssessmentRecord> = {};
       fetched.forEach(r => {
-        map[r.studentId] = r;
+        const directStu = classStudents.find(s => s.id === r.studentId);
+        const mappedId = directStu
+          ? directStu.id
+          : admToStudentId.get((r.admissionNumber || '').trim().toUpperCase()) || r.studentId;
+        map[mappedId] = {
+          ...r,
+          studentId: mappedId
+        };
       });
       setRecords(map);
+      recordsRef.current = map;
+      dirtyStudentIdsRef.current.clear();
       setHasUnsavedChanges(false);
+      if (getDirtyCaRecordsCount() > 0) {
+        setSyncState('offline_queued');
+      } else if (fetched.length > 0) {
+        setSyncState('synced');
+      }
     } catch (err) {
       console.warn('Broadsheet load error:', err);
     } finally {
       setLoading(false);
     }
-  }, [selectedSubjectId, selectedClass, academicSession, term]);
+  }, [selectedSubjectId, selectedClass, academicSession, term, currentSubject?.name, classStudents]);
 
   useEffect(() => {
     loadRecords();
@@ -180,17 +310,26 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
 
   useEffect(() => {
     const handleExternalCaSync = () => {
-      if (!hasUnsavedChangesRef.current) {
+      if (!isInternalSaveRef.current && !hasUnsavedChangesRef.current) {
         loadRecords();
       }
     };
+    const handleOnline = () => {
+      flushDirtyCaRecords()
+        .then(res => {
+          if (res.syncedToCloud && res.remaining === 0) setSyncState('synced');
+          if (!isInternalSaveRef.current && !hasUnsavedChangesRef.current) loadRecords();
+        })
+        .catch(() => {});
+    };
     window.addEventListener('caRecordsUpdated', handleExternalCaSync);
+    window.addEventListener('online', handleOnline);
     let bc: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
       try {
         bc = new BroadcastChannel('prime_cbt_sync_channel');
         bc.onmessage = (event) => {
-          if (event.data?.type === 'CA_RECORDS_UPDATED' && !hasUnsavedChangesRef.current) {
+          if (event.data?.type === 'CA_RECORDS_UPDATED' && !isInternalSaveRef.current && !hasUnsavedChangesRef.current) {
             loadRecords();
           }
         };
@@ -200,12 +339,10 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     }
     return () => {
       window.removeEventListener('caRecordsUpdated', handleExternalCaSync);
+      window.removeEventListener('online', handleOnline);
       if (bc) bc.close();
     };
   }, [loadRecords]);
-
-  // Merge enrolled class students with any custom added broadsheet entries
-  const classStudents = students.filter(s => s.classGrade === selectedClass);
 
   // Compute all row entries: all class students PLUS any records for this class/subject that might not be in classStudents
   const combinedEntries = React.useMemo(() => {
@@ -259,93 +396,121 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     );
   });
 
-  // Handle score or text field change
+  // Handle score or text field change + immediate local stage + debounced auto-save
   const handleScoreChange = (
     studentId: string,
     field: 'assignmentScore' | 'projectScore' | 'testScore' | 'examScore' | 'teacherComment' | 'studentName' | 'admissionNumber',
     value: string
   ) => {
     setHasUnsavedChanges(true);
+    setSyncState('saving');
+    dirtyStudentIdsRef.current.add(studentId);
     const entry = combinedEntries.find(e => e.studentId === studentId);
     const existingName = entry ? entry.fullName : 'Student';
     const existingAdm = entry ? entry.admissionNumber : '';
 
-    setRecords(prev => {
-      const existing = prev[studentId] || {
-        id: `ca_${studentId}_${selectedSubjectId}_${academicSession.replace(/[^a-zA-Z0-9_-]/g, '_')}_${term.replace(/\s+/g, '')}`,
+    const prev = recordsRef.current;
+    const existing = prev[studentId] || {
+      id: buildCanonicalCaRecordId(
         studentId,
-        studentName: existingName,
-        admissionNumber: existingAdm,
-        classGrade: selectedClass,
-        subjectId: selectedSubjectId,
-        subjectName: currentSubjectName,
+        selectedSubjectId || currentSubjectName || 'sub',
         academicSession,
-        term,
-        assignmentScore: 0,
-        projectScore: 0,
-        testScore: 0,
-        examScore: 0,
-        totalScore: 0,
-        grade: 'F9',
-        remark: 'Fail',
-        teacherComment: '',
-        updatedAt: new Date().toISOString()
-      };
+        term
+      ),
+      studentId,
+      studentName: existingName,
+      admissionNumber: existingAdm,
+      classGrade: selectedClass,
+      subjectId: selectedSubjectId,
+      subjectName: currentSubjectName,
+      academicSession,
+      term,
+      assignmentScore: 0,
+      firstCaScore: 0,
+      secondCaScore: 0,
+      projectScore: 0,
+      testScore: 0,
+      examScore: 0,
+      totalScore: 0,
+      grade: 'F9',
+      remark: 'Fail',
+      teacherComment: '',
+      updatedAt: new Date().toISOString()
+    };
 
-      const updated = { ...existing };
+    const updated: StudentAssessmentRecord = { ...existing };
 
-      if (field === 'teacherComment') {
-        updated.teacherComment = value;
-      } else if (field === 'studentName') {
-        updated.studentName = value;
-      } else if (field === 'admissionNumber') {
-        updated.admissionNumber = value.toUpperCase();
-      } else {
-        const num = Math.max(0, Number(value) || 0);
-        const firstMax = caWeights.firstCaMax;
-        const secondMax = caWeights.secondCaMax;
-        if (field === 'assignmentScore') updated.assignmentScore = Math.min(caWeights.assignmentMax, num);
-        if (field === 'projectScore') {
-          const v = Math.min(secondMax, num);
-          updated.projectScore = v;
-          updated.secondCaScore = v;
-        }
-        if (field === 'testScore') {
-          const v = Math.min(firstMax, num);
-          updated.testScore = v;
-          updated.firstCaScore = v;
-        }
-        if (field === 'examScore') updated.examScore = Math.min(caWeights.examMax, num);
-
-        const firstCa = updated.firstCaScore ?? updated.testScore ?? 0;
-        const secondCa = updated.secondCaScore ?? updated.projectScore ?? 0;
-        updated.firstCaScore = firstCa;
-        updated.secondCaScore = secondCa;
-        updated.testScore = firstCa;
-        updated.projectScore = secondCa;
-        const total = (updated.assignmentScore || 0) + firstCa + secondCa + (updated.examScore || 0);
-        updated.totalScore = Math.min(100, total);
-        const gradeInfo = calculateGrade(updated.totalScore);
-        updated.grade = gradeInfo.grade;
-        updated.remark = gradeInfo.remark;
+    if (field === 'teacherComment') {
+      updated.teacherComment = value;
+    } else if (field === 'studentName') {
+      updated.studentName = value;
+    } else if (field === 'admissionNumber') {
+      updated.admissionNumber = value.toUpperCase();
+    } else {
+      const num = Math.max(0, Number(value) || 0);
+      const firstMax = caWeights.firstCaMax;
+      const secondMax = caWeights.secondCaMax;
+      if (field === 'assignmentScore') updated.assignmentScore = Math.min(caWeights.assignmentMax, num);
+      if (field === 'projectScore') {
+        const v = Math.min(secondMax, num);
+        updated.projectScore = v;
+        updated.secondCaScore = v;
       }
+      if (field === 'testScore') {
+        const v = Math.min(firstMax, num);
+        updated.testScore = v;
+        updated.firstCaScore = v;
+      }
+      if (field === 'examScore') updated.examScore = Math.min(caWeights.examMax, num);
 
-      updated.updatedAt = new Date().toISOString();
-      return { ...prev, [studentId]: updated };
-    });
+      const firstCa = updated.firstCaScore ?? updated.testScore ?? 0;
+      const secondCa = updated.secondCaScore ?? updated.projectScore ?? 0;
+      updated.firstCaScore = firstCa;
+      updated.secondCaScore = secondCa;
+      updated.testScore = firstCa;
+      updated.projectScore = secondCa;
+      const total = (updated.assignmentScore || 0) + firstCa + secondCa + (updated.examScore || 0);
+      updated.totalScore = Math.min(totalOverallMax || 100, total);
+      const gradeInfo = calculateGrade(updated.totalScore);
+      updated.grade = gradeInfo.grade;
+      updated.remark = gradeInfo.remark;
+    }
+
+    updated.explicitlySaved = true;
+    updated.updatedAt = new Date().toISOString();
+
+    const nextMap = { ...prev, [studentId]: updated };
+    recordsRef.current = nextMap;
+    setRecords(nextMap);
+
+    isInternalSaveRef.current = true;
+    stageCaRecordsLocalDraft([updated]);
+    setTimeout(() => {
+      isInternalSaveRef.current = false;
+    }, 150);
+    scheduleAutoSave();
   };
 
   // Save single student score row
   const handleSaveSingleRow = async (entry: { studentId: string; fullName: string; admissionNumber: string }) => {
     setSavingId(entry.studentId);
-    const rec = records[entry.studentId];
+    setSyncState('saving');
+    isInternalSaveRef.current = true;
+    const rec = recordsRef.current[entry.studentId];
     if (!rec) {
       setSavingId(null);
+      isInternalSaveRef.current = false;
       return;
     }
 
-    const sanitizedId = (rec.id || `ca_${entry.studentId}_${selectedSubjectId}_${academicSession}_${term}`)
-      .replace(/[^a-zA-Z0-9_-]/g, '_');
+    const sanitizedId = rec.id
+      ? rec.id.replace(/[^a-zA-Z0-9_-]/g, '_')
+      : buildCanonicalCaRecordId(
+          entry.studentId,
+          selectedSubjectId || currentSubjectName || 'sub',
+          academicSession,
+          term
+        );
 
     const toSave: StudentAssessmentRecord = {
       ...rec,
@@ -358,11 +523,14 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
       subjectName: currentSubjectName,
       academicSession,
       term,
+      explicitlySaved: true,
       updatedAt: new Date().toISOString()
     };
 
     try {
-      await saveAssessmentRecord(toSave);
+      recordsRef.current = { ...recordsRef.current, [entry.studentId]: toSave };
+      setRecords(recordsRef.current);
+      const res = await saveAssessmentRecord(toSave);
 
       // If student was already enrolled, update student full name or admission number if changed
       const enrolledStudent = students.find(s => s.id === entry.studentId);
@@ -376,14 +544,25 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
         if (onRefreshData) onRefreshData();
       }
 
+      dirtyStudentIdsRef.current.delete(entry.studentId);
+      const stillDirty = dirtyStudentIdsRef.current.size > 0;
       setSavedSuccessId(entry.studentId);
-      setHasUnsavedChanges(false);
+      setHasUnsavedChanges(stillDirty);
+      setSyncState(res.syncedToCloud ? 'synced' : 'offline_queued');
       setTimeout(() => setSavedSuccessId(null), 2500);
-      showNotification(`Saved marks for ${toSave.studentName} (${toSave.totalScore}/100 - ${toSave.grade})!`);
+      showNotification(
+        res.syncedToCloud
+          ? `Saved marks for ${toSave.studentName} (${toSave.totalScore}/${totalOverallMax} - ${toSave.grade}) to cloud!`
+          : `Saved marks for ${toSave.studentName} locally (queued for cloud sync).`
+      );
     } catch (err: any) {
+      setSyncState('offline_queued');
       showNotification('Failed to save assessment score to database.', 'error');
     } finally {
       setSavingId(null);
+      setTimeout(() => {
+        isInternalSaveRef.current = false;
+      }, 250);
     }
   };
 
@@ -395,15 +574,17 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
   const confirmDeleteRow = async () => {
     if (!pendingDeleteTarget) return;
     const { studentId, studentName } = pendingDeleteTarget;
-    const rec = records[studentId];
+    const rec = recordsRef.current[studentId];
     setDeletingRowBusy(true);
     try {
       if (rec && rec.id) {
         await deleteAssessmentRecord(rec.id);
       }
+      dirtyStudentIdsRef.current.delete(studentId);
       setRecords(prev => {
         const copy = { ...prev };
         delete copy[studentId];
+        recordsRef.current = copy;
         return copy;
       });
       showNotification(`Assessment marks for ${studentName} removed.`);
@@ -417,14 +598,27 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
 
   // Save all rows in batch
   const handleSaveAllRows = async () => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
     setSavingAll(true);
+    setSyncState('saving');
+    isInternalSaveRef.current = true;
     const toSaveList: StudentAssessmentRecord[] = [];
+    const nowIso = new Date().toISOString();
 
     for (const entry of combinedEntries) {
-      const rec = records[entry.studentId];
+      const rec = recordsRef.current[entry.studentId];
       if (rec) {
-        const sanitizedId = (rec.id || `ca_${entry.studentId}_${selectedSubjectId}_${academicSession}_${term}`)
-          .replace(/[^a-zA-Z0-9_-]/g, '_');
+        const sanitizedId = rec.id
+          ? rec.id.replace(/[^a-zA-Z0-9_-]/g, '_')
+          : buildCanonicalCaRecordId(
+              entry.studentId,
+              selectedSubjectId || currentSubjectName || 'sub',
+              academicSession,
+              term
+            );
         toSaveList.push({
           ...rec,
           id: sanitizedId,
@@ -436,19 +630,30 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
           subjectName: currentSubjectName,
           academicSession,
           term,
-          updatedAt: new Date().toISOString()
+          explicitlySaved: true,
+          updatedAt: nowIso
         });
       }
     }
 
     try {
-      await saveAssessmentBatch(toSaveList);
+      const res = await saveAssessmentBatch(toSaveList);
+      dirtyStudentIdsRef.current.clear();
       setHasUnsavedChanges(false);
-      showNotification(`Entire broadsheet (${toSaveList.length} student records) committed to database!`);
+      setSyncState(res.syncedToCloud ? 'synced' : 'offline_queued');
+      showNotification(
+        res.syncedToCloud
+          ? `Entire broadsheet (${toSaveList.length} student records) committed to cloud database!`
+          : `Saved ${toSaveList.length} records locally. Cloud sync will complete automatically when online.`
+      );
     } catch (err: any) {
+      setSyncState('offline_queued');
       showNotification('Could not save all records to database.', 'error');
     } finally {
       setSavingAll(false);
+      setTimeout(() => {
+        isInternalSaveRef.current = false;
+      }, 250);
     }
   };
 
@@ -523,7 +728,12 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
     const total = Math.min(100, asg + proj + tst + ex);
     const gradeInfo = calculateGrade(total);
 
-    const sanitizedId = `ca_${studentId}_${selectedSubjectId}_${academicSession}_${term}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const sanitizedId = buildCanonicalCaRecordId(
+      studentId,
+      selectedSubjectId || currentSubjectName || 'sub',
+      academicSession,
+      term
+    );
     const newRecord: StudentAssessmentRecord = {
       id: sanitizedId,
       studentId,
@@ -543,17 +753,28 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
       totalScore: total,
       grade: gradeInfo.grade,
       remark: gradeInfo.remark,
+      explicitlySaved: true,
       teacherComment: newEntryForm.teacherComment.trim(),
       updatedAt: new Date().toISOString()
     };
 
     try {
+      isInternalSaveRef.current = true;
       await saveAssessmentRecord(newRecord);
-      setRecords(prev => ({ ...prev, [studentId]: newRecord }));
+      setRecords(prev => {
+        const next = { ...prev, [studentId]: newRecord };
+        recordsRef.current = next;
+        return next;
+      });
       setShowAddEntryModal(false);
-      showNotification(`Added and saved score for ${studentName} (${total}/100)!`);
+      setSyncState('synced');
+      showNotification(`Added and saved score for ${studentName} (${total}/${totalOverallMax})!`);
     } catch (err) {
       showNotification('Failed to add entry to database.', 'error');
+    } finally {
+      setTimeout(() => {
+        isInternalSaveRef.current = false;
+      }, 250);
     }
   };
 
@@ -571,119 +792,138 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
 
       let filledCount = 0;
       const syncedColumns = new Set<string>();
+      const copy = { ...recordsRef.current };
+      const changedRecords: StudentAssessmentRecord[] = [];
 
-      setRecords(prev => {
-        const copy = { ...prev };
+      for (const entry of combinedEntries) {
+        const studentMatches = submissions
+          .filter(s => {
+            const matchStudent = s.studentId === entry.studentId || s.admissionNumber.toUpperCase() === entry.admissionNumber.toUpperCase();
+            const matchSubj = s.subject.trim().toLowerCase() === currentSubjectName.trim().toLowerCase();
+            return matchStudent && matchSubj;
+          })
+          .sort((a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime());
 
-        for (const entry of combinedEntries) {
-          const studentMatches = submissions
-            .filter(s => {
-              const matchStudent = s.studentId === entry.studentId || s.admissionNumber.toUpperCase() === entry.admissionNumber.toUpperCase();
-              const matchSubj = s.subject.trim().toLowerCase() === currentSubjectName.trim().toLowerCase();
-              return matchStudent && matchSubj;
-            })
-            .sort((a, b) => new Date(a.submittedAt || 0).getTime() - new Date(b.submittedAt || 0).getTime());
-
-          if (studentMatches.length > 0) {
-            filledCount++;
-            const existing = copy[entry.studentId] || {
-              id: `ca_${entry.studentId}_${selectedSubjectId}_${academicSession}_${term}`.replace(/[^a-zA-Z0-9_-]/g, '_'),
-              studentId: entry.studentId,
-              studentName: entry.fullName,
-              admissionNumber: entry.admissionNumber,
-              classGrade: selectedClass,
-              subjectId: selectedSubjectId,
-              subjectName: currentSubjectName,
+        if (studentMatches.length > 0) {
+          filledCount++;
+          const existing = copy[entry.studentId] || {
+            id: buildCanonicalCaRecordId(
+              entry.studentId,
+              selectedSubjectId || currentSubjectName || 'sub',
               academicSession,
-              term,
-              assignmentScore: 0,
-              firstCaScore: 0,
-              secondCaScore: 0,
-              projectScore: 0,
-              testScore: 0,
-              examScore: 0,
-              totalScore: 0,
-              grade: 'F9',
-              remark: 'Fail',
-              updatedAt: new Date().toISOString()
+              term
+            ),
+            studentId: entry.studentId,
+            studentName: entry.fullName,
+            admissionNumber: entry.admissionNumber,
+            classGrade: selectedClass,
+            subjectId: selectedSubjectId,
+            subjectName: currentSubjectName,
+            academicSession,
+            term,
+            assignmentScore: 0,
+            firstCaScore: 0,
+            secondCaScore: 0,
+            projectScore: 0,
+            testScore: 0,
+            examScore: 0,
+            totalScore: 0,
+            grade: 'F9',
+            remark: 'Fail',
+            updatedAt: new Date().toISOString()
+          };
+
+          const examEntries: CbtExamEntry[] = studentMatches.map((sub, i) => {
+            const targetComp: CbtTargetComponent = resolveExamTargetComponent(examById.get(sub.examId), sub);
+            const compMax = getTargetComponentMax(targetComp, caWeights);
+            const scaled = Math.min(compMax, Math.max(0, Math.round(((sub.percentage || 0) / 100) * compMax)));
+            syncedColumns.add(formatTargetComponentLabel(targetComp, caWeights));
+            return {
+              submissionId: sub.id || `sub_${sub.examId}_${i}`,
+              examId: sub.examId,
+              examTitle: sub.examTitle,
+              sittingNumber: i + 1,
+              sittingLabel: formatOrdinalExamLabel(i + 1),
+              targetCaComponent: targetComp,
+              rawScore: sub.score,
+              totalQuestions: sub.totalQuestions,
+              percentage: sub.percentage,
+              scaledScore: scaled,
+              examMax: compMax,
+              submittedAt: sub.submittedAt
             };
+          });
 
-            const examEntries: CbtExamEntry[] = studentMatches.map((sub, i) => {
-              const targetComp: CbtTargetComponent = resolveExamTargetComponent(examById.get(sub.examId), sub);
-              const compMax = getTargetComponentMax(targetComp, caWeights);
-              const scaled = Math.min(compMax, Math.max(0, Math.round(((sub.percentage || 0) / 100) * compMax)));
-              syncedColumns.add(formatTargetComponentLabel(targetComp, caWeights));
-              return {
-                submissionId: sub.id || `sub_${sub.examId}_${i}`,
-                examId: sub.examId,
-                examTitle: sub.examTitle,
-                sittingNumber: i + 1,
-                sittingLabel: formatOrdinalExamLabel(i + 1),
-                targetCaComponent: targetComp,
-                rawScore: sub.score,
-                totalQuestions: sub.totalQuestions,
-                percentage: sub.percentage,
-                scaledScore: scaled,
-                examMax: compMax,
-                submittedAt: sub.submittedAt
-              };
-            });
+          let firstCa = existing.firstCaScore ?? existing.testScore ?? 0;
+          let secondCa = existing.secondCaScore ?? existing.projectScore ?? 0;
+          let examVal = existing.examScore ?? 0;
 
-            let firstCa = existing.firstCaScore ?? existing.testScore ?? 0;
-            let secondCa = existing.secondCaScore ?? existing.projectScore ?? 0;
-            let examVal = existing.examScore ?? 0;
-
-            const firstCaEntries = examEntries.filter(e => e.targetCaComponent === 'first_ca');
-            if (firstCaEntries.length > 0) {
-              firstCa = Math.min(
-                caWeights.firstCaMax,
-                Math.round(firstCaEntries.reduce((sum, item) => sum + item.scaledScore, 0) / firstCaEntries.length)
-              );
-            }
-
-            const secondCaEntries = examEntries.filter(e => e.targetCaComponent === 'second_ca');
-            if (secondCaEntries.length > 0) {
-              secondCa = Math.min(
-                caWeights.secondCaMax,
-                Math.round(secondCaEntries.reduce((sum, item) => sum + item.scaledScore, 0) / secondCaEntries.length)
-              );
-            }
-
-            const termExamEntries = examEntries.filter(e => (e.targetCaComponent || 'exam') === 'exam');
-            if (termExamEntries.length > 0) {
-              examVal = Math.min(
-                caWeights.examMax,
-                Math.round(termExamEntries.reduce((sum, item) => sum + item.scaledScore, 0) / termExamEntries.length)
-              );
-            }
-
-            const total = Math.min(totalOverallMax, (existing.assignmentScore || 0) + firstCa + secondCa + examVal);
-            const pct = totalOverallMax > 0 ? Math.round((total / totalOverallMax) * 100) : total;
-            const gradeInfo = calculateGrade(pct);
-
-            copy[entry.studentId] = {
-              ...existing,
-              firstCaScore: firstCa,
-              secondCaScore: secondCa,
-              testScore: firstCa,
-              projectScore: secondCa,
-              examScore: examVal,
-              totalScore: total,
-              grade: gradeInfo.grade,
-              remark: gradeInfo.remark,
-              cbtSubmissionId: studentMatches[studentMatches.length - 1].id,
-              examEntries,
-              isAutoSynced: true,
-              updatedAt: new Date().toISOString()
-            };
+          const firstCaEntries = examEntries.filter(e => e.targetCaComponent === 'first_ca');
+          if (firstCaEntries.length > 0) {
+            firstCa = Math.min(
+              caWeights.firstCaMax,
+              Math.round(firstCaEntries.reduce((sum, item) => sum + item.scaledScore, 0) / firstCaEntries.length)
+            );
           }
-        }
-        return copy;
-      });
 
-      setHasUnsavedChanges(true);
+          const secondCaEntries = examEntries.filter(e => e.targetCaComponent === 'second_ca');
+          if (secondCaEntries.length > 0) {
+            secondCa = Math.min(
+              caWeights.secondCaMax,
+              Math.round(secondCaEntries.reduce((sum, item) => sum + item.scaledScore, 0) / secondCaEntries.length)
+            );
+          }
+
+          const termExamEntries = examEntries.filter(e => (e.targetCaComponent || 'exam') === 'exam');
+          if (termExamEntries.length > 0) {
+            examVal = Math.min(
+              caWeights.examMax,
+              Math.round(termExamEntries.reduce((sum, item) => sum + item.scaledScore, 0) / termExamEntries.length)
+            );
+          }
+
+          const total = Math.min(totalOverallMax, (existing.assignmentScore || 0) + firstCa + secondCa + examVal);
+          const pct = totalOverallMax > 0 ? Math.round((total / totalOverallMax) * 100) : total;
+          const gradeInfo = calculateGrade(pct);
+
+          const updatedRec: StudentAssessmentRecord = {
+            ...existing,
+            firstCaScore: firstCa,
+            secondCaScore: secondCa,
+            testScore: firstCa,
+            projectScore: secondCa,
+            examScore: examVal,
+            totalScore: total,
+            grade: gradeInfo.grade,
+            remark: gradeInfo.remark,
+            cbtSubmissionId: studentMatches[studentMatches.length - 1].id,
+            examEntries,
+            isAutoSynced: true,
+            explicitlySaved: true,
+            updatedAt: new Date().toISOString()
+          };
+          copy[entry.studentId] = updatedRec;
+          dirtyStudentIdsRef.current.add(entry.studentId);
+          changedRecords.push(updatedRec);
+        }
+      }
+
+      recordsRef.current = copy;
+      setRecords(copy);
+
+      if (changedRecords.length > 0) {
+        setHasUnsavedChanges(true);
+        setSyncState('saving');
+        isInternalSaveRef.current = true;
+        stageCaRecordsLocalDraft(changedRecords);
+        setTimeout(() => {
+          isInternalSaveRef.current = false;
+        }, 150);
+        scheduleAutoSave();
+      }
+
       const colSummary = Array.from(syncedColumns).join(', ') || caWeights.examLabel;
-      showNotification(`Auto-filled ${filledCount} student record(s) into ${colSummary} from CBT sittings! All fields remain editable.`);
+      showNotification(`Auto-filled ${filledCount} student record(s) into ${colSummary} and syncing to database!`);
     } catch {
       showNotification('Failed to auto-fill CBT scores.', 'error');
     } finally {
@@ -780,6 +1020,28 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {syncState === 'saving' && (
+            <span className="px-2.5 py-1 bg-amber-100 border border-amber-300 text-amber-900 text-xs font-bold rounded-lg animate-pulse">
+              Auto-saving...
+            </span>
+          )}
+          {syncState === 'synced' && !hasUnsavedChanges && (
+            <span className="px-2.5 py-1 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold rounded-lg flex items-center gap-1">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Saved to Cloud</span>
+            </span>
+          )}
+          {syncState === 'offline_queued' && (
+            <button
+              type="button"
+              onClick={() => flushDirtyCaRecords().then(r => { if (r.syncedToCloud) setSyncState('synced'); })}
+              className="px-2.5 py-1 bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold rounded-lg flex items-center gap-1 cursor-pointer hover:bg-amber-100"
+            >
+              <RefreshCw className="w-3 h-3 text-amber-700" />
+              <span>Saved Locally · Sync Pending</span>
+            </button>
+          )}
+
           <button
             onClick={handleOpenAddEntry}
             className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-sm transition-all"
@@ -804,6 +1066,15 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
           >
             <Download className="w-3.5 h-3.5" />
             <span>Export CSV</span>
+          </button>
+
+          <button
+            onClick={() => setShowMasterMatrixModal(true)}
+            className="px-3.5 py-2 bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs transition-all"
+            title="View all subjects together, compute class positions (1st, 2nd, 3rd...) and sync class averages to reports"
+          >
+            <Trophy className="w-3.5 h-3.5 text-amber-700" />
+            <span>Master Class Matrix & Ranks</span>
           </button>
 
           <button
@@ -1625,6 +1896,21 @@ export const AdminBroadsheetTab: React.FC<AdminBroadsheetTabProps> = ({
           initialClassFilter={selectedClass}
           academicSession={academicSession}
           term={term}
+        />
+      )}
+
+      {/* Class-Wide All-Subjects Master Broadsheet & Ranking Matrix */}
+      {showMasterMatrixModal && (
+        <MasterClassBroadsheetModal
+          isOpen={showMasterMatrixModal}
+          onClose={() => setShowMasterMatrixModal(false)}
+          classGrade={selectedClass}
+          academicSession={academicSession}
+          term={term}
+          students={students}
+          subjects={subjects}
+          settings={settings}
+          onSyncedNotice={(text, type) => showNotification(text, type)}
         />
       )}
 

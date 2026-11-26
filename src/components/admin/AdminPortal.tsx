@@ -29,7 +29,9 @@ import {
   Sliders,
   CheckSquare,
   Camera,
-  MessageSquare
+  MessageSquare,
+  Activity,
+  ArrowUpRight
 } from 'lucide-react';
 import {
   StaffMember,
@@ -65,7 +67,8 @@ import {
   fetchSubmissions,
   subscribeSubmissions,
   fetchAdmins,
-  subscribeAdmins
+  subscribeAdmins,
+  promoteStudentsClassBatch
 } from '../../services/firebase';
 import { compressImageFile } from '../../services/imageUtils';
 import { StaffSlipsModal } from './StaffSlipsModal';
@@ -79,6 +82,7 @@ import { AdminExamsTab } from './AdminExamsTab';
 import { AdminBroadsheetTab } from './AdminBroadsheetTab';
 import { AdminSubmissionsTab } from './AdminSubmissionsTab';
 import { AdminCommunicationsAuditTab } from './AdminCommunicationsAuditTab';
+import { LiveExamMonitorView } from '../common/LiveExamMonitorView';
 
 interface AdminPortalProps {
   adminEmail: string;
@@ -94,6 +98,7 @@ export type AdminTabType =
   | 'staff'
   | 'students'
   | 'exams'
+  | 'live-monitor'
   | 'broadsheet'
   | 'submissions'
   | 'communications';
@@ -149,6 +154,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [showBatchStudentModal, setShowBatchStudentModal] = useState(false);
   const [showStudentSlipsModal, setShowStudentSlipsModal] = useState(false);
+  const [showPromoteModal, setShowPromoteModal] = useState(false);
+  const [promoSourceClass, setPromoSourceClass] = useState('SS 1');
+  const [promoTargetClass, setPromoTargetClass] = useState('SS 2');
+  const [promoTargetSession, setPromoTargetSession] = useState('2026/2027');
+  const [promoTargetStatus, setPromoTargetStatus] = useState<'active' | 'graduated'>('active');
+  const [promoSelectedIds, setPromoSelectedIds] = useState<Set<string>>(new Set());
+  const [promotingBusy, setPromotingBusy] = useState(false);
 
   // Search & Filters for staff & student subtabs
   const [searchQuery, setSearchQuery] = useState('');
@@ -827,6 +839,18 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
           </button>
 
           <button
+            onClick={() => setActiveTab('live-monitor')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'live-monitor'
+                ? 'bg-emerald-700 text-white shadow-md'
+                : 'text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200'
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5 text-emerald-500" />
+            <span>Live Exam Monitor</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('broadsheet')}
             className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
               activeTab === 'broadsheet'
@@ -1116,6 +1140,37 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     <span>Print Student Slips</span>
                   </button>
                   <button
+                    onClick={() => {
+                      const defaultSource =
+                        selectedClassFilter !== 'All'
+                          ? selectedClassFilter
+                          : classes[0]?.code || 'SS 1';
+                      const classMatches = students.filter(
+                        s => s.classGrade.trim().toUpperCase() === defaultSource.trim().toUpperCase()
+                      );
+                      setPromoSourceClass(defaultSource);
+                      const nextClass =
+                        classes[classes.findIndex(c => c.code === defaultSource) + 1]?.code ||
+                        (defaultSource.includes('JSS 1')
+                          ? 'JSS 2'
+                          : defaultSource.includes('JSS 2')
+                          ? 'JSS 3'
+                          : defaultSource.includes('JSS 3')
+                          ? 'SS 1'
+                          : defaultSource.includes('SS 1')
+                          ? 'SS 2'
+                          : 'SS 3');
+                      setPromoTargetClass(nextClass);
+                      setPromoTargetStatus(defaultSource.includes('SS 3') ? 'graduated' : 'active');
+                      setPromoSelectedIds(new Set(classMatches.map(s => s.id)));
+                      setShowPromoteModal(true);
+                    }}
+                    className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ArrowUpRight className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Promote / Graduate Class</span>
+                  </button>
+                  <button
                     onClick={() => setShowBatchStudentModal(true)}
                     className="px-3.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
@@ -1272,6 +1327,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             currentTerm={settings.currentTerm}
             caWeights={settings.caWeights}
             onExamsUpdated={loadData}
+            showNotification={showNotification}
+          />
+        )}
+
+        {/* TAB 7B: LIVE EXAM MONITOR */}
+        {activeTab === 'live-monitor' && (
+          <LiveExamMonitorView
+            exams={exams}
+            students={students}
             showNotification={showNotification}
           />
         )}
@@ -2069,6 +2133,202 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   className="px-4 py-2 text-xs font-bold bg-rose-700 hover:bg-rose-800 text-white rounded-xl cursor-pointer"
                 >
                   {pendingConfirm.confirmLabel}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* End-of-Session Class Promotion / Graduation Modal */}
+      {showPromoteModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-2xl w-full shadow-2xl border border-slate-200 overflow-hidden my-6">
+            <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <ArrowUpRight className="w-5 h-5 text-emerald-400" />
+                <div>
+                  <h3 className="font-bold text-sm">End-of-Session Class Promotion & Graduation</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Bulk-promote selected candidates to the next class while preserving prior term history.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPromoteModal(false)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Source Class</label>
+                  <select
+                    value={promoSourceClass}
+                    onChange={(e) => {
+                      const src = e.target.value;
+                      setPromoSourceClass(src);
+                      const matches = students.filter(
+                        s => s.classGrade.trim().toUpperCase() === src.trim().toUpperCase()
+                      );
+                      setPromoSelectedIds(new Set(matches.map(s => s.id)));
+                    }}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold bg-slate-50"
+                  >
+                    {Array.from(new Set([...classes.map(c => c.code), ...students.map(s => s.classGrade)])).map(cls => (
+                      <option key={cls} value={cls}>
+                        {cls} ({students.filter(s => s.classGrade === cls).length} students)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Action / Target Status</label>
+                  <select
+                    value={promoTargetStatus}
+                    onChange={(e) => setPromoTargetStatus(e.target.value as 'active' | 'graduated')}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold bg-slate-50"
+                  >
+                    <option value="active">Promote to Next Class</option>
+                    <option value="graduated">Mark as Graduated (Alumni)</option>
+                  </select>
+                </div>
+
+                {promoTargetStatus === 'active' && (
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">Target Class</label>
+                    <select
+                      value={promoTargetClass}
+                      onChange={(e) => setPromoTargetClass(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold bg-slate-50"
+                    >
+                      {Array.from(new Set([...classes.map(c => c.code), 'JSS 1', 'JSS 2', 'JSS 3', 'SS 1', 'SS 2', 'SS 3'])).map(cls => (
+                        <option key={cls} value={cls}>{cls}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Target Academic Session</label>
+                  <input
+                    type="text"
+                    value={promoTargetSession}
+                    onChange={(e) => setPromoTargetSession(e.target.value)}
+                    placeholder="2026/2027"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl font-mono font-bold bg-slate-50"
+                  />
+                </div>
+              </div>
+
+              {(() => {
+                const sourceList = students.filter(
+                  s => s.classGrade.trim().toUpperCase() === promoSourceClass.trim().toUpperCase()
+                );
+                return (
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="bg-slate-50 px-3 py-2 border-b border-slate-200 flex items-center justify-between">
+                      <span className="font-bold text-slate-700">
+                        Candidates in {promoSourceClass} ({promoSelectedIds.size}/{sourceList.length} selected)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (promoSelectedIds.size === sourceList.length) {
+                            setPromoSelectedIds(new Set());
+                          } else {
+                            setPromoSelectedIds(new Set(sourceList.map(s => s.id)));
+                          }
+                        }}
+                        className="text-blue-800 font-bold hover:underline cursor-pointer"
+                      >
+                        {promoSelectedIds.size === sourceList.length ? 'Clear All' : 'Select All'}
+                      </button>
+                    </div>
+                    <div className="max-h-56 overflow-y-auto divide-y divide-slate-100">
+                      {sourceList.length === 0 ? (
+                        <div className="py-8 text-center text-slate-400">No students found in {promoSourceClass}.</div>
+                      ) : (
+                        sourceList.map(stu => {
+                          const checked = promoSelectedIds.has(stu.id);
+                          return (
+                            <label
+                              key={stu.id}
+                              className="flex items-center justify-between px-3 py-2 hover:bg-blue-50/40 cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2.5">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => {
+                                    setPromoSelectedIds(prev => {
+                                      const next = new Set(prev);
+                                      if (next.has(stu.id)) next.delete(stu.id);
+                                      else next.add(stu.id);
+                                      return next;
+                                    });
+                                  }}
+                                />
+                                <span className="font-bold text-slate-900">{stu.fullName}</span>
+                              </div>
+                              <span className="font-mono text-[11px] text-slate-500">
+                                {stu.admissionNumber} · {stu.academicSession}
+                              </span>
+                            </label>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowPromoteModal(false)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={promotingBusy || promoSelectedIds.size === 0}
+                  onClick={async () => {
+                    setPromotingBusy(true);
+                    try {
+                      const res = await promoteStudentsClassBatch(
+                        students,
+                        Array.from(promoSelectedIds),
+                        promoTargetClass,
+                        promoTargetSession.trim() || settings.academicSession,
+                        promoTargetStatus
+                      );
+                      await loadData();
+                      setShowPromoteModal(false);
+                      showNotification(
+                        promoTargetStatus === 'graduated'
+                          ? `Graduated ${res.promotedCount} student(s) successfully.`
+                          : `Promoted ${res.promotedCount} student(s) to ${promoTargetClass} (${promoTargetSession})!`
+                      );
+                    } catch {
+                      showNotification('Could not complete class promotion.', 'error');
+                    } finally {
+                      setPromotingBusy(false);
+                    }
+                  }}
+                  className="px-5 py-2.5 text-xs font-black bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl shadow-sm cursor-pointer disabled:opacity-40"
+                >
+                  {promotingBusy
+                    ? 'Processing...'
+                    : promoTargetStatus === 'graduated'
+                    ? `Graduate ${promoSelectedIds.size} Student(s)`
+                    : `Promote ${promoSelectedIds.size} Student(s) → ${promoTargetClass}`}
                 </button>
               </div>
             </div>
